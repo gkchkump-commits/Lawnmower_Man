@@ -119,7 +119,19 @@ const waitForSent = async (pred, timeout = 8000) => {
   }
 };
 
+// main.js serves the built renderer from <repo>/dist. On a fresh checkout (or in CI, where unit
+// tests run before `vite build`) it does not exist yet, so provide a stub page for the app://
+// wiring test and remove only what this file created.
+const distDir = path.resolve('dist');
+const created = { dir: false, index: false };
+
 beforeAll(async () => {
+  if (!fs.existsSync(path.join(distDir, 'index.html'))) {
+    created.dir = !fs.existsSync(distDir);
+    fs.mkdirSync(distDir, { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html><title>stub</title>');
+    created.index = true;
+  }
   m.userData.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-main-'));
   // Hermetic: never start a real voice server from a developer's voice/.venv.
   fs.writeFileSync(path.join(m.userData.dir, 'settings.json'), JSON.stringify({ voice: { enabled: false }, claude: { workdir: path.join(m.userData.dir, 'work') } }));
@@ -143,6 +155,8 @@ afterAll(async () => {
   delete process.env.LAWNMOWER_CLAUDE_CLI;
   delete process.env.LAWNMOWER_FORCE_CLICK_THROUGH;
   fs.rmSync(m.userData.dir, { recursive: true, force: true });
+  if (created.dir) fs.rmSync(distDir, { recursive: true, force: true });
+  else if (created.index) fs.rmSync(path.join(distDir, 'index.html'), { force: true });
 });
 
 describe('electron/main.js wiring', () => {

@@ -7,6 +7,8 @@ Binary layout (little endian, every block 4-byte aligned, offsets in head.json):
   cavity    uint8  x4   part (255 = mouth cavity), u, v, side (255 = upper); on the skin (part 0)
                         y = distance to the nearest gold curve / curveDistanceRange
   shell     uint8  x4   smoothed "outer shell" normal (n * 0.5 + 0.5), inner-mouth mask
+  extra     uint8  x4   neck (below the jaw line), seam closeness, seam side (1 = upper), unused
+                        (optional block: readers treat a missing one as zeros)
   index     uint16 or uint32 triangles
 """
 
@@ -26,7 +28,7 @@ def _u8(x):
     return np.clip(np.round(np.asarray(x, float) * 255), 0, 255).astype(np.uint8)
 
 
-def write_model(out_dir: Path, name: str, V, F, rig, aux, cav, shell, meta: dict):
+def write_model(out_dir: Path, name: str, V, F, rig, aux, cav, shell, meta: dict, extra=None):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     n = len(V)
@@ -40,6 +42,7 @@ def write_model(out_dir: Path, name: str, V, F, rig, aux, cav, shell, meta: dict
         ("aux", _u8(aux), {"type": "uint8", "components": 4, "normalized": True}),
         ("cavity", _u8(cav), {"type": "uint8", "components": 4, "normalized": True}),
         ("shell", _u8(shell), {"type": "uint8", "components": 4, "normalized": True}),
+        *([("extra", _u8(extra), {"type": "uint8", "components": 4, "normalized": True})] if extra is not None else []),
         ("index", np.asarray(F, itype).reshape(-1), {"type": "uint16" if itype == "<u2" else "uint32"}),
     ]
     buf = bytearray()

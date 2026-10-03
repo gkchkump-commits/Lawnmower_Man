@@ -123,3 +123,103 @@ def test_curve_chunks_cover_points_and_partition():
         assert 1 <= c["count"] <= 8
     # open curves taper to zero intensity at their ends
     assert pts[0, 3] == 0.0
+
+
+# --- look rework: lens-shaped mouth, seam fit, orbit loops, neck mask, measured eyes ----------
+
+def test_lens_profile_closes_the_corners():
+    from headbuild.rig import lens_profile
+    dx = np.linspace(-0.1, 0.1, 41)
+    w = lens_profile(dx, 0.08)
+    assert w[20] == pytest.approx(1.0)
+    assert lens_profile(0.08, 0.08) == pytest.approx(0.0)
+    assert (w >= 0).all() and (w <= 1).all()
+    half = w[20:]
+    assert (np.diff(half) <= 1e-12).all()                         # monotone toward the corner
+
+
+def test_seam_fit_recovers_a_symmetric_curve():
+    from headbuild.rig import seam_fit
+    x = np.linspace(-0.07, 0.07, 30)
+    y = -0.14 + 2.0 * x ** 2 - 50.0 * x ** 4
+    V = np.c_[x + 0.004, y, np.zeros_like(x)]
+    c = seam_fit(V, np.arange(len(x)), np.array([0.004, -0.14, 0.0]))
+    assert c == pytest.approx([-0.14, 2.0, -50.0], rel=1e-6, abs=1e-9)
+
+
+def test_orbit_loops_are_open_toward_the_nose_and_brightest_below():
+    from headbuild.curves import CX, ORBITS, orbit_points, orbit_profile
+    th = np.linspace(0, 2 * np.pi, 400)
+    p = orbit_profile(th)
+    assert p.max() <= 1.0 + 1e-9
+    bottom = p[np.argmin(np.abs(th - np.pi / 2))]
+    top = p[np.argmin(np.abs(th - 3 * np.pi / 2))]
+    assert bottom > 2 * top > 0
+    for name, _, c, r, tilt in ORBITS:
+        pts, prof = orbit_points(c, r, tilt, mirror=name.endswith("R"))
+        assert prof[0] < 0.05 and prof[-1] < 0.05                 # faded ends
+        w = pts[:, 0].max() - pts[:, 0].min()
+        h = pts[:, 1].max() - pts[:, 1].min()
+        assert w / h > 1.1                                         # an ellipse, wider than tall
+        gap = 0.5 * (pts[0] + pts[-1])
+        assert abs(gap[0] - CX) < abs(c[0] - CX)                   # the gap faces the nose
+    # the fade is longer over the top-inner part (where the glabella lines come down)
+    assert orbit_profile(np.array([5.6]))[0] < orbit_profile(np.array([0.6]))[0] + 0.2
+    assert orbit_profile(np.array([5.6]))[0] < 0.5 * orbit_profile(np.array([4.7]))[0]
+
+
+def test_neck_mask_follows_the_jaw_line_in_3d():
+    from headbuild.shading import neck_mask
+    # a jaw line on a cylinder of radius 0.3 around the z axis origin, lowest at the chin
+    a = np.linspace(-1.0, 1.0, 17)
+    J = np.c_[0.3 * np.sin(a), -0.3 + 0.15 * a ** 2, 0.3 * np.cos(a)]
+    pts = np.array([
+        [0.0, -0.25, 0.3],      # chin front, above the line -> face
+        [0.0, -0.36, 0.25],     # under the chin -> neck
+        [0.3 * np.sin(0.8), -0.3 + 0.15 * 0.64 + 0.03, 0.3 * np.cos(0.8)],   # side, above -> face
+        [0.3 * np.sin(0.8), -0.3 + 0.15 * 0.64 - 0.03, 0.3 * np.cos(0.8)],   # side, below -> neck
+    ])
+    m = neck_mask(pts, J)
+    assert m[0] == pytest.approx(0.0) and m[2] == pytest.approx(0.0)
+    assert m[1] == pytest.approx(1.0) and m[3] == pytest.approx(1.0)
+    # beyond the ends of the line it drops (below the ear lobe is jaw, not yet neck)
+    side = np.array([[0.3 * np.sin(1.4), -0.3 + 0.15 - 0.04, 0.3 * np.cos(1.4)]])
+    assert neck_mask(side, J)[0] < 0.5
+    assert neck_mask(side, J, drop=0.0)[0] == pytest.approx(1.0)
+
+
+def _glowing_eye(w=400, h=240, c=(200, 120), axes=(70, 30), pupil=8):
+    """A glowing almond (sclera 200) with a brighter iris disc (250) and a dark pupil."""
+    import cv2
+    img = np.zeros((h, w), np.uint8)
+    cv2.ellipse(img, c, axes, 0, 0, 360, 200, -1)
+    cv2.circle(img, c, 24, 250, -1)
+    cv2.circle(img, c, pupil, 60, -1)
+    return img.astype(np.float32)
+
+
+def test_measure_almond_finds_the_opening_around_a_dark_pupil():
+    from headbuild.reference import measure_almond
+    g = _glowing_eye()
+    a = measure_almond(g, (200, 120))
+    assert a is not None
+    assert a["upper"][0, 0] == pytest.approx(130, abs=4)
+    assert a["upper"][-1, 0] == pytest.approx(270, abs=4)
+    assert a["upper"][:, 1].min() == pytest.approx(90, abs=4)
+    assert a["lower"][:, 1].max() == pytest.approx(150, abs=4)
+    assert measure_almond(np.zeros_like(g), (200, 120)) is None
+
+
+def test_correct_eyes_moves_the_iris_landmarks_onto_the_pupil():
+    import cv2
+    from headbuild.reference import IRIS_CENTERS, correct_eyes
+    g = _glowing_eye(c=(200, 120))
+    img = cv2.cvtColor(g.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    L = np.zeros((478, 3))
+    L[:, :2] = [200, 400]                                          # far away: must not move
+    L[IRIS_CENTERS[0], :2] = [190, 140]                            # 20 px below the pupil
+    L[IRIS_CENTERS[1], :2] = [210, 400]
+    out, off = correct_eyes(img, L)
+    assert np.allclose(out[IRIS_CENTERS[0], :2], [200, 120], atol=3)
+    assert np.linalg.norm(off[0]) == pytest.approx(np.hypot(10, 20), abs=3)
+    assert np.allclose(out[0, :2], [200, 400], atol=0.5)

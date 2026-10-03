@@ -116,7 +116,56 @@ def ear_mask(V, centers=None):
     centers = ear_centers(V) if centers is None else centers
     m = np.zeros(len(V))
     for side, c in zip((-1, 1), centers):
-        d = np.linalg.norm((V - c) / np.array([0.05, 0.085, 0.06]), axis=1)
+        # the lateral-most vertices sit low on the ear: reach up to the top of the helix too
+        c = c + np.array([0.0, 0.02, 0.0])
+        d = np.linalg.norm((V - c) / np.array([0.05, 0.105, 0.06]), axis=1)
         lateral = np.clip((V[:, 0] * side - (abs(c[0]) - 0.06)) / 0.025, 0, 1)
         m = np.maximum(m, np.exp(-d ** 2 * 1.5) * lateral)
     return np.clip(m * 1.4, 0, 1)
+
+
+def neck_mask(V, jaw_line, axis_z=0.0, soft=0.012, lift=0.002, drop=0.12, drop_span=0.45):
+    """1 below the jaw line (the under-jaw and the neck), 0 on the face, smooth.
+
+    `jaw_line` is the 3D jaw contour (MediaPipe face-oval landmarks of the warped scan, one jaw
+    angle -> chin -> the other). Each vertex is compared with the jaw line's height at the same
+    azimuth around a vertical axis through z = `axis_z` (so the sides of the jaw that only show
+    when the head turns are classified correctly); beyond its ends the line drops by `drop`
+    over `drop_span` radians of azimuth (the mandible's lower border toward the jaw angle).
+    The reference's lower face is a narrow V: its neck and under-jaw are dark."""
+    J = np.asarray(jaw_line, float)
+    phi_j = np.arctan2(J[:, 0], J[:, 2] - axis_z)
+    o = np.argsort(phi_j)
+    phi = np.arctan2(V[:, 0], V[:, 2] - axis_z)
+    cy = np.interp(phi, phi_j[o], J[o, 1])
+    # beyond the contour's ends (its last points sit at ear-lobe height on the cheek) the
+    # mandible's lower border runs down and back to the angle of the jaw: lower the line there
+    lo, hi = phi_j[o][0], phi_j[o][-1]
+    beyond = np.clip(np.maximum(lo - phi, phi - hi) / drop_span, 0, 1)
+    cy = cy - drop * beyond * beyond * (3 - 2 * beyond)
+    t = np.clip((cy - V[:, 1] + lift) / soft, 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+# face-oval landmarks along the sides of the face (temple -> cheek -> jaw angle), per side
+SIDE_OVAL = ([162, 127, 234, 93, 132], [389, 356, 454, 323, 361])
+
+
+def ear_mask_screen(V, side_lines_screen, view, ear_z, margin=0.004, soft=0.014):
+    """Ears as seen from the front: whatever lies beyond the side of the face (the face-oval
+    contour, temple to jaw angle) at ear depth. The reference's ears are faint; this also catches
+    the parts of the ear (helix, root) the ellipsoid mask misses."""
+    S = view.project(V)
+    m = np.zeros(len(V))
+    for line, sgn in zip(side_lines_screen, (-1, 1)):
+        L = np.asarray(line, float)
+        o = np.argsort(L[:, 1])
+        ys, xs = L[o, 1], np.abs(L[o, 0])
+        cx = np.interp(S[:, 1], ys, xs)
+        beyond = np.clip((S[:, 0] * sgn - cx - margin) / soft, 0, 1)
+        band = np.clip((S[:, 1] - ys[0] + 0.01) / 0.02, 0, 1) * np.clip((ys[-1] + 0.03 - S[:, 1]) / 0.03, 0, 1)
+        on_side = (S[:, 0] * sgn > 0).astype(float)
+        m = np.maximum(m, beyond * band * on_side)
+    depth = np.exp(-((V[:, 2] - ear_z) / 0.08) ** 2)
+    m = m * depth
+    return m * m * (3 - 2 * m)

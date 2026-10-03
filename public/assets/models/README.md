@@ -9,8 +9,9 @@
 The geometry is derived from the **Lee Perry-Smith head scan, Infinite-Realities, CC BY 3.0**
 (<https://creativecommons.org/licenses/by/3.0/>), as distributed with the three.js examples
 (`LeePerrySmith.glb`). Modifications: cropped to head and neck, smoothed, subdivided, warped
-toward the proportions of the reference frame, ears tucked, mouth split along the lip seam,
-mouth cavity added, rig weights and shading attributes baked. The derived model is shared
+toward the proportions of the reference frame (jaw narrowed, brow ridge smoothed, lower lip
+thinned), ears tucked, mouth split along the lip seam, mouth cavity added, rig weights and
+shading attributes baked. The derived model is shared
 under the same CC BY 3.0 terms.
 
 Facial landmark positions used during the build were computed with MediaPipe Face Landmarker
@@ -29,10 +30,12 @@ and sizes in `head.json.layout`):
 | `aux` | uint8 ×4 | /255 | ambient occlusion, convexity (0.5 = flat), lips mask, ear mask |
 | `cavity` | uint8 ×4 | /255 | mouth-cavity flag, u (across), v (depth), side (1 = upper) |
 | `shell` | uint8 ×4 | /255 | smoothed "outer shell" normal ×0.5+0.5, inner-mouth mask |
+| `extra` | uint8 ×4 | /255 | neck mask (below the jaw line), lip-seam closeness, seam side (1 = upper), unused — *optional*: older models without it decode as zeros |
 | `index` | uint16/uint32 | triangles | skin first, then the (double-sided) mouth cavity |
 
 Metadata: camera (fov 12°, view 1 unit tall at z = 0, same framing as the relief head), rig
-anchors (jaw hinge, head pivot, mouth), the two eyes (aperture frame + lid curves + eyeball),
+anchors (jaw hinge, head pivot, mouth, `seamFit` = rest lip seam y(dx) = c0 + c2·dx² + c4·dx⁴,
+optional), the two eyes (aperture frame + lid curves + eyeball),
 the gold contour curves (polylines + bounding chunks), the rest-pose silhouette (`outline`, for
 hit testing and the particle aura) and particle anchors.
 

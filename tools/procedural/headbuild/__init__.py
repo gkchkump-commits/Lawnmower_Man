@@ -9,4 +9,4 @@ World units match the relief head: the reference plate is 1 unit tall, x right, 
 the camera; screen positions are what a perspective camera at (0, 0, CAMERA_DIST) sees.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

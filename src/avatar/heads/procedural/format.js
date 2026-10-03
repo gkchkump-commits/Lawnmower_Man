@@ -34,6 +34,8 @@ export const RIG_CHANNELS = /** @type {const} */ ([
  * @property {Uint8Array} aux           ao, convexity (128 = flat), lips, ear (0..255)
  * @property {Uint8Array} cavity        part, u, v, side (0..255); skin: y = curve distance / curveDistanceRange
  * @property {Uint8Array} shell         smoothed outer-shell normal * 0.5 + 0.5, inner-mouth mask (0..255)
+ * @property {Uint8Array} extra         neck (below the jaw line), seam closeness, seam side (1 = upper), unused
+ *                                      (0..255; optional block, all zeros for older models)
  * @property {Uint16Array|Uint32Array} index
  * @property {Float32Array} curvePoints x, y, z, intensity per point
  * @property {{start:number, count:number, center:number[], radius:number}[]} curveChunks
@@ -62,6 +64,10 @@ export function validateMeta(m) {
     if (!b || !Number.isInteger(b.offset) || b.offset % 4 || !Number.isInteger(b.byteLength)) errs.push(`layout.${k} missing or misaligned`);
   }
   if (L.position && (!isVec(L.position.min, 3) || !isVec(L.position.max, 3))) errs.push('layout.position.min/max missing');
+  // optional blocks (newer builds)
+  if (L.extra !== undefined && (!Number.isInteger(L.extra?.offset) || L.extra.offset % 4 || !Number.isInteger(L.extra?.byteLength))) {
+    errs.push('layout.extra misaligned');
+  }
   if (L.rig && L.rig.components !== RIG_CHANNELS.length) errs.push(`rig must have ${RIG_CHANNELS.length} channels`);
   if (!m.buffer || typeof m.buffer.uri !== 'string' || /[\\/]|\.\./.test(m.buffer.uri)) errs.push('buffer.uri must be a plain file name');
   if (!Array.isArray(m.eyes) || m.eyes.length !== 2) errs.push('two eyes expected');
@@ -144,6 +150,7 @@ export function decodeModel(meta, buffer) {
     aux: view('aux', Uint8Array, n * 4),
     cavity: view('cavity', Uint8Array, n * 4),
     shell: view('shell', Uint8Array, n * 4),
+    extra: L.extra ? view('extra', Uint8Array, n * 4) : new Uint8Array(n * 4),
     index,
     curvePoints: Float32Array.from(meta.curves.points),
     curveChunks: meta.curves.chunks,

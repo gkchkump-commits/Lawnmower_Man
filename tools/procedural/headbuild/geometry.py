@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import mesh_ops as mo
-from .landmarks import (EYE_L_LOWER, EYE_L_UPPER, EYE_R_LOWER, EYE_R_UPPER, LIP_INNER_LOWER,
+from .landmarks import (EYE_L_LOWER, EYE_L_UPPER, EYE_R_LOWER, EYE_R_UPPER, JAW_OVAL, LIP_INNER_LOWER,
                         LIP_INNER_UPPER, LM, LandmarkCache)
 from .raster import OrthoView, ScreenView, render_shaded
 from .raycast import Caster
@@ -18,6 +18,11 @@ from .warp import Controls, rbf_warp
 FOV_DEG = 12.0
 CAMERA_DIST = 0.5 / np.tan(np.radians(FOV_DEG / 2))
 NECK_CUT_Y = -0.45         # world y below which the scan (shoulders) is removed
+# fold-over guard of the sparse warp: the displacement field's steepest gradient (< 1 = no fold)
+SPARSE_MAX_GRAD = 0.8
+# the renderer's edge glow (rim lines + halo shell) reaches ~10 px beyond the surface on the
+# 1168 px plate: the geometric silhouette sits that much inside the reference's visible outline
+SIL_INSET = 0.008
 
 
 @dataclass
@@ -144,8 +149,10 @@ def warp_to_reference(V, F, lm, ref: ReferenceProfile, view: ScreenView, amount=
     gap_ref = ref.lm(LIP_INNER_LOWER[1:-1]) - ref.lm(LIP_INNER_UPPER[1:-1])   # (<0: open mouth)
     feats = [
         # (landmark ids on the source, target ids on the reference, sigma, extra screen offset)
-        ([33], [33], 0.045), ([133], [133], 0.04), ([362], [362], 0.04), ([263], [263], 0.045),
-        ([159, 145], [159, 145], 0.035), ([386, 374], [386, 374], 0.035),
+        # (the eye controls are broad: the reference eyes sit ~25 px higher than the scan's, see
+        # reference.correct_eyes, and a narrow kernel would make the fold guard damp everything)
+        ([33], [33], 0.055), ([133], [133], 0.05), ([362], [362], 0.05), ([263], [263], 0.055),
+        ([159, 145], [159, 145], 0.045), ([386, 374], [386, 374], 0.045),
         ([70], [70], 0.05), ([105], [105], 0.05), ([107], [107], 0.05),
         ([300], [300], 0.05), ([334], [334], 0.05), ([336], [336], 0.05),
         ([1], [1], 0.05), ([2], [2], 0.04), ([98], [98], 0.035), ([327], [327], 0.035),
@@ -173,7 +180,7 @@ def warp_to_reference(V, F, lm, ref: ReferenceProfile, view: ScreenView, amount=
         if ear_lo < y < ear_hi:
             continue
         row = int(np.argmin(np.abs(ref_rows_y - y)))
-        hw = ref.half_width_px[row] / ref.height
+        hw = ref.half_width_px[row] / ref.height - SIL_INSET
         if y < -0.31:
             # below the chin the reference neck fades out: keep it a slender cylinder
             hw = neck_hw if neck_hw is not None else 0.155
@@ -193,7 +200,7 @@ def warp_to_reference(V, F, lm, ref: ReferenceProfile, view: ScreenView, amount=
             ctrl.add(V[j], screen_disp(V[j], tgt, (1, 0)), 0.09, False, f"sil{y:.2f}{side:+d}")
     # crown and chin
     j = np.argmax(S[:, 1])
-    ctrl.add(V[j], screen_disp(V[j], [S[j, 0], ref.to_screen([[0, ref.top_px]])[0, 1]], (0, 1)), 0.1, False, "crown")
+    ctrl.add(V[j], screen_disp(V[j], [S[j, 0], ref.to_screen([[0, ref.top_px]])[0, 1] - SIL_INSET], (0, 1)), 0.1, False, "crown")
     chin_band = (np.abs(S[:, 0]) < 0.03) & (V[:, 2] > np.percentile(V[:, 2], 70)) & (S[:, 1] < lm[17, 1])
     jc = np.where(chin_band)[0]
     face_below_lip = jc[S[jc, 1] > lm[152, 1] - 0.06]
@@ -202,9 +209,9 @@ def warp_to_reference(V, F, lm, ref: ReferenceProfile, view: ScreenView, amount=
 
     z_face = float(np.percentile(V[:, 2], 99))
     z_ear = float(lm[[234, 454], 2].mean()) - 0.02
-    V2, diag = rbf_warp(V, ctrl, z_face=z_face, z_ear=z_ear)
+    V2, diag = rbf_warp(V, ctrl, z_face=z_face, z_ear=z_ear, max_grad=SPARSE_MAX_GRAD)
     # landmarks ride along (same field)
-    lm2, _ = rbf_warp(lm, ctrl, z_face=z_face, z_ear=z_ear)
+    lm2, _ = rbf_warp(lm, ctrl, z_face=z_face, z_ear=z_ear, max_grad=SPARSE_MAX_GRAD)
     if diag["scale"] < 1:
         lm2 = lm + (lm2 - lm) * diag["scale"]
     diag["controls"] = len(ctrl.points)
@@ -237,6 +244,90 @@ def dense_refine(V, lm, ref: ReferenceProfile, view: ScreenView, gap_ref, z_face
     return V2, lm2, info
 
 
+def _smooth_step(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def jaw_taper_scale(lm, ref: ReferenceProfile, view: ScreenView, lo=0.55):
+    """Per screen row (top -> bottom): the horizontal scale that brings the scan's jaw contour
+    (its MediaPipe face oval) onto the reference's narrower, V-shaped lower face."""
+    if not len(ref.jaw_rows_px):
+        return None
+    S = view.project(lm[JAW_OVAL])
+    rows = ref.to_screen(np.c_[np.zeros_like(ref.jaw_rows_px), ref.jaw_rows_px])[:, 1]
+    hw_ref = ref.jaw_half_px / ref.height
+    mid = len(JAW_OVAL) // 2
+    scale = np.ones(len(rows))
+    for k, y in enumerate(rows):
+        xs = []
+        for side in (S[:mid + 1], S[mid:]):
+            o = np.argsort(side[:, 1])
+            ys, xx = side[o, 1], np.abs(side[o, 0])
+            if ys[0] <= y <= ys[-1]:
+                xs.append(np.interp(y, ys, xx))
+        if len(xs) == 2 and min(xs) > 0.03:
+            scale[k] = np.clip(hw_ref[k] / np.mean(xs), lo, 1.0)
+        elif k:
+            scale[k] = scale[k - 1]
+    return rows, scale
+
+
+def taper_jaw(V, lm, ref: ReferenceProfile, view: ScreenView):
+    """Narrow the jaw toward the reference (an androgynous V-shaped lower face): a horizontal
+    squeeze per screen row, applied to the face in front of the jaw contour only (the contour
+    landmarks carry its depth), so the neck behind keeps its width. Returns (V, lm, info)."""
+    prof = jaw_taper_scale(lm, ref, view)
+    if prof is None:
+        return V, lm, {"jawTaper": None}
+    rows, scale = prof
+    top = view.project(lm[[61, 291]])[:, 1].mean() - 0.01      # just below the mouth corners
+    J = lm[JAW_OVAL]
+    oj = np.argsort(J[:, 1])
+
+    def squeeze(P):
+        S = view.project(P)
+        s = np.interp(S[:, 1], rows[::-1], scale[::-1], left=scale[-1], right=1.0)
+        wy = _smooth_step(top, top - 0.035, S[:, 1])
+        zc = np.interp(P[:, 1], J[oj, 1], J[oj, 2])
+        wz = _smooth_step(zc - 0.08, zc - 0.01, P[:, 2])
+        out = P.copy()
+        out[:, 0] *= 1.0 - (1.0 - s) * wy * wz
+        return out
+
+    return squeeze(V), squeeze(lm), {"jawTaper": {"minScale": round(float(scale.min()), 3), "rows": int(len(rows))}}
+
+
+def soften_features(V, F, lm, brow=0.85, lower_lip=0.0085):
+    """Slimmer, more androgynous features than the scan: a smoother brow ridge, and a thinner
+    lower lip (its border pulled up toward the mouth line; the chin below follows smoothly).
+    The landmarks ride along. Returns (V, lm)."""
+    eye_y = 0.5 * (lm[LM["eyeL_out"], 1] + lm[LM["eyeR_out"], 1])
+    zf = float(np.percentile(V[:, 2], 99))
+    # brow ridge: local Taubin smoothing over the band above the eyes (front of the face)
+    band = _smooth_step(eye_y + 0.015, eye_y + 0.04, V[:, 1]) * _smooth_step(eye_y + 0.13, eye_y + 0.085, V[:, 1])
+    band *= _smooth_step(zf - 0.16, zf - 0.09, V[:, 2]) * _smooth_step(0.2, 0.14, np.abs(V[:, 0]))
+    Vs = mo.taubin(V, F, iterations=10, strength=band * brow)
+    d = Vs - V
+
+    def lip_field(P):
+        mc = 0.5 * (lm[LIP_INNER_UPPER[5]] + lm[LIP_INNER_LOWER[5]])
+        hw = 0.5 * abs(lm[291, 0] - lm[61, 0])
+        y17 = lm[17, 1]
+        chin = lm[152, 1]
+        y = P[:, 1]
+        h = np.where(y > y17, _smooth_step(mc[1], y17, y), _smooth_step(chin + 0.01, y17, y))
+        g = np.exp(-((P[:, 0] - mc[0]) / (1.05 * hw)) ** 4)
+        front = _smooth_step(mc[2] - 0.09, mc[2] - 0.03, P[:, 2])
+        out = P.copy()
+        out[:, 1] += lower_lip * h * g * front
+        return out
+
+    V2 = lip_field(V + d)
+    lm2 = lip_field(lm)
+    return V2, lm2
+
+
 def tuck_ears(V, amount=0.62, push=0.024):
     """The reference's ears are small and lie flat: shrink the scan's ears toward their root."""
     from .shading import ear_centers
@@ -261,6 +352,9 @@ def build_geometry(src_path, ref: ReferenceProfile, cache: LandmarkCache) -> Hea
     V = smooth(V, F)
     V, F = mo.subdivide_loop(V, F, 1)
     V, lm, diag = warp_to_reference(V, F, lm, ref, view)
+    V, lm, taper = taper_jaw(V, lm, ref, view)
+    diag.update(taper)
+    V, lm = soften_features(V, F, lm)
     V = tuck_ears(V)
     # landmarks back onto the (smoothed, subdivided, warped) surface: nearest surface point
     cast = Caster(V, F)

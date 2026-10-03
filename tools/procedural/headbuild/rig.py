@@ -91,6 +91,13 @@ def compute_weights(V, F, skin_n, seam, lm, A):
     w = w_geo * (1 - near) + w_topo * near
     w[interior_up] = 0.0
     w[interior_lo] = 1.0
+    # lens-shaped opening: toward the corners the lower lip opens less (it stays with the upper
+    # lip at the corners), so the mouth opens as a lens / crescent, not a letterbox
+    lo_side = w > 0.5                       # (before the lens: decides upper / lower lip below)
+    zone = smoothstep(mc[1] - max(0.012, mc[1] - A["lipBottom"][1] + 0.012) - 0.022, mc[1] - 0.004, y)
+    zone = zone * smoothstep(1.4 * hw, 1.0 * hw, lat)            # cheeks beyond the corners: unchanged
+    w = np.where(lo_side, w * (1 - (1 - lens_profile(x - mc[0], hw)) * zone), w)
+    w[interior_lo] = lens_profile(x[interior_lo] - mc[0], hw)
     # fade out behind the jaw (toward the ears / back of the neck) and down the neck
     tmj = A["jawPivot"]
     w *= smoothstep(tmj[2] - 0.02, tmj[2] + 0.1, z)
@@ -105,7 +112,7 @@ def compute_weights(V, F, skin_n, seam, lm, A):
     up_extent = max(0.012, A["lipTop"][1] - mc[1] + 0.012)
     lo_extent = max(0.012, mc[1] - A["lipBottom"][1] + 0.012)
     front = smoothstep(mc[2] - 0.08, mc[2] - 0.02, z)
-    upper_side = W[:, 0] < 0.5
+    upper_side = ~lo_side
     W[:, 1] = np.where(upper_side, lipx * smoothstep(up_extent, 0.0, y - mc[1]) * front, 0)
     W[:, 2] = np.where(~upper_side, lipx * smoothstep(-lo_extent, 0.0, y - mc[1]) * front, 0)
     W[interior_up, 1] = 1.0 * lipx[interior_up]
@@ -133,6 +140,35 @@ def compute_weights(V, F, skin_n, seam, lm, A):
         d = np.linalg.norm((Vs - cc) / np.array([0.05, 0.045, 0.06]), axis=1)
         W[:, 7] = np.maximum(W[:, 7], np.exp(-d ** 2))
     return np.clip(W, 0, 1)
+
+
+def lens_profile(dx, hw, power=0.5):
+    """Jaw opening factor across the mouth: 1 in the middle, 0 at the corners ((1 - u^2)^p)."""
+    u = np.clip(np.abs(np.asarray(dx, float)) / max(hw, 1e-9), 0, 1)
+    return (1 - u * u) ** power
+
+
+def seam_attributes(V, F, skin_n, seam, reach=0.009):
+    """Per skin vertex: closeness to the lip seam (1 on it, 0 beyond `reach` along the surface)
+    and side (1 = upper lip side). The shader draws the mouth line from them: a dark line just
+    under the bright upper-lip edge, smooth along the lip curve (no per-triangle artifacts)."""
+    Fs = F_skin(F, skin_n)
+    Vs = V[:skin_n]
+    d_up = graph_dist(Vs, Fs, seam.path, 2 * reach)
+    d_lo = graph_dist(Vs, Fs, seam.lower, 2 * reach)
+    prox = smoothstep(reach, 0.0, np.minimum(d_up, d_lo))
+    side = (d_up <= d_lo).astype(float)
+    return prox, side
+
+
+def seam_fit(V, path, mouth_center):
+    """Least-squares y(dx) = c0 + c2 dx^2 + c4 dx^4 of the (rest) lip seam, dx from the mouth
+    centre: where the upper teeth hang in the shader."""
+    P = V[path]
+    dx = P[:, 0] - mouth_center[0]
+    A = np.stack([np.ones_like(dx), dx ** 2, dx ** 4], 1)
+    c, *_ = np.linalg.lstsq(A, P[:, 1], rcond=None)
+    return [float(v) for v in c]
 
 
 def F_skin(F, skin_n):

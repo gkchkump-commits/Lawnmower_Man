@@ -29,13 +29,14 @@ from headbuild import mesh_ops as mo  # noqa: E402
 from headbuild.curves import CURVE_DIST_RANGE, build_curves, chunk, curve_distance  # noqa: E402
 from headbuild.eyes import eye_params  # noqa: E402
 from headbuild.geometry import CAMERA_DIST, FOV_DEG, build_geometry  # noqa: E402
-from headbuild.landmarks import LM, LIP_OUTER_LOWER, LIP_OUTER_UPPER, LandmarkCache  # noqa: E402
+from headbuild.landmarks import JAW_OVAL, LM, LIP_OUTER_LOWER, LIP_OUTER_UPPER, LandmarkCache  # noqa: E402
 from headbuild.mouth import build_bag, find_seam, smooth_seam, split_seam  # noqa: E402
 from headbuild.outline import silhouette  # noqa: E402
 from headbuild.pack import write_model  # noqa: E402
 from headbuild.reference import measure  # noqa: E402
-from headbuild.rig import RIG_CHANNELS, anchors, compute_weights, inner_mouth_mask  # noqa: E402
-from headbuild.shading import ambient_occlusion, convexity, ear_mask, lips_mask, shell_normals  # noqa: E402
+from headbuild.rig import RIG_CHANNELS, anchors, compute_weights, inner_mouth_mask, seam_attributes, seam_fit  # noqa: E402
+from headbuild.shading import (SIDE_OVAL, ambient_occlusion, convexity, ear_centers, ear_mask, ear_mask_screen,  # noqa: E402
+                               lips_mask, neck_mask, shell_normals)
 
 ATTRIBUTION = "Lee Perry-Smith head scan, Infinite-Realities, CC BY 3.0"
 
@@ -79,11 +80,13 @@ def build(args):
     conv01 = 0.5 + 0.5 * convexity(V, F, N0)
     shell = shell_normals(V, F)
     lips = lips_mask(V, lm, LIP_OUTER_UPPER, LIP_OUTER_LOWER)
-    ear = ear_mask(V)
+    ear_z = float(np.mean([c[2] for c in ear_centers(V)]))
+    ear = np.maximum(ear_mask(V), ear_mask_screen(V, [view.project(lm[ids]) for ids in SIDE_OVAL], view, ear_z))
+    neck = neck_mask(V, lm[JAW_OVAL], axis_z=ear_z)
     n_welded = len(V)
     V, F, lower = split_seam(V, F, path)
     src = np.r_[np.arange(n_welded), path[1:-1]]          # copy k of the seam <- path[k]
-    ao, conv01, shell, lips, ear = (x[src] for x in (ao, conv01, shell, lips, ear))
+    ao, conv01, shell, lips, ear, neck = (x[src] for x in (ao, conv01, shell, lips, ear, neck))
     from headbuild.mouth import Seam
     seam = Seam(path, lower, (int(path[0]), int(path[-1])))
     skin_n = len(V)
@@ -91,6 +94,7 @@ def build(args):
     N = mo.vertex_normals(V, F)
     log(f"seam: {len(path)} vertices, skin verts {skin_n}")
     W = compute_weights(V, F, skin_n, seam, lm, A)
+    seam_prox, seam_side = seam_attributes(V, F, skin_n, seam)
     log(f"shading attributes + rig weights done ({time.time() - t0:.1f}s)")
 
     # --- mouth cavity (separate vertices, same draw call) --------------------------------------
@@ -115,6 +119,7 @@ def build(args):
     cav = np.vstack([np.zeros((skin_n, 4)), np.c_[np.ones(len(bv)), bprm]])
     inner = inner_mouth_mask(V, F, N, path, lower, A)
     shell4 = np.vstack([np.c_[shell * 0.5 + 0.5, inner], np.tile([0.5, 0.5, 1.0, 1.0], (len(bv), 1))])
+    extra = np.vstack([np.c_[neck, seam_prox, seam_side, np.zeros(skin_n)], np.zeros((len(bv), 4))])
 
     # --- eyes, curves, outline ------------------------------------------------------------------
     eyes = eye_params(V, F, ref, view)
@@ -140,7 +145,8 @@ def build(args):
             "licenseUrl": "https://creativecommons.org/licenses/by/3.0/",
             "sha256": hashlib.sha256(Path(args.source).read_bytes()).hexdigest(),
             "modifications": "cropped to head and neck, smoothed, subdivided, warped toward the reference "
-                             "proportions, ears tucked, mouth split along the lip seam, mouth cavity added",
+                             "proportions, brow ridge smoothed, lower lip thinned, ears tucked, mouth split "
+                             "along the lip seam, mouth cavity added",
         },
         "curveDistanceRange": CURVE_DIST_RANGE,
         "camera": {"fov": FOV_DEG, "distance": float(CAMERA_DIST), "viewHeight": 1.0,
@@ -151,6 +157,7 @@ def build(args):
             "jawPivot": A["jawPivot"], "headPivot": [0.0, float(A["jawPivot"][1] - 0.1), float(A["jawPivot"][2] - 0.06)],
             "mouthCenter": A["mouthCenter"], "cornerL": A["cornerL"], "cornerR": A["cornerR"],
             "mouthHalfWidth": A["mouthHalfWidth"], "faceHeight": face_h, "chinY": chin_y,
+            "seamFit": seam_fit(V, path, A["mouthCenter"]),
         },
         "features": {
             "noseTip": lm[LM["noseTip"]], "noseBridge": lm[LM["noseBridge"]],
@@ -170,7 +177,7 @@ def build(args):
             "neckHalfWidth": 0.15, "depth": 0.3,
         },
     }
-    doc = write_model(args.out, "head", V_all, F_all, rig, aux, cav, shell4, r5(meta))
+    doc = write_model(args.out, "head", V_all, F_all, rig, aux, cav, shell4, r5(meta), extra=extra)
     size = (Path(args.out) / "head.bin").stat().st_size + (Path(args.out) / "head.json").stat().st_size
     log(f"wrote {args.out}/head.json + head.bin: {doc['vertexCount']} verts, {doc['indexCount'] // 3} tris, "
         f"{size / 1024:.0f} KiB ({time.time() - t0:.1f}s)")

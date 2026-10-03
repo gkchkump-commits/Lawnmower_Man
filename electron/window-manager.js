@@ -1,0 +1,162 @@
+// Window geometry for the avatar overlay: size presets (contract §4), the chat panel extra,
+// default placement, persistence clamping to visible displays and anchored resizing.
+// Pure functions (no Electron import); main.js feeds them screen.getAllDisplays().
+//
+// Layout contract with the renderer: the window is the avatar area (W×H, always 2:3) on top,
+// plus — when settings.window.showChat is true — a chat panel strip of `chat.height` pixels
+// BELOW it, full width. The renderer can derive this from window.innerWidth/innerHeight
+// (avatarHeight = innerWidth * 1.5; chat = the rest) or read it from app.info().layout.
+
+/** @typedef {{ x: number, y: number, width: number, height: number }} Rect */
+/** @typedef {{ id?: number, bounds: Rect, workArea: Rect }} DisplayLike */
+/** @typedef {'small'|'medium'|'large'} SizePreset */
+
+export const SIZE_PRESETS = Object.freeze({
+  small: Object.freeze({ width: 300, height: 450 }),
+  medium: Object.freeze({ width: 400, height: 600 }),
+  large: Object.freeze({ width: 560, height: 840 }),
+});
+
+/** Chat panel height per preset (added below the avatar area). */
+export const CHAT_PANEL_HEIGHT = Object.freeze({ small: 200, medium: 240, large: 280 });
+export const MIN_CHAT_PANEL_HEIGHT = 140;
+/** Gap kept from the work-area edge for the default position. */
+export const EDGE_MARGIN = 24;
+/** At least this much of the window must stay on a display when restoring a position. */
+export const MIN_VISIBLE = 80;
+
+/** @param {unknown} p @returns {SizePreset} */
+export function normalizePreset(p) {
+  return p === 'small' || p === 'large' ? p : 'medium';
+}
+
+/**
+ * Window size for a preset, with the chat panel when shown. If a work area is given and the
+ * window would not fit vertically, the chat panel shrinks first (down to MIN_CHAT_PANEL_HEIGHT).
+ * @param {unknown} preset @param {boolean} showChat @param {Rect} [workArea]
+ */
+export function windowLayout(preset, showChat, workArea) {
+  const p = normalizePreset(preset);
+  const avatar = { ...SIZE_PRESETS[p] };
+  let chatHeight = showChat ? CHAT_PANEL_HEIGHT[p] : 0;
+  if (showChat && workArea && avatar.height + chatHeight > workArea.height) {
+    chatHeight = Math.max(MIN_CHAT_PANEL_HEIGHT, workArea.height - avatar.height);
+  }
+  return {
+    preset: p,
+    width: avatar.width,
+    height: avatar.height + chatHeight,
+    avatar,
+    chat: showChat ? { position: /** @type {'bottom'} */ ('bottom'), width: avatar.width, height: chatHeight } : null,
+  };
+}
+
+/** @param {Rect} a @param {Rect} b */
+export function intersectionArea(a, b) {
+  const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/** @param {Rect} r */
+const center = (r) => ({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+
+/**
+ * The display a rect belongs to: largest overlap, else nearest centre.
+ * @param {Rect} rect @param {DisplayLike[]} displays
+ * @returns {DisplayLike|null}
+ */
+export function pickDisplay(rect, displays) {
+  if (!displays || !displays.length) return null;
+  let best = null;
+  let bestArea = 0;
+  for (const d of displays) {
+    const a = intersectionArea(rect, d.workArea);
+    if (a > bestArea) {
+      bestArea = a;
+      best = d;
+    }
+  }
+  if (best) return best;
+  const c = center(rect);
+  let bestDist = Infinity;
+  for (const d of displays) {
+    const dc = center(d.workArea);
+    const dist = (dc.x - c.x) ** 2 + (dc.y - c.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = d;
+    }
+  }
+  return best;
+}
+
+/**
+ * Keep a window fully inside a work area (top-left wins when it is larger than the area).
+ * @param {Rect} b @param {Rect} wa @returns {Rect}
+ */
+export function clampToWorkArea(b, wa) {
+  const width = Math.round(b.width);
+  const height = Math.round(b.height);
+  let x = Math.round(b.x);
+  let y = Math.round(b.y);
+  x = Math.min(x, wa.x + wa.width - width);
+  y = Math.min(y, wa.y + wa.height - height);
+  x = Math.max(x, wa.x);
+  y = Math.max(y, wa.y);
+  return { x, y, width, height };
+}
+
+/**
+ * Default position: bottom-right corner of the work area (where desktop companions live).
+ * @param {{ width: number, height: number }} size @param {Rect} wa @returns {Rect}
+ */
+export function defaultBounds(size, wa) {
+  return clampToWorkArea(
+    { x: wa.x + wa.width - size.width - EDGE_MARGIN, y: wa.y + wa.height - size.height - EDGE_MARGIN, ...size },
+    wa,
+  );
+}
+
+/**
+ * Where to open the window: the saved position if it is still (mostly) on a connected display,
+ * clamped fully onto that display; otherwise the default corner of the primary display.
+ * @param {{ saved: {x:number,y:number}|null|undefined, size: {width:number,height:number}, displays: DisplayLike[], primary: DisplayLike }} o
+ * @returns {Rect}
+ */
+export function placeWindow({ saved, size, displays, primary }) {
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    const rect = { x: saved.x, y: saved.y, ...size };
+    const visible = displays.some((d) => {
+      const w = Math.min(rect.x + rect.width, d.workArea.x + d.workArea.width) - Math.max(rect.x, d.workArea.x);
+      const h = Math.min(rect.y + rect.height, d.workArea.y + d.workArea.height) - Math.max(rect.y, d.workArea.y);
+      return w >= Math.min(MIN_VISIBLE, rect.width) && h >= Math.min(MIN_VISIBLE, rect.height);
+    });
+    if (visible) {
+      const d = pickDisplay(rect, displays) || primary;
+      return clampToWorkArea(rect, d.workArea);
+    }
+  }
+  return defaultBounds(size, primary.workArea);
+}
+
+/**
+ * Resize keeping the corner nearest the screen edge fixed (a window docked bottom-right grows
+ * up and to the left), then clamp onto the display.
+ * @param {Rect} old @param {{ width: number, height: number }} size @param {Rect} wa @returns {Rect}
+ */
+export function resizeAnchored(old, size, wa) {
+  const c = center(old);
+  const wc = center(wa);
+  const x = c.x > wc.x ? old.x + old.width - size.width : old.x;
+  const y = c.y > wc.y ? old.y + old.height - size.height : old.y;
+  return clampToWorkArea({ x, y, width: size.width, height: size.height }, wa);
+}
+
+/**
+ * Re-clamp after displays changed (monitor unplugged, resolution/DPI change).
+ * @param {Rect} b @param {DisplayLike[]} displays @param {DisplayLike} primary @returns {Rect}
+ */
+export function reclamp(b, displays, primary) {
+  return placeWindow({ saved: { x: b.x, y: b.y }, size: { width: b.width, height: b.height }, displays, primary });
+}

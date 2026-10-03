@@ -1,0 +1,201 @@
+// End-to-end tests of the renderer app against `vite preview` with the mock bridge
+// (src/bridge/mock.js). Chromium renders WebGL with SwiftShader (software), so the avatar runs
+// at quality=low and viewports stay small. Screenshots go to $LM_SHOTS_DIR.
+
+import { MOCK_REPLIES } from '../../src/bridge/mock.js';
+import { boot, expect, headStats, send, shot, test, waitIdle } from './helpers.js';
+
+test.describe('app (mock bridge)', () => {
+  test('boots and renders the hologram', async ({ page }, testInfo) => {
+    await boot(page);
+    await expect(page.locator('body')).toHaveAttribute('data-env', 'browser');
+    await expect(page.locator('body')).toHaveAttribute('data-boot', 'ready');
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('#stage canvas')).toHaveCount(1);
+    expect(await page.evaluate(() => window.__app.avatar.renderer)).toBe('relief');
+    await expect(page.locator('.status-claude')).toContainText('Claude');
+    const stats = await headStats(page);
+    expect(stats.mean, JSON.stringify(stats)).toBeGreaterThan(18);
+    expect(stats.bright).toBeGreaterThan(0.15);
+    expect(stats.warm).toBeGreaterThan(0.002);
+    await page.waitForTimeout(600);
+    await shot(page, testInfo, 'app-idle');
+  });
+
+  test('typing a message streams a reply; state goes thinking → speaking → idle', async ({ page }, testInfo) => {
+    await boot(page, { mockDelay: 45 });
+    await send(page, 'Hello there!');
+    await expect(page.locator('.msg-user .msg-text')).toHaveText('Hello there!');
+    await expect(page.locator('#input')).toHaveValue('');
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'thinking');
+    // mid-reply
+    await page.waitForFunction(() => document.querySelector('.msg-claude .md')?.textContent.split(' ').length > 8);
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'speaking');
+    await expect(page.locator('.msg-claude')).toHaveClass(/streaming/);
+    await shot(page, testInfo, 'app-mid-reply');
+    await waitIdle(page);
+    await expect(page.locator('.msg-claude .md')).toHaveText(MOCK_REPLIES.greeting);
+    await expect(page.locator('.msg-claude')).not.toHaveClass(/streaming/);
+    const states = await page.evaluate(() => window.__states);
+    expect(states).toEqual(['idle', 'thinking', 'speaking', 'idle']);
+  });
+
+  test('renders Markdown safely and copies code', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await boot(page);
+    const evil = '<img src=x onerror="window.__pwned=1"> **not bold** <script>window.__pwned=2</script>';
+    await send(page, evil);
+    await expect(page.locator('.msg-user .msg-text')).toHaveText(evil);
+    await waitIdle(page);
+    await send(page, 'show me some code');
+    const block = page.locator('.msg-claude').last().locator('.code-block');
+    await expect(block.locator('pre code')).toContainText('export function debounce', { timeout: 20_000 });
+    await waitIdle(page);
+    await expect(block.locator('.code-lang')).toHaveText('js');
+    await expect(page.locator('.msg-claude').last().locator('.md p code')).toHaveText('debounce(save, 500)');
+    expect(await page.locator('#transcript img, #transcript script').count()).toBe(0);
+    expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
+    await block.locator('.code-copy').click();
+    await expect(block.locator('.code-copy')).toHaveText('Copied');
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('clearTimeout(timer);');
+  });
+
+  test('permission cards: allow and deny', async ({ page }, testInfo) => {
+    await boot(page);
+    await send(page, 'please run the tests');
+    const card = page.locator('.perm-card');
+    await expect(card).toBeVisible({ timeout: 20_000 });
+    await expect(card.locator('.perm-tool')).toHaveText('Bash');
+    await expect(card.locator('.perm-target')).toHaveText('npm test -- --reporter=dot');
+    await expect(page.locator('body')).toHaveAttribute('data-attention', 'permission');
+    await expect(page.locator('.tool-chip.running')).toBeVisible();
+    await shot(page, testInfo, 'app-permission');
+    await card.locator('.perm-allow').click();
+    await expect(card).toHaveCount(0);
+    await waitIdle(page);
+    await expect(page.locator('.msg-claude').last()).toContainText(MOCK_REPLIES.toolAllowed);
+    await expect(page.locator('.tool-chip.done')).toHaveCount(1);
+    await expect(page.locator('.turn-note')).toHaveText('Allowed: Bash');
+    await expect(page.locator('body')).toHaveAttribute('data-attention', '');
+
+    await send(page, 'use a tool again');
+    await expect(page.locator('.perm-card')).toBeVisible({ timeout: 20_000 });
+    await page.locator('.perm-deny').click();
+    await waitIdle(page);
+    await expect(page.locator('.msg-claude').last()).toContainText(MOCK_REPLIES.toolDenied);
+    await expect(page.locator('.tool-chip.failed')).toHaveCount(1);
+  });
+
+  test('interrupt: the stop button ends a long reply', async ({ page }) => {
+    await boot(page, { mockDelay: 60 });
+    await send(page, 'tell me a long story');
+    await page.waitForFunction(() => (document.querySelector('.msg-claude .md')?.textContent || '').length > 20);
+    await expect(page.locator('#send')).toHaveAttribute('data-mode', 'stop');
+    await page.locator('#send').click();
+    await waitIdle(page);
+    await expect(page.locator('.msg-claude')).toHaveClass(/interrupted/);
+    const text = await page.locator('.msg-claude .md').textContent();
+    expect(text.length).toBeLessThan(MOCK_REPLIES.long.length);
+  });
+
+  test('errors show a toast and the app recovers', async ({ page }) => {
+    await boot(page);
+    await send(page, 'please simulate error');
+    await expect(page.locator('.toast.error')).toContainText('Simulated failure', { timeout: 20_000 });
+    await waitIdle(page);
+    await expect(page.locator('.toast.error')).toHaveCount(1); // one error, one toast
+    await expect(page.locator('.msg-claude.error .turn-error')).toContainText('Simulated failure');
+    await send(page, 'hi');
+    await waitIdle(page);
+    await expect(page.locator('.msg-claude').last()).toContainText("I'm Claude");
+  });
+
+  test('settings drawer: switching the renderer re-creates the avatar', async ({ page }, testInfo) => {
+    await boot(page);
+    const gen0 = await page.evaluate(() => window.__app.avatarHost.generation);
+    await page.locator('#btn-settings').click();
+    const drawer = page.locator('#drawer');
+    await expect(drawer).toBeVisible();
+    await expect(page.locator('body')).toHaveAttribute('data-drawer', 'open');
+    await shot(page, testInfo, 'app-settings');
+    await drawer.locator('[data-path="avatar.renderer"] button[data-value="procedural"]').click();
+    await page.waitForFunction((g) => window.__app.avatarHost.generation > g && window.__app.avatarReady && window.__app.avatar.renderer !== 'relief', gen0, { timeout: 45_000 });
+    const renderer = await page.evaluate(() => window.__app.avatar.renderer);
+    expect(['procedural', 'placeholder']).toContain(renderer);
+    expect(await page.evaluate(() => window.__app.settings().avatar.renderer)).toBe('procedural');
+    await expect(page.locator('#stage canvas')).toHaveCount(1);
+    // other settings write through to the bridge
+    await drawer.locator('[data-path="voice.speakReplies"] .switch').click();
+    await expect.poll(() => page.evaluate(() => window.__app.settings().voice.speakReplies)).toBe(false);
+    await drawer.locator('[data-path="window.sizePreset"] button[data-value="small"]').click();
+    await expect.poll(() => page.evaluate(() => window.__app.settings().window.sizePreset)).toBe('small');
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
+    const stats = await headStats(page);
+    expect(stats.bright, JSON.stringify(stats)).toBeGreaterThan(0.05);
+    // and back to the relief head
+    await page.locator('#btn-settings').click();
+    await drawer.locator('[data-path="avatar.renderer"] button[data-value="relief"]').click();
+    await page.waitForFunction(() => window.__app.avatar.renderer === 'relief', null, { timeout: 45_000 });
+  });
+
+  test('minimal mode: hiding the chat strip floats the panel over the avatar', async ({ page }) => {
+    await boot(page);
+    await page.locator('#btn-chat').click();
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
+    expect(await page.evaluate(() => window.__app.settings().window.showChat)).toBe(false);
+    await send(page, 'hi');
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'shown');
+    await waitIdle(page);
+    await page.locator('#btn-chat').click();
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'full');
+  });
+
+  test('hotkeys from main: toggleChat and stopSpeaking', async ({ page }) => {
+    await boot(page);
+    await page.evaluate(() => window.__app.bridge.__mock.hotkey('toggleChat'));
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
+    await page.evaluate(() => window.__app.bridge.__mock.hotkey('toggleChat'));
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'full');
+    // without voice input, toggleListen explains how to enable it
+    await page.evaluate(() => window.__app.bridge.__mock.hotkey('toggleListen'));
+    await expect(page.locator('.toast')).toContainText('voice server');
+    await expect(page.locator('#mic')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  test('click-through: transparent pixels pass clicks, the head and panel do not', async ({ page }) => {
+    await boot(page, { clickThrough: 1 });
+    const calls = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5); // empty space left of the head
+    await page.mouse.move(box.x + 8, box.y + box.height * 0.5);
+    await expect.poll(calls).toEqual([false, true]);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4); // the face
+    await expect.poll(calls).toEqual([false, true, false]);
+    await page.mouse.move(box.x + 10, box.y + box.height + 60); // the chat panel
+    await page.waitForTimeout(300);
+    expect(await calls()).toEqual([false, true, false]);
+  });
+});
+
+test.describe('voice (fake voice server)', () => {
+  test('replies are spoken with lip-sync; Esc stops speaking', async ({ page }) => {
+    await boot(page, { voice: 'fake', mockDelay: 30 });
+    await expect(page.locator('.status-voice')).toHaveText('Voice · GPU');
+    await expect(page.locator('#mic')).toHaveAttribute('aria-disabled', 'false');
+    await send(page, 'tell me about holograms');
+    await page.waitForFunction(() => document.body.dataset.state === 'speaking' && window.__app.player.current?.kind === 'audio', null, { timeout: 30_000 });
+    let maxJaw = 0;
+    for (let i = 0; i < 25; i++) {
+      maxJaw = Math.max(maxJaw, await page.evaluate(() => window.__app.avatar.animState().jawOpen));
+      await page.waitForTimeout(40);
+    }
+    expect(maxJaw).toBeGreaterThan(0.12);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.evaluate(() => window.__app.player.busy)).toBe(false);
+    await waitIdle(page);
+    const states = await page.evaluate(() => window.__states);
+    expect(states.slice(0, 3)).toEqual(['idle', 'thinking', 'speaking']);
+  });
+});
+

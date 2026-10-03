@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Avatar Harness</title>
+    <style>
+      :root {
+        --bg: #050608;
+        --panel: #0d1117;
+        --line: #1f2733;
+        --text: #c9d4e6;
+        --dim: #7d8899;
+        --accent: #63c6ff;
+        --gold: #ffcf9b;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); font: 12px/1.4 system-ui, sans-serif; }
+      body { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; align-items: flex-start; }
+      body.bare { padding: 0; gap: 0; }
+      #stage { display: flex; gap: 0; background: #000; }
+      .view { position: relative; width: var(--w, 392px); height: var(--h, 584px); overflow: hidden; }
+      #avatar { display: block; width: 100%; height: 100%; }
+      .view.checker { background: repeating-conic-gradient(#3a3f47 0% 25%, #2a2e35 0% 50%) 50% / 24px 24px; }
+      .view.desk { background: linear-gradient(135deg, #2b5876, #4e4376 60%, #c06c84); }
+      .view.white { background: #f2f2f2; }
+      #ref { display: block; width: 100%; height: 100%; object-fit: fill; }
+      .label { position: absolute; left: 6px; top: 4px; color: #fff8; font-size: 11px; pointer-events: none; }
+      #stats { position: absolute; right: 6px; bottom: 4px; color: #9fe; font: 11px ui-monospace, monospace; white-space: pre; pointer-events: none; text-shadow: 0 0 3px #000; }
+      #panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; width: 300px; }
+      #panel h2 { font-size: 12px; margin: 6px 0; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+      .row { display: grid; grid-template-columns: 70px 1fr 40px; align-items: center; gap: 6px; margin: 2px 0; }
+      .row output { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+      .row.on label { color: var(--gold); }
+      input[type=range] { width: 100%; accent-color: var(--accent); }
+      .buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+      button { background: #161c26; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; cursor: pointer; font: inherit; }
+      button.active { border-color: var(--accent); color: var(--accent); }
+      #hit { color: var(--dim); margin-top: 6px; }
+      @media (max-width: 760px) { #panel { width: 100%; } }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div class="view" id="avatarView">
+        <canvas id="avatar"></canvas>
+        <div class="label" id="avatarLabel"></div>
+        <div id="stats"></div>
+      </div>
+      <div class="view" id="refView" hidden>
+        <img id="ref" alt="reference frame" />
+        <div class="label">reference</div>
+      </div>
+    </div>
+    <div id="panel">
+      <h2>State</h2>
+      <div class="buttons" id="states"></div>
+      <h2>Pose (overrides)</h2>
+      <div id="sliders"></div>
+      <div class="buttons" style="margin-top:6px">
+        <button id="blinkBtn">blink()</button>
+        <button id="resetBtn">reset overrides</button>
+        <button id="talkBtn">fake talk</button>
+      </div>
+      <h2>Render</h2>
+      <div id="render"></div>
+      <div id="hit">hitTest: –</div>
+    </div>
+    <script type="module" src="./avatar.js"></script>
+  </body>
+</html>

@@ -16,7 +16,9 @@
     "test:e2e": "playwright test",
     "test:voice": "cd voice && python -m pytest -q",
     "lint": "eslint .",
-    "dist": "vite build && electron-builder"
+    "dist": "vite build && electron-builder",
+    "test:live-claude": "cross-env LIVE_CLAUDE=1 vitest run tests/unit/systems/claude-live.test.js",
+    "check:electron": "node scripts/check-electron.mjs"
   },
   "dependencies": {
     "three": "^0.186.1"
@@ -34,5 +36,78 @@
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "build": {
+    "appId": "com.lawnmower.avatar",
+    "productName": "Lawnmower Man",
+    "copyright": "Copyright (c) Lawnmower Man contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/assets"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json",
+      "!**/node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "voice",
+        "to": "voice",
+        "filter": [
+          "**/*",
+          "!.venv/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!tests/**",
+          "!.pytest_cache/**",
+          "!**/*.egg-info/**",
+          "!models/**"
+        ]
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "setup-voice.*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "electron/assets/icon.png",
+      "artifactName": "${productName}-${version}.${ext}"
+    }
   }
 }

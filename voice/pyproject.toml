@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lawnmower-voice"
+version = "0.1.0"
+description = "Local GPU speech sidecar for Lawnmower Man: faster-whisper STT + Kokoro TTS over a small HTTP API."
+readme = "README.md"
+license = { text = "MIT" }
+# 3.12 is the recommended interpreter. 3.11 works. 3.10 installs, but the CUDA 13 build of
+# onnxruntime-gpu (the only one with native RTX 50-series kernels) needs Python >= 3.11,
+# so on 3.10 the voice (TTS) runs on the CPU. The PyTorch "kokoro" backend needs < 3.13.
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# NVIDIA GPU stack (Windows x64 / Linux x86_64). Verified layout for RTX 50-series (Blackwell, sm_120):
+#  * CTranslate2 >= 4.7 (built with CUDA 12.8; sm_120 runs through driver PTX JIT; int8 fix) needs only
+#    cuBLAS 12 at runtime (no cuDNN) -> nvidia-cublas-cu12 >= 12.8 (has Blackwell kernels).
+#  * onnxruntime-gpu >= 1.27 is built with CUDA 13 and ships native sm_120 kernels; its [cuda,cudnn]
+#    extras pull the CUDA 13 runtime, cuBLAS 13, cuFFT and cuDNN 9 (cu13) wheels.
+#  NOTE: kokoro-onnx and faster-whisper also pull the CPU "onnxruntime" wheel, which clashes with
+#  onnxruntime-gpu (same import name). scripts/setup-voice.* removes it and force-reinstalls
+#  onnxruntime-gpu after installing this extra.
+gpu = [
+  "faster-whisper>=1.2.1,<2",
+  "ctranslate2>=4.7.0,<5",
+  "kokoro-onnx>=0.6.1,<0.7",
+  "scipy>=1.10",
+  "nvidia-cublas-cu12>=12.8; (platform_machine == 'x86_64' or platform_machine == 'AMD64') and sys_platform != 'darwin'",
+  "onnxruntime-gpu[cuda,cudnn]>=1.27,<2; python_version >= '3.11' and (platform_machine == 'x86_64' or platform_machine == 'AMD64') and sys_platform != 'darwin'",
+]
+# CPU-only stack (no NVIDIA downloads).
+cpu = [
+  "faster-whisper>=1.2.1,<2",
+  "ctranslate2>=4.7.0,<5",
+  "kokoro-onnx>=0.6.1,<0.7",
+  "onnxruntime>=1.20",
+  "scipy>=1.10",
+]
+# Optional: misaki G2P for English (the phonemizer Kokoro was trained with). Pulls spaCy.
+misaki = ["misaki[en]>=0.9.4"]
+# Optional alternative TTS backend: the official PyTorch "kokoro" package. Install torch first from
+# https://download.pytorch.org/whl/cu128 (setup scripts: -TorchTts / --torch-tts).
+torch = ["kokoro>=0.9.4", "misaki[en]>=0.9.4"]
+dev = ["pytest>=8", "httpx>=0.27", "scipy>=1.10"]
+
+[project.scripts]
+lawnmower-voice = "lawnmower_voice.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lawnmower_voice*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+  "ignore::DeprecationWarning:httpx.*",
+  "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+]

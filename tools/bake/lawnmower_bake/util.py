@@ -97,3 +97,16 @@ def round_list(a, nd: int = 2):
     # Avoid "-0.0" noise in the JSON.
     out[out == 0] = 0.0
     return [float(v) for v in out]
+
+
+def inside_polygon(points, poly, margin: float = 0.0) -> np.ndarray:
+    """Boolean mask of points inside a polygon, grown by ``margin`` px (negative shrinks).
+
+    Uses cv2.pointPolygonTest's signed distance (positive inside).
+    """
+    contour = np.asarray(poly, np.float32).reshape(-1, 1, 2)
+    pts = np.asarray(points, np.float64)
+    out = np.empty(len(pts), bool)
+    for i, (x, y) in enumerate(pts[:, :2]):
+        out[i] = cv2.pointPolygonTest(contour, (float(x), float(y)), True) >= -margin
+    return out

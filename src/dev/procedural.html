@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Procedural Head</title>
+    <style>
+      :root { --bg: #050608; --panel: #0d1117; --line: #1f2733; --text: #c9d4e6; --dim: #7d8899; --accent: #63c6ff; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); font: 12px/1.4 system-ui, sans-serif; }
+      body { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; align-items: flex-start; }
+      .views { display: flex; gap: 0; background: #000; }
+      .view { position: relative; width: var(--w, 392px); height: var(--h, 584px); }
+      .view canvas { display: block; width: 100%; height: 100%; }
+      .label { position: absolute; left: 6px; top: 4px; color: #fff8; font-size: 11px; pointer-events: none; }
+      .stats { position: absolute; right: 6px; bottom: 4px; color: #9fe; font: 11px ui-monospace, monospace; white-space: pre; pointer-events: none; }
+      #panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; width: 280px; }
+      #panel h2 { font-size: 12px; margin: 6px 0; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+      .buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+      button { background: #161c26; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; cursor: pointer; font: inherit; }
+      button.active { border-color: var(--accent); color: var(--accent); }
+      p { color: var(--dim); margin: 6px 0; }
+    </style>
+  </head>
+  <body>
+    <div class="views">
+      <div class="view" id="v-relief"><canvas></canvas><div class="label">relief</div><div class="stats"></div></div>
+      <div class="view" id="v-procedural"><canvas></canvas><div class="label">procedural</div><div class="stats"></div></div>
+    </div>
+    <div id="panel">
+      <h2>State (both heads)</h2>
+      <div class="buttons" id="states"></div>
+      <h2>Motion</h2>
+      <div class="buttons">
+        <button id="turntable">turntable (procedural)</button>
+        <button id="talk">fake talk</button>
+        <button id="blink">blink()</button>
+      </div>
+      <p>Move the mouse over a head: both follow the cursor. URL: <code>?only=procedural</code>,
+        <code>?quality=low|medium|high</code>, <code>?w=&amp;h=</code>, <code>?turntable=1</code>.</p>
+    </div>
+    <script type="module" src="./procedural.js"></script>
+  </body>
+</html>

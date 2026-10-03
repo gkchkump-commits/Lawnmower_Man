@@ -17,7 +17,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 # Local model caches / source media (bake inputs stay local)
-models/
+/models/
+voice/models/
 tools/bake/.cache/
 *.mp4
 !docs/**/*.mp4

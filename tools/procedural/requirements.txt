@@ -1,0 +1,12 @@
+# Offline build of public/assets/models/head.* (not needed to run the app)
+numpy>=1.24
+scipy>=1.10
+trimesh>=4.0
+opencv-python>=4.8
+# ray casting acceleration for trimesh (either works; embreex is much faster)
+embreex>=2.17; platform_machine == "x86_64" or platform_machine == "AMD64"
+rtree>=1.0
+# only on a landmark-cache miss (tools/procedural/data/landmarks.json is committed)
+mediapipe>=0.10 ; python_version < "3.13"
+# tests
+pytest>=7

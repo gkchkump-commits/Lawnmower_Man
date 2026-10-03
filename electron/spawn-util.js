@@ -25,6 +25,7 @@ export const STRIPPED_ENV_VARS = Object.freeze([
   'CLAUDE_CODE_ENTRYPOINT',
   'CLAUDE_CODE_SSE_PORT',
   'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_REMOTE_SESSION_ID', // verified: with SESSION_ID it pins the child to the parent's conversation
   'CLAUDE_CODE_MESSAGING_SOCKET',
   'CLAUDE_CODE_MESSAGING_TOKEN',
   'CLAUDE_PID',
@@ -116,6 +117,8 @@ export function quoteCmdArg(arg, doubleEscape = false) {
  * @property {string[]} args
  * @property {{ windowsVerbatimArguments?: boolean, windowsHide?: boolean, detached?: boolean }} options
  * @property {'direct'|'cmd'|'node'} kind
+ * @property {Record<string, string>} envExtra  variables the child needs on top of its env
+ *   (ELECTRON_RUN_AS_NODE=1 when a .js file is run with Electron's own binary)
  */
 
 /**
@@ -136,7 +139,9 @@ export function buildSpawnSpec(file, args, opts = {}) {
 
   if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
     const nodePath = opts.nodePath || process.execPath;
-    return { kind: 'node', command: nodePath, args: [...(opts.nodeArgs || []), file, ...args], options: base };
+    // Inside Electron, process.execPath is the Electron binary: make it behave as plain Node.
+    const envExtra = !opts.nodePath && process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {};
+    return { kind: 'node', command: nodePath, args: [...(opts.nodeArgs || []), file, ...args], options: base, envExtra };
   }
 
   if (isWin && (ext === '.cmd' || ext === '.bat')) {
@@ -153,10 +158,11 @@ export function buildSpawnSpec(file, args, opts = {}) {
       command: opts.comspec || 'cmd.exe',
       args: ['/d', '/s', '/c', `"${line}"`],
       options: { ...base, windowsVerbatimArguments: true },
+      envExtra: {},
     };
   }
 
-  return { kind: 'direct', command: file, args: [...args], options: base };
+  return { kind: 'direct', command: file, args: [...args], options: base, envExtra: {} };
 }
 
 /**
@@ -173,7 +179,10 @@ export function spawnPortable(file, args, options = {}) {
     nodeArgs,
     comspec: getEnv(spawnOptions.env || process.env, 'ComSpec'),
   });
-  const child = (spawnImpl || spawn)(spec.command, spec.args, { ...spec.options, ...spawnOptions });
+  const env = Object.keys(spec.envExtra).length
+    ? { ...(spawnOptions.env || process.env), ...spec.envExtra }
+    : spawnOptions.env;
+  const child = (spawnImpl || spawn)(spec.command, spec.args, { ...spec.options, ...spawnOptions, env });
   return { child, spec };
 }
 

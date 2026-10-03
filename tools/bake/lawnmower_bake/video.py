@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from . import landmarks as LM
-from .util import log, luminance, to_float
+from .util import log, luminance
 
 MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
              "face_landmarker/float16/1/face_landmarker.task")
@@ -228,3 +228,52 @@ def analyze(info: VideoInfo, model_path: Path) -> list[FrameData]:
     if not any(f.ok for f in frames):
         raise RuntimeError("MediaPipe did not find a face in any frame")
     return frames
+
+
+# ---------------------------------------------------------------------------------------------
+# Analysis cache (tracking all frames takes ~1 min on 4 CPUs; re-runs reuse it).
+# ---------------------------------------------------------------------------------------------
+_SCALARS = ("eye_bright", "lip_gap", "teeth", "tongue", "clutter", "sharp")
+
+
+def save_analysis(path: Path, frames: list[FrameData]) -> None:
+    n = len(frames)
+    names = sorted({k for f in frames for k in f.bs})
+    lm = np.full((n, 478, 3), np.nan, np.float32)
+    bsa = np.zeros((n, len(names)), np.float32)
+    for f in frames:
+        if f.ok:
+            lm[f.index] = f.lm
+            bsa[f.index] = [f.bs.get(k, 0.0) for k in names]
+    data = {
+        "ok": np.array([f.ok for f in frames]),
+        "lm": lm, "bs": bsa, "bs_names": np.array(names),
+        "shift": np.array([f.shift for f in frames], np.float32),
+    }
+    for k in _SCALARS:
+        data[k] = np.array([getattr(f, k) for f in frames], np.float32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.npz")
+    np.savez_compressed(tmp, **data)
+    os.replace(tmp, path)
+
+
+def load_analysis(path: Path) -> list[FrameData] | None:
+    if not path.is_file():
+        return None
+    try:
+        d = np.load(path, allow_pickle=False)
+        names = [str(s) for s in d["bs_names"]]
+        frames = []
+        for i in range(len(d["ok"])):
+            ok = bool(d["ok"][i])
+            fd = FrameData(index=i, ok=ok,
+                           lm=d["lm"][i].astype(np.float32) if ok else None,
+                           bs={k: float(v) for k, v in zip(names, d["bs"][i])} if ok else {},
+                           shift=(float(d["shift"][i, 0]), float(d["shift"][i, 1])))
+            for k in _SCALARS:
+                setattr(fd, k, float(d[k][i]))
+            frames.append(fd)
+        return frames
+    except Exception:  # corrupt cache -> recompute
+        return None

@@ -19,6 +19,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(here, 'src/index.html'),
+        avatar: resolve(here, 'src/dev/avatar.html'),
       },
     },
   },

@@ -1,0 +1,10 @@
+# tools/bake — reference video -> relief avatar pack (offline tool, not needed at runtime)
+# Python 3.10–3.12 recommended (MediaPipe wheels). Install: python -m pip install -r tools/bake/requirements.txt
+mediapipe>=0.10.14
+opencv-python>=4.9
+numpy>=1.26
+scipy>=1.11
+Pillow>=10.0
+# Constrained Delaunay for the lip slit (Shewchuk's Triangle). Optional: without it the baker
+# falls back to scipy Delaunay + filtering, which is slightly less clean around the mouth.
+triangle>=20230923

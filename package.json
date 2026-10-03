@@ -1,0 +1,38 @@
+{
+  "name": "lawnmower-man",
+  "productName": "Lawnmower Man",
+  "version": "0.1.0",
+  "description": "Holographic desktop avatar for Claude, powered by the Claude CLI and local GPU speech.",
+  "type": "module",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"vite\" \"wait-on tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:voice": "cd voice && python -m pytest -q",
+    "lint": "eslint .",
+    "dist": "vite build && electron-builder"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.12.0",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3",
+    "wait-on": "^9.5.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

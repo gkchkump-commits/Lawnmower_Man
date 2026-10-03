@@ -140,6 +140,7 @@ def write_pack(out: Path, info, frames, sel, imgs, tex, mesh, video_hash: str, n
         "mouth": "mouth.webp",
         "masksA": "masks_a.png",
         "masksB": "masks_b.png",
+        "masksC": "masks_c.png",
         "mesh": "mesh.json",
     }
     _save_webp(out / files["plate"], tex.plate, 94)
@@ -147,6 +148,7 @@ def write_pack(out: Path, info, frames, sel, imgs, tex, mesh, video_hash: str, n
     _save_webp(out / files["mouth"], tex.mouth, 92)
     _save_png(out / files["masksA"], tex.masks_a)
     _save_png(out / files["masksB"], tex.masks_b)
+    _save_png(out / files["masksC"], tex.masks_c)
     _write_json(out / files["mesh"], mesh_to_json(mesh, W, H), compact=True)
 
     prev = ensure_dir(out / "preview")
@@ -178,6 +180,7 @@ def write_pack(out: Path, info, frames, sel, imgs, tex, mesh, video_hash: str, n
         "channels": {
             "masksA": {"r": "alpha", "g": "goldLines", "b": "sparkle"},
             "masksB": {"r": "eyeAperture", "g": "eyeRegion", "b": "mouthRegion"},
+            "masksC": {"r": "lidCoord", "g": "upperLid", "b": "occlusion"},
             "mouth": {"top": "cavity + upper teeth (upper-jaw space)", "bottom": "lower teeth (jaw space)"},
         },
         "framing": {
@@ -250,8 +253,22 @@ def _rounded(v, nd=3):
     return v
 
 
+def _lids_json(lids, n=17):
+    """Lid curves resampled at ``n`` columns (plate px) - informational / tests; the engine uses
+    the per-pixel lid coordinate in masks_c."""
+    out = {}
+    for key, d in lids.items():
+        xs = np.linspace(float(d["x"][0]), float(d["x"][-1]), n)
+        out[key] = {"x": round_list(xs, 2)}
+        for k in ("upper", "closed", "lower"):
+            out[key][k] = round_list(np.interp(xs, d["x"], d[k]), 2)
+    return out
+
+
 def _rig_json(rig, mesh, tex):
     out = _rounded(rig)
+    for key, lid in _lids_json(tex.lids).items():
+        out["eyes"][key]["lids"] = lid
     out["slitLine"] = round_list(tex.slit_line[::3], 2)
     out["cavity"] = {"zBack": round(float(mesh.cavity["zBack"]), 2), "zStrip": round(float(mesh.cavity["zStrip"]), 2)}
     return out

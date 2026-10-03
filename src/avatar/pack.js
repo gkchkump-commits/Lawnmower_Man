@@ -11,6 +11,8 @@ export const WEIGHT_NAMES = /** @type {const} */ ([
 ]);
 
 const REQUIRED_FILES = ['plate', 'eyesClosed', 'mouth', 'masksA', 'masksB', 'mesh'];
+/** Optional files (newer bakers): masksC = lid coordinate / upper lid / desktop occlusion. */
+const OPTIONAL_FILES = ['masksC'];
 
 /** Ensure a base URL ends with '/'. */
 export function withSlash(url) {
@@ -30,9 +32,16 @@ export function validatePack(p) {
   else if (Math.floor(p.version) > PACK_VERSION) errs.push(`pack version ${p.version} is newer than supported ${PACK_VERSION}`);
   const W = p.plate?.width, H = p.plate?.height;
   if (!(W > 0 && H > 0)) errs.push('plate.width/height missing');
+  const outside = (v) => /^(?:[a-z]+:)?\/\//i.test(v) || v.includes('..');
   for (const f of REQUIRED_FILES) {
     if (typeof p.files?.[f] !== 'string' || !p.files[f]) errs.push(`files.${f} missing`);
-    else if (/^(?:[a-z]+:)?\/\//i.test(p.files[f]) || p.files[f].includes('..')) errs.push(`files.${f} must be a relative path inside the pack`);
+    else if (outside(p.files[f])) errs.push(`files.${f} must be a relative path inside the pack`);
+  }
+  for (const f of OPTIONAL_FILES) {
+    const v = p.files?.[f];
+    if (v === undefined) continue;
+    if (typeof v !== 'string' || !v) errs.push(`files.${f} must be a file name`);
+    else if (outside(v)) errs.push(`files.${f} must be a relative path inside the pack`);
   }
   const rig = p.rig;
   if (!rig) errs.push('rig missing');

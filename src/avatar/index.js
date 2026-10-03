@@ -6,8 +6,8 @@ import { Particles } from './fx/particles.js';
 import { Post } from './fx/post.js';
 import { withSlash } from './pack.js';
 import { mergePalette } from './palette.js';
-import { QUALITY, normalizeQuality } from './quality.js';
-import { Stage } from './stage.js';
+import { QUALITY, QualityGovernor, normalizeQuality } from './quality.js';
+import { Stage, collectGLResources, forgetDisposeListeners } from './stage.js';
 
 /** @typedef {import('./types.js').AvatarOptions} AvatarOptions */
 /** @typedef {import('./types.js').HeadContext} HeadContext */
@@ -51,7 +51,27 @@ export function normalizeOptions(o = {}) {
     zoom: num(o.zoom, 1, 0.2, 5),
     colors: o.colors && typeof o.colors === 'object' ? { ...o.colors } : {},
     autoStart: o.autoStart !== false,
+    // frozen-time renders are for tests / visual diffs: never change quality under them
+    autoQuality: o.autoQuality !== undefined ? !!o.autoQuality : !Number.isFinite(o.fixedTime),
   };
+}
+
+/** Soft limit (|result| < max, ~identity for small values). @param {number} v @param {number} max */
+export function softLimit(v, max) {
+  return max > 0 ? max * Math.tanh(v / max) : v;
+}
+
+/**
+ * Keep the director's head rotation inside what the head can show (relief: a 2.5D card).
+ * @param {import('./director.js').AnimState} a mutated
+ * @param {{ yaw?: number, pitch?: number, roll?: number }|null|undefined} lim
+ */
+export function limitHeadMotion(a, lim) {
+  if (!lim) return a;
+  if (lim.yaw) a.headYaw = softLimit(a.headYaw, lim.yaw);
+  if (lim.pitch) a.headPitch = softLimit(a.headPitch, lim.pitch);
+  if (lim.roll) a.headRoll = softLimit(a.headRoll, lim.roll);
+  return a;
 }
 
 /** Even-odd point in polygon test on a flat [x0,y0,x1,y1,...] array. */
@@ -85,6 +105,8 @@ export async function createAvatar(canvas, options = {}) {
   let overrides = {};
 
   const director = new Director({ seed: opts.seed, idleMotion: opts.idleMotion });
+  const governor = new QualityGovernor();
+  let motionLimits = null;
   let head = /** @type {any} */ (null);
   let headName = '';
   let packPalette = null;
@@ -98,8 +120,15 @@ export async function createAvatar(canvas, options = {}) {
     fixedTime: opts.fixedTime,
     zoom: opts.zoom,
     onUpdate: (dt, time, settle) => {
-      const a = director.update(dt, time, { settle });
+      const a = limitHeadMotion(director.update(dt, time, { settle }), motionLimits);
       for (const k in overrides) a[k] = overrides[k];
+      if (opts.autoQuality && !settle && dt > 0) {
+        const next = governor.sample(performance.now() / 1000, stage.fps, stage.quality);
+        if (next) {
+          console.warn(`[avatar] sustained ${Math.round(stage.fps)} fps: lowering quality ${stage.quality} -> ${next}`);
+          applyQuality(next);
+        }
+      }
       head?.update(dt, time, a);
       particles?.update(dt, time, a);
       post?.update(a);
@@ -112,6 +141,13 @@ export async function createAvatar(canvas, options = {}) {
       post?.setSize(w, h);
       syncParticleView();
     },
+    onContextLost: () => {
+      // GL objects of the lost context must never be deleted later (see forgetDisposeListeners)
+      const res = collectGLResources(stage.scene);
+      if (post) for (const o of post.glResources()) res.add(o);
+      forgetDisposeListeners(res);
+    },
+    onContextRestored: () => governor.reset(performance.now() / 1000),
   });
 
   const tier = () => QUALITY[stage.quality];
@@ -217,6 +253,7 @@ export async function createAvatar(canvas, options = {}) {
     throw e;
   }
   stage.setFraming(head.framing());
+  motionLimits = head.motionLimits?.() ?? null;
 
   const baseCount = () => Math.round(tier().particles * opts.particles);
   particles = new Particles({
@@ -249,6 +286,19 @@ export async function createAvatar(canvas, options = {}) {
   let hitPoly = head.hitPolygon?.() ?? null;
   const _v = new THREE.Vector3();
 
+  /** @param {string} q */
+  function applyQuality(q) {
+    if (normalizeQuality(q) === stage.quality) return;
+    stage.setQuality(q);
+    post.setTier(tier());
+    post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio));
+    ctx.quality = stage.quality;
+    head.setOptions?.({ quality: stage.quality, tier: tier() });
+    if (particlesOk) particles.setCount(baseCount());
+    syncParticleView();
+    governor.reset(performance.now() / 1000);
+  }
+
   const api = {
     /** Name of the head actually in use (after fallbacks). */
     get renderer() { return headName; },
@@ -266,13 +316,8 @@ export async function createAvatar(canvas, options = {}) {
     lookAt(x, y) { director.lookAt(x, y); stage.requestRender(); },
     /** @param {Partial<AvatarOptions>} p */
     setOptions(p = {}) {
-      if (p.quality !== undefined && normalizeQuality(p.quality) !== stage.quality) {
-        stage.setQuality(p.quality);
-        post.setTier(tier());
-        post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio));
-        ctx.quality = stage.quality;
-        head.setOptions?.({ quality: stage.quality, tier: tier() });
-      }
+      if (p.quality !== undefined) applyQuality(p.quality);
+      if (p.autoQuality !== undefined) opts.autoQuality = !!p.autoQuality;
       if (p.particles !== undefined) opts.particles = Math.min(2, Math.max(0, Number(p.particles) || 0));
       if (particlesOk) particles.setCount(baseCount());
       post.setOptions({ bloom: p.bloom, transparent: p.transparent, opacity: p.opacity });

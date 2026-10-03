@@ -26,28 +26,35 @@ export default class ReliefHead {
     const perr = validatePack(pack);
     if (perr.length) throw new Error(`invalid avatar pack (${this.base}): ${perr.join('; ')}`);
     const f = pack.files;
-    const [mesh, plate, closed, mouth, masksA, masksB] = await Promise.all([
+    const [mesh, plate, closed, mouth, masksA, masksB, masksC] = await Promise.all([
       loadJSON(this.base + f.mesh),
       loadTexture(this.base + f.plate, { srgb: true }),
       loadTexture(this.base + f.eyesClosed, { srgb: true }),
       loadTexture(this.base + f.mouth, { srgb: true }),
       loadTexture(this.base + f.masksA, { srgb: false }),
       loadTexture(this.base + f.masksB, { srgb: false }),
+      // lid coordinate / occlusion (baker >= 1.1); older packs fall back to the cross-fade blink
+      f.masksC ? loadTexture(this.base + f.masksC, { srgb: false }) : Promise.resolve(fallbackMaskC(THREE)),
     ]);
     if (signal?.aborted) {
-      [plate, closed, mouth, masksA, masksB].forEach((t) => t.dispose());
+      [plate, closed, mouth, masksA, masksB, masksC].forEach((t) => t.dispose());
       throw new Error('aborted');
     }
     const merr = validateMesh(mesh);
     if (merr.length) throw new Error(`invalid relief mesh: ${merr.join('; ')}`);
     this.pack = pack;
-    this.textures = { plate, closed, mouth, masksA, masksB };
-    for (const t of Object.values(this.textures)) {
-      t.generateMipmaps = false;
-      t.minFilter = THREE.LinearFilter;
+    this.hasLids = !!f.masksC;
+    this.textures = { plate, closed, mouth, masksA, masksB, masksC };
+    const maxAniso = this.ctx.renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+    for (const [name, t] of Object.entries(this.textures)) {
+      // The colour plates are minified ~2.6x at the small window preset: without mipmaps the fine
+      // grid turns into pixel noise. Masks stay single-level (exact coverage / lid coordinate).
+      const mip = name === 'plate' || name === 'closed' || name === 'mouth';
+      t.generateMipmaps = mip;
+      t.minFilter = mip ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
       t.magFilter = THREE.LinearFilter;
       t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
-      t.anisotropy = 1;
+      t.anisotropy = mip ? Math.min(8, maxAniso) : 1;
       t.needsUpdate = true;
     }
     this.rig = buildRig(pack);
@@ -69,6 +76,7 @@ export default class ReliefHead {
       uBreathY: { value: 0 }, uPlateAspect: { value: r.plateW },
       uCornerL: { value: new THREE.Vector2() }, uCornerR: { value: new THREE.Vector2() },
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
+      uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
     };
   }
 
@@ -112,6 +120,7 @@ export default class ReliefHead {
     this.faceUniforms = {
       ...this._commonUniforms(),
       tPlate: { value: t.plate }, tClosed: { value: t.closed }, tMaskA: { value: t.masksA }, tMaskB: { value: t.masksB },
+      tMaskC: { value: t.masksC }, uHasLids: { value: this.hasLids ? 1 : 0 },
       uPlateSize: { value: new THREE.Vector2(W, H) },
       uEyeL: { value: new THREE.Vector4(r.eyes.L.uv[0], r.eyes.L.uv[1], r.eyes.L.irisR, 0) },
       uEyeR: { value: new THREE.Vector4(r.eyes.R.uv[0], r.eyes.R.uv[1], r.eyes.R.irisR, 0) },
@@ -162,7 +171,7 @@ export default class ReliefHead {
     this.cavityUniforms = {
       ...this._commonUniforms(),
       tMouth: { value: this.textures.mouth },
-      uOpen: { value: 0 }, uSleep: { value: 0 },
+      uTeeth: { value: 0 }, uSleep: { value: 0 },
       uDark: { value: new THREE.Color().setRGB(dark[0], dark[1], dark[2], THREE.SRGBColorSpace) },
     };
     // share the rig uniform objects so one update drives both meshes
@@ -211,8 +220,16 @@ export default class ReliefHead {
     f.uSleep.value = a.sleep;
     f.uFx.value = this.fx;
     const cu = this.cavityUniforms;
-    cu.uOpen.value = Math.max(a.jawOpen, a.mouthWide * 0.5);
+    cu.uTeeth.value = cavityTeeth(a);
     cu.uSleep.value = a.sleep;
+  }
+
+  /**
+   * Largest head rotation (radians) this 2.5D card still sells: beyond ~0.3 rad yaw the far cheek
+   * compresses and the cranium edge turns hard. createAvatar soft-limits the director to it.
+   */
+  motionLimits() {
+    return { yaw: 0.25, pitch: 0.18, roll: 0.2 };
   }
 
   framing() {
@@ -242,6 +259,7 @@ export default class ReliefHead {
       neckHalfWidth: neck.halfWidth / H,
       depth: (p.rig.depth?.inflateRadius ?? 0.3 * H) / H,
       outline: this._worldOutline(p.visibleOutline ?? p.outline),
+      jaw: jawFromLandmarks(p.landmarks, W, H),
     };
   }
 
@@ -276,6 +294,36 @@ export default class ReliefHead {
     if (this.textures) Object.values(this.textures).forEach((t) => t.dispose());
     this.group = null;
   }
+}
+
+/**
+ * Jaw line as a half ellipse (world units) through both jaw angles and the chin, for the
+ * particle collar. @returns {{center:[number,number], radius:[number,number]}|undefined}
+ */
+export function jawFromLandmarks(lm, W, H) {
+  const l = lm?.jawAngleL, r = lm?.jawAngleR, c = lm?.chin;
+  if (!l || !r || !c) return undefined;
+  const cy = 0.5 * (l[1] + r[1]);
+  return {
+    center: [(0.5 * (l[0] + r[0]) - W / 2) / H, (H / 2 - cy) / H],
+    radius: [Math.max(1, 0.5 * (r[0] - l[0])) / H, Math.max(1, c[1] - cy) / H],
+  };
+}
+
+/**
+ * How much of the teeth the parted lips reveal (the dark interior always shows through the
+ * opening): jaw and wide visemes bare the teeth, a rounded O / U pucker mostly does not.
+ * @param {AnimState} a
+ */
+export function cavityTeeth(a) {
+  return Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06);
+}
+
+/** 1x1 masks_c stand-in for packs without one: no lid coordinate, full occlusion. */
+function fallbackMaskC(THREE) {
+  const t = new THREE.DataTexture(new Uint8Array([0, 0, 255, 255]), 1, 1, THREE.RGBAFormat);
+  t.needsUpdate = true;
+  return t;
 }
 
 function interp(x, xs, ys) {

@@ -11,6 +11,6 @@ The pipeline (see tools/bake/README.md):
 5. ``pack``      write the pack (pack.json manifest + images + mesh.json) and debug overlays.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 PACK_FORMAT = "lawnmower-avatar-pack"
 PACK_VERSION = 1

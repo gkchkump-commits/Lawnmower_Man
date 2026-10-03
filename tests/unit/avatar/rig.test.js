@@ -62,8 +62,9 @@ describe('relief rig uniforms', () => {
     expect(u.jawDrop).toBeCloseTo(RIG_LIMITS.jawDropFh * rig.faceH, 9);
     expect(u.cornerL[0]).toBeLessThan(0);       // wide: corners move outward
     expect(u.cornerR[0]).toBeGreaterThan(0);
-    expect(u.lids[0]).toBeCloseTo(rig.eyes.L.height, 9);
-    expect(u.lids[2]).toBeCloseTo(rig.eyes.R.height * 0.5, 9);
+    // the committed pack has a lid map: the blink is a texture wipe, no geometric lid travel
+    expect(rig.lidTravel).toBe(0);
+    expect(u.lids).toEqual([0, 0, 0, 0]);
     expect(u.brows[0]).toBeGreaterThan(0);
     expect(u.gaze[0]).toBeGreaterThan(0);
     expect(u.gaze[1]).toBeLessThan(0);
@@ -89,5 +90,44 @@ describe('relief rig uniforms', () => {
     rigUniforms(rig, { ...createAnimState(), jawOpen: 0.5 }, u);
     expect([u.cornerL, u.cornerR, u.lids, u.brows, u.gaze, u.blink, u.headRot]).toEqual(refs);
     refs.forEach((r, i) => expect(r).toBe([u.cornerL, u.cornerR, u.lids, u.brows, u.gaze, u.blink, u.headRot][i]));
+  });
+});
+
+describe('relief rig: lid wipe, round, neck', () => {
+  it('keeps the geometric lid squash for legacy packs without masks_c', () => {
+    const legacy = structuredClone(pack);
+    delete legacy.files.masksC;
+    const rig = buildRig(legacy);
+    expect(rig.lidTravel).toBe(1);
+    const a = createAnimState();
+    Object.assign(a, { blinkL: 1, blinkR: 0.5 });
+    const u = rigUniforms(rig, a, {});
+    expect(u.lids[0]).toBeCloseTo(rig.eyes.L.height, 9);
+    expect(u.lids[2]).toBeCloseTo(rig.eyes.R.height * 0.5, 9);
+    expect(u.blink).toEqual([1, 0.5]);
+  });
+  it('still squints the lower lids on a smile with the lid map', () => {
+    const rig = buildRig(pack);
+    const a = createAnimState();
+    a.smile = 1;
+    const u = rigUniforms(rig, a, {});
+    expect(u.lids[0]).toBe(0);
+    expect(u.lids[1]).toBeCloseTo(RIG_LIMITS.smileLidFrac * rig.eyes.L.height, 9);
+  });
+  it('parts the lips at the centre for a rounded O / U', () => {
+    const rig = buildRig(pack);
+    const a = createAnimState();
+    a.mouthRound = 1;
+    const u = rigUniforms(rig, a, {});
+    expect(u.upperLift).toBeCloseTo(RIG_LIMITS.roundLipFh * rig.faceH, 9);
+    expect(u.lowerDrop).toBeCloseTo(RIG_LIMITS.roundLipFh * rig.faceH, 9);
+    expect(u.cornerL[0]).toBeCloseTo(RIG_LIMITS.roundCornerHw * rig.mouthHalfW, 9);   // corners in
+  });
+  it('turns the bust but not the lower neck (band just under the chin)', () => {
+    const rig = buildRig(pack);
+    const chinW = (pack.plate.height / 2 - pack.framing.chinY) / pack.plate.height;
+    expect(rig.neckBand[0]).toBeLessThan(rig.neckBand[1]);
+    expect(rig.neckBand[1]).toBeLessThan(chinW);              // the chin itself turns fully
+    expect(rig.neckBand[0]).toBeGreaterThan(chinW - 0.25);
   });
 });

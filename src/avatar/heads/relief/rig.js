@@ -9,6 +9,10 @@
  * @property {[number,number,number]} headPivot
  * @property {{L: EyeRig, R: EyeRig}} eyes
  * @property {number} plateW        plate width/height ratio (uv x scale)
+ * @property {[number,number]} neckBand world y range over which the head rotation fades in
+ *           (the neck below [0] stays put, everything above [1] turns with the head)
+ * @property {number} lidTravel     geometric lid travel per unit blink (0 when the pack has a lid
+ *           map: the blink is a texture wipe, so no texels may shift; 1 for older packs)
  */
 /** @typedef {{ center:[number,number], uv:[number,number], irisR:number, height:number }} EyeRig */
 
@@ -17,8 +21,9 @@ export const RIG_LIMITS = {
   jawDropFh: 0.095,       // lower lip drop at jawOpen = 1
   wideCornerHw: 0.11,     // corners outward for mouthWide = 1
   wideLipFh: 0.007,       // lips part (teeth show) for wide
-  roundCornerHw: 0.2,     // corners inward for mouthRound = 1
-  roundPushFh: 0.025,     // lips forward for round
+  roundCornerHw: 0.3,     // corners inward for mouthRound = 1
+  roundPushFh: 0.035,     // lips forward for round
+  roundLipFh: 0.012,      // centre parting for round (the lip weights are 0 at the corners)
   smileUpFh: 0.032,       // corners up for smile
   smileOutHw: 0.07,
   smileLidFrac: 0.12,     // lower lid squint
@@ -39,6 +44,7 @@ export function buildRig(pack) {
   const wx = (x) => (x - W / 2) * s, wy = (y) => (H / 2 - y) * s, wz = (z) => z * s;
   const r = pack.rig;
   const faceH = r.faceHeight * s;
+  const chinY = pack.framing?.chinY ?? r.chinY ?? H * 0.8;
   const jawPivot = /** @type {[number,number,number]} */ ([wx(r.jawPivot[0]), wy(r.jawPivot[1]), wz(r.jawPivot[2])]);
   const eye = (e) => ({
     center: /** @type {[number,number]} */ ([wx(e.center[0]), wy(e.center[1])]),
@@ -53,6 +59,8 @@ export function buildRig(pack) {
     headPivot: [wx(r.headPivot[0]), wy(r.headPivot[1]), wz(r.headPivot[2])],
     eyes: { L: eye(r.eyes.L), R: eye(r.eyes.R) },
     plateW: W / H,
+    neckBand: [wy(chinY) - 0.12, wy(chinY) - 0.01],
+    lidTravel: pack.files?.masksC ? 0 : 1,
   };
 }
 
@@ -86,8 +94,8 @@ export function rigUniforms(rig, a, u) {
   const fh = rig.faceH, hw = rig.mouthHalfW;
   u.jawDrop = L.jawDropFh * fh * clamp01(a.jawOpen);
   const wide = clamp01(a.mouthWide), round = clamp01(a.mouthRound), smile = clamp01(a.smile);
-  u.upperLift = (L.wideLipFh * wide + 0.004 * smile) * fh;
-  u.lowerDrop = (L.wideLipFh * 1.2 * wide) * fh;
+  u.upperLift = (L.wideLipFh * wide + 0.004 * smile + L.roundLipFh * round) * fh;
+  u.lowerDrop = (L.wideLipFh * 1.2 * wide + L.roundLipFh * round) * fh;
   u.lipPush = L.roundPushFh * round * fh;
   // corners: x outward is -x for L, +x for R
   const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
@@ -99,11 +107,12 @@ export function rigUniforms(rig, a, u) {
   // eyelids (world units, + = toward closing)
   const bl = clamp01(a.blinkL), br = clamp01(a.blinkR);
   const eL = rig.eyes.L.height, eR = rig.eyes.R.height;
+  const lt = rig.lidTravel ?? 1;
   u.lids = u.lids || [0, 0, 0, 0];
-  u.lids[0] = bl * eL;
-  u.lids[1] = (bl + L.smileLidFrac * smile) * eL;
-  u.lids[2] = br * eR;
-  u.lids[3] = (br + L.smileLidFrac * smile) * eR;
+  u.lids[0] = lt * bl * eL;
+  u.lids[1] = (lt * bl + L.smileLidFrac * smile) * eL;
+  u.lids[2] = lt * br * eR;
+  u.lids[3] = (lt * br + L.smileLidFrac * smile) * eR;
   u.brows = u.brows || [0, 0];
   u.brows[0] = u.brows[1] = L.browFh * clamp01(a.browUp) * fh;
   // gaze: iris offset in plate UV units (x uses the plate aspect)

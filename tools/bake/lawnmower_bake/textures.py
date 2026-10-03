@@ -27,6 +27,8 @@ class Textures:
     mouth_rect: tuple            # (x, y, w, h) of the mouth texture in plate pixels
     masks_a: np.ndarray          # (H, W, 3): R alpha, G gold lines, B sparkle/grid
     masks_b: np.ndarray          # (H, W, 3): R eye apertures, G eye regions (blink), B mouth region
+    masks_c: np.ndarray          # (H, W, 3): R lid coordinate (0.5 + 0.5 w), G upper lid, B occlusion
+    lids: dict                   # per eye: columns + upper / closed / lower lid curves (px)
     lm: np.ndarray               # neutral landmarks (478, 3), inner lips snapped to the slit
     slit_line: np.ndarray        # (K, 2) polyline of the closed-mouth line (px)
     palette: dict
@@ -234,35 +236,280 @@ def eye_geometry(lm):
     return out
 
 
-def build_closed_eyes(plate, imgs, sel, frames, eyes, debug=None):
+def register_closed_eyes(plate, imgs, sel, frames, eyes):
+    """The blink frame registered to the plate, once per eye (full frames, not yet matched)."""
     H, W = plate.shape[:2]
     blink = to_float(imgs[sel.blink])
-    out = np.zeros_like(plate)
-    region = np.zeros((H, W), np.float32)
-    shifts = {}
+    warped, shifts = {}, {}
     for key, e in eyes.items():
         cx = 0.5 * (e["box"][0] + e["box"][2])
         cy = 0.5 * (e["box"][1] + e["box"][3])
-        # wide enough that the eye corners lie in the fully replaced core (core = 60% of rx)
         rx, ry = 1.05 * e["width"], 1.55 * e["height"]
-        reg = _ellipse_mask((H, W), (cx, cy), rx, ry, 0.4)
         # Register on the ring around the eye (lids/brow/cheek), excluding the aperture itself.
         ring = _ellipse_mask((H, W), (cx, cy), rx * 1.25, ry * 1.25, 0.05) * \
             (1 - _ellipse_mask((H, W), (cx, cy), 0.62 * e["width"], 0.9 * e["height"], 0.05))
         Mk, d = _register(plate, blink, frames, sel.neutral, sel.blink, ring)
         shifts[key] = d
-        warped = A.warp(blink, Mk, (W, H))
-        # Match brightness/contrast of the lid skin so the cross-fade has no visible patch edge.
-        sel_px = ring > 0.5
+        # bicubic: the closed lid line is thin, bilinear resampling would soften it
+        warped[key] = np.clip(cv2.warpAffine(blink, Mk, (W, H), flags=cv2.INTER_CUBIC,
+                                             borderMode=cv2.BORDER_REFLECT), 0, 1)
+    log(f"  closed eyes from frame {sel.blink}, registration {shifts}")
+    return warped, shifts
+
+
+def _ridge_rows(L, xs, lo, hi):
+    """Per column: sub-pixel row of the brightest pixel of ``L`` in [lo, hi) and its prominence."""
+    H = L.shape[0]
+    rows = np.full(len(xs), np.nan, np.float64)
+    prom = np.zeros(len(xs), np.float64)
+    for k, (x, a, b) in enumerate(zip(xs, lo, hi)):
+        a, b = int(max(1, np.floor(a))), int(min(H - 2, np.ceil(b)))
+        if b - a < 3:
+            continue
+        col = L[a:b, x]
+        i = int(np.argmax(col))
+        off = 0.0
+        if 0 < i < len(col) - 1:
+            d = col[i - 1] - 2 * col[i] + col[i + 1]
+            off = float(np.clip(0.5 * (col[i - 1] - col[i + 1]) / d, -0.5, 0.5)) if abs(d) > 1e-6 else 0.0
+        rows[k] = a + i + off
+        r = a + i
+        prom[k] = float(L[r, x] - 0.5 * (L[max(0, r - 7), x] + L[min(H - 1, r + 7), x]))
+    return rows, prom
+
+
+def _robust_poly(xs, ys, w, deg=4, iters=4, tol=2.0):
+    ok = np.isfinite(ys) & (w > 0)
+    x = (xs - xs.mean()) / max(1.0, np.ptp(xs) / 2)
+    ww = np.where(ok, w, 0.0)
+    ys0 = np.where(ok, ys, 0.0)
+    coef = np.polyfit(x[ok], ys0[ok], deg, w=ww[ok])
+    for _ in range(iters):
+        res = np.abs(np.polyval(coef, x) - ys0)
+        ww = np.where(ok & (res < tol * 2.5), ww, ww * 0.1)
+        coef = np.polyfit(x[ok], ys0[ok], deg, w=ww[ok] + 1e-6)
+    return np.polyval(coef, x)
+
+
+def detect_lids(plate, closed_by_eye, lm, eyes):
+    """Visible eye "almond" per eye, as per-column curves in plate px (y down).
+
+    MediaPipe's lid landmarks are much tighter than the hologram's glowing eye (its upper lid
+    runs through the iris, its outer corner sits ~25% inside the visible tip), so the curves are
+    measured in the images:
+      closed: the bright closed-lid line of the (registered) blink frame; its extent gives the
+              eye's tips (corners);
+      upper:  the bright upper lid margin of the open eye (ridge above the MediaPipe lid),
+              ramped down to the tips outside MediaPipe's corners;
+      lower:  MediaPipe's lower lid (it matches the visible margin) + 2 px, ramped to the tips.
+    Returns {key: {"x": int columns, "upper", "closed", "lower": float arrays}}.
+    """
+    out = {}
+    Lp = cv2.GaussianBlur(_gray(plate), (0, 0), 1.0)
+    tophat = Lp - cv2.morphologyEx(Lp, cv2.MORPH_OPEN, disk(3))
+    tophat = cv2.GaussianBlur(tophat, (0, 0), 1.2)
+    for key, upper_idx, lower_idx, iris in (("L", LM.EYE_L_UPPER, LM.EYE_L_LOWER, LM.IRIS_L),
+                                            ("R", LM.EYE_R_UPPER, LM.EYE_R_LOWER, LM.IRIS_R)):
+        e = eyes[key]
+        U = lm[upper_idx, :2].astype(np.float64)
+        Lw = lm[lower_idx, :2].astype(np.float64)
+        xa, xb = float(U[0, 0]), float(U[-1, 0])            # MediaPipe corners (screen left, right)
+        ew = xb - xa
+        ic_y, ir = e["center"][1], e["irisRadius"]
+        Lc = cv2.GaussianBlur(_gray(closed_by_eye[key]), (0, 0), 1.5)
+
+        # --- closed lid line + tips -----------------------------------------------------------
+        xs = np.arange(int(np.floor(xa - 0.6 * ew)), int(np.ceil(xb + 0.6 * ew)) + 1)
+        lo_mp = np.interp(xs, Lw[:, 0], Lw[:, 1])                  # flat beyond the corners
+        rows, prom = _ridge_rows(Lc, xs, lo_mp - 22, lo_mp + 8)
+        val = np.array([Lc[int(round(r)), x] if np.isfinite(r) else 0.0 for x, r in zip(xs, rows)])
+        centre = (xs > xa + 0.25 * ew) & (xs < xb - 0.25 * ew)
+        thr = 0.82 * float(np.median(val[centre]))
+        mid = int(np.argmin(np.abs(xs - e["center"][0])))
+
+        def walk(step):
+            # follow the line outward while it stays bright and continuous (the row of the
+            # brightest pixel jumps once the search runs past the tip)
+            k, last, bad, end = mid, rows[mid], 0, mid
+            while 0 < k < len(xs) - 1:
+                k += step
+                ok = val[k] > thr and abs(rows[k] - last) <= 3.0
+                if ok:
+                    last, bad, end = rows[k], 0, k
+                else:
+                    bad += 1
+                    if bad > 2:
+                        break
+            return end
+        tip_a = float(np.clip(xs[walk(-1)], xa - 0.5 * ew, xa + 0.05 * ew))
+        tip_b = float(np.clip(xs[walk(1)], xb - 0.05 * ew, xb + 0.5 * ew))
+        cols = np.arange(int(np.ceil(tip_a)), int(np.floor(tip_b)) + 1)
+        sel_c = (xs >= tip_a) & (xs <= tip_b)
+        closed = np.interp(cols, xs[sel_c], _robust_poly(xs[sel_c].astype(np.float64), rows[sel_c],
+                                                         np.maximum(prom[sel_c], 0.02)))
+
+        # --- upper margin of the open eye -----------------------------------------------------
+        inside = (cols > xa + 1) & (cols < xb - 1)
+        u_mp = np.interp(cols, U[:, 0], U[:, 1])
+        # Trace the margin outward from above the iris centre, one column at a time, staying on
+        # the same ridge (it only descends toward the corners). A per-column search would jump to
+        # the brow crease / orbit loop next to the corners or to the iris rim below the margin.
+        c0 = int(np.argmin(np.abs(cols - e["center"][0])))
+        r0, _ = _ridge_rows(tophat, cols[c0:c0 + 1], [ic_y - 1.9 * ir], [ic_y - 0.7 * ir])
+        urow = np.full(len(cols), np.nan)
+        urow[c0] = r0[0]
+        for step in (-1, 1):
+            k, last = c0, r0[0]
+            while 0 <= k + step < len(cols) and inside[k + step]:
+                k += step
+                hi = min(last + 3.5, closed[k] - 1.0, u_mp[k])
+                r, _ = _ridge_rows(tophat, cols[k:k + 1], [last - 1.5], [max(hi, last + 0.5)])
+                last = r[0] if np.isfinite(r[0]) else last
+                urow[k] = last
+        ok = inside & np.isfinite(urow)
+        ci = cols[ok].astype(np.float64)
+        from scipy.ndimage import gaussian_filter1d
+        fit = gaussian_filter1d(urow[ok], 2.0)
+        k_a, k_b = np.nonzero(ok)[0][[0, -1]]
+        upper = np.interp(cols, ci, fit)
+        # outside MediaPipe's corners: ramp toward the tips (where the lids meet the closed line)
+        for k in range(0, k_a):
+            t = (cols[k] - tip_a) / max(1.0, cols[k_a] - tip_a)
+            upper[k] = closed[k] + (upper[k_a] - closed[k_a]) * np.sin(0.5 * np.pi * t)
+        for k in range(k_b + 1, len(cols)):
+            t = (tip_b - cols[k]) / max(1.0, tip_b - cols[k_b])
+            upper[k] = closed[k] + (upper[k_b] - closed[k_b]) * np.sin(0.5 * np.pi * t)
+        upper = np.minimum(gaussian_filter1d(upper, 1.5) - 2.0, closed - 1.0)   # generous: margin inside
+
+        # --- lower margin ---------------------------------------------------------------------
+        lower = np.interp(cols, Lw[:, 0], Lw[:, 1]) + 2.0
+        for k in range(len(cols)):
+            if cols[k] < xa:
+                t = (cols[k] - tip_a) / max(1.0, xa - tip_a)
+                lower[k] = closed[k] + (np.interp(xa, Lw[:, 0], Lw[:, 1]) + 2.0 - closed[k]) * t
+            elif cols[k] > xb:
+                t = (tip_b - cols[k]) / max(1.0, tip_b - xb)
+                lower[k] = closed[k] + (np.interp(xb, Lw[:, 0], Lw[:, 1]) + 2.0 - closed[k]) * t
+        lower = np.maximum(gaussian_filter1d(lower, 1.5), closed + 1.0)
+        out[key] = {"x": cols.astype(np.int32), "upper": upper.astype(np.float32),
+                    "closed": closed.astype(np.float32), "lower": lower.astype(np.float32)}
+        log(f"  lids {key}: tips {tip_a:.1f}..{tip_b:.1f} (MediaPipe {xa:.1f}..{xb:.1f}), "
+            f"upper apex {upper.min():.1f}, closed {closed.min():.1f}..{closed.max():.1f}")
+    return out
+
+
+def lid_maps(shape, lids):
+    """Per-pixel lid coordinate for the blink wipe.
+
+    w = min((y - upper) / (closed - upper), (lower - y) / (lower - closed)) inside each eye's
+    almond: 0 on the open lid margins, 1 on the closed-lid line, negative outside (falling to -1
+    about 3 px past the tips / a lid height above and below). The engine shows the closed-eye
+    frame where w < blink and the open plate where w > blink, so the upper lid edge sweeps from
+    the open margin down to the closed line and the lower one rises a little to meet it.
+    Returns (w in [-1, 1], upper-branch indicator 0..1, almond mask bool).
+    """
+    H, W = shape[:2]
+    w = np.full((H, W), -1.0, np.float32)
+    up = np.zeros((H, W), np.float32)
+    for key, d in lids.items():
+        xs, U, C, Lo = d["x"], d["upper"], d["closed"], d["lower"]
+        x0, x1 = int(xs[0]) - 40, int(xs[-1]) + 40
+        y0, y1 = int(np.floor(U.min())) - 70, int(np.ceil(Lo.max())) + 60
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(W - 1, x1), min(H - 1, y1)
+        yy = np.arange(y0, y1 + 1, dtype=np.float32)[:, None]
+        xx = np.arange(x0, x1 + 1, dtype=np.float32)[None, :]
+        u = np.interp(xx[0], xs, U)[None, :]
+        c = np.interp(xx[0], xs, C)[None, :]
+        lo = np.interp(xx[0], xs, Lo)[None, :]
+        t_up = (yy - u) / np.maximum(c - u, 3.0)
+        t_lo = (lo - yy) / np.maximum(lo - c, 2.0)
+        ww = np.minimum(t_up, t_lo)
+        # beyond the tips the almond has no height: fall off with the distance to the tip point
+        for tip_x, tip_y, sgn in ((float(xs[0]), float(C[0]), -1.0), (float(xs[-1]), float(C[-1]), 1.0)):
+            beyond = (xx - tip_x) * sgn > 0
+            dist = np.hypot(xx - tip_x, yy - tip_y)
+            ww = np.where(beyond, np.minimum(ww, -dist / 3.0), ww)
+        ww = np.clip(ww, -1.0, 1.0)
+        sub = w[y0:y1 + 1, x0:x1 + 1]
+        w[y0:y1 + 1, x0:x1 + 1] = np.maximum(sub, ww)
+        upi = np.clip(c - yy + 0.5, 0.0, 1.0) * ((xx >= xs[0] - 2) & (xx <= xs[-1] + 2))
+        up[y0:y1 + 1, x0:x1 + 1] = np.maximum(up[y0:y1 + 1, x0:x1 + 1], upi)
+    return w, up, w >= 0.0
+
+
+def eye_regions(shape, almond_by_eye, core_px=14.0, fall_px=26.0):
+    """Soft region per eye that the closed-eye frame replaces at full closure: the almond grown
+    by ``core_px`` (covers the open eye's glow halo) with a ``fall_px`` soft edge on the lid skin."""
+    regions = {}
+    for key, almond in almond_by_eye.items():
+        dist = cv2.distanceTransform((~almond).astype(np.uint8), cv2.DIST_L2, 5)
+        regions[key] = (1.0 - smoothstep(core_px, core_px + fall_px, dist)).astype(np.float32)
+    return regions
+
+
+def compose_closed_eyes(plate, closed_by_eye, regions):
+    """Closed-eye texture: each registered blink frame inside its eye region (full strength where
+    the region is > 0, black elsewhere), brightness-matched to the plate on the soft edge of the
+    region, which is the only place where the two frames are blended at full closure."""
+    out = np.zeros_like(plate)
+    region = np.zeros(plate.shape[:2], np.float32)
+    for key, reg in regions.items():
+        warped = closed_by_eye[key].copy()
+        ring = (reg > 0.05) & (reg < 0.9)
         for c in range(3):
-            a, b = plate[..., c][sel_px], warped[..., c][sel_px]
+            a, b = plate[..., c][ring], warped[..., c][ring]
             gain = np.clip(a.std() / max(b.std(), 1e-4), 0.8, 1.25)
             warped[..., c] = (warped[..., c] - b.mean()) * gain + a.mean()
-        warped = np.clip(warped, 0, 1)
-        out = out * (1 - reg[..., None]) + warped * reg[..., None]
+        support = cv2.dilate((reg > 0.001).astype(np.uint8), disk(3)).astype(bool)
+        out[support] = np.clip(warped[support], 0, 1)
         region = np.maximum(region, reg)
-    log(f"  closed eyes from frame {sel.blink}, registration {shifts}")
-    return out.astype(np.float32), region, shifts
+    return out.astype(np.float32), region
+
+
+def occlusion_mask(alpha, lm, face_h, plate):
+    """Where the head may darken the desktop behind it (masks_c B): the face and the cranium,
+    where they visibly glow. Ears, the dim gap between ear and cranium, the dim fringe and the
+    dissolving neck are 0, so on a light desktop they add light instead of painting grey. The
+    brightness gate uses a blurred luminance: a per-pixel gate would let the desktop through
+    between the grid lines (speckles)."""
+    H, W = alpha.shape
+    face = polygon_mask((H, W), lm[LM.FACE_OVAL, :2])
+    face = feather(cv2.dilate(face, disk(int(round(0.012 * face_h)))), 6.0)
+    brow_y = float(np.mean(lm[LM.BROW_L + LM.BROW_R, 1]))
+    eye_y = float(np.mean(lm[LM.EYE_L_UPPER + LM.EYE_R_UPPER, 1]))
+    ear_top = 0.5 * (brow_y + eye_y)
+    yy = np.arange(H, dtype=np.float32)[:, None]
+    cranium = 1.0 - smoothstep(ear_top - 0.04 * face_h, ear_top + 0.04 * face_h, yy)
+    glow = smoothstep(0.03, 0.12, cv2.GaussianBlur(_gray(plate), (0, 0), 6.0))
+    # the outermost few px of the silhouette (dim outer glow / fringe) never occlude: on a light
+    # desktop they would draw a dark outline around the head
+    inner = cv2.distanceTransform((alpha > 0.5).astype(np.uint8), cv2.DIST_L2, 5)
+    edge = smoothstep(1.5, 8.0, inner)
+    occ = np.maximum(face, np.broadcast_to(cranium, (H, W))) * glow * edge * (alpha > 0.0)
+    return np.clip(occ, 0, 1).astype(np.float32)
+
+
+def suppress_neck_motes(plate, alpha, lm, chin_y, neck_fade_y, face_h):
+    """Inpaint the source video's bokeh motes baked into the neck (static motes next to the live
+    neck particles): small bright blobs (white top-hat, thin grid lines excluded) outside the face
+    oval, from just above where the neck starts to dissolve."""
+    H, W = plate.shape[:2]
+    L = _gray(plate)
+    th = L - cv2.morphologyEx(L, cv2.MORPH_OPEN, disk(7))
+    blobs = cv2.morphologyEx(th, cv2.MORPH_OPEN, disk(2))
+    face = feather(cv2.dilate(polygon_mask((H, W), lm[LM.FACE_OVAL, :2]), disk(3)), 3.0)
+    yy = np.arange(H, dtype=np.float32)[:, None]
+    zone = (1.0 - face) * smoothstep(neck_fade_y - 0.04 * face_h, neck_fade_y, yy) * (alpha > 0.0)
+    m = ((blobs > 0.02) & (zone > 0.2)).astype(np.uint8)
+    m = cv2.dilate(m, disk(3))
+    u8 = (np.clip(plate, 0, 1) * 255 + 0.5).astype(np.uint8)
+    inp = cv2.inpaint(u8, m * 255, 6, cv2.INPAINT_TELEA).astype(np.float32) / 255.0
+    inp = cv2.GaussianBlur(inp, (0, 0), 1.2)
+    k = (zone * feather(m.astype(np.float32), 2.0) * 1.5).clip(0, 1)[..., None]
+    out = plate * (1 - k) + inp * k
+    log(f"  neck motes: {int(m.sum())} px inpainted")
+    return out.astype(np.float32)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -529,12 +776,20 @@ def build_textures(info, frames, sel, imgs, debug_dir=None) -> Textures:
                                  sil_info["chinY"] + 0.10 * sel.face_height,
                                  np.arange(H)[:, None].astype(np.float32)) * (1 - face)
     plate = plate_single * w_single[..., None] + median * (1 - w_single[..., None])
+    plate = suppress_neck_motes(plate, alpha, lm, sil_info["chinY"], sil_info["neckFade"][0], sel.face_height)
 
     slit_line, lm_slit = find_slit(plate, lm)
     eyes = eye_geometry(lm)
-    eyes_closed, eye_region, eye_reg = build_closed_eyes(plate, imgs, sel, frames, eyes)
+    closed_by_eye, eye_reg = register_closed_eyes(plate, imgs, sel, frames, eyes)
+    lids = detect_lids(plate, closed_by_eye, lm, eyes)
+    lid_w, lid_up, _ = lid_maps(plate.shape, lids)
+    almonds = {k: lid_maps(plate.shape, {k: v})[2] for k, v in lids.items()}
+    regions = eye_regions(plate.shape, almonds)
+    eyes_closed, eye_region = compose_closed_eyes(plate, closed_by_eye, regions)
     mouth, mouth_rect, mouth_info = build_mouth(plate, imgs, sel, frames, lm_slit, slit_line, sel.face_height)
     masks_a, masks_b, aperture = build_masks(plate, alpha, lm, eyes, eye_region)
+    occ = occlusion_mask(alpha, lm, sel.face_height, plate)
+    masks_c = np.stack([0.5 + 0.5 * lid_w, lid_up, occ], -1).astype(np.float32)
     palette = sample_palette(plate, alpha, masks_a[..., 1], aperture, to_float(imgs[sel.aura]))
     log(f"  palette {palette}")
 
@@ -552,12 +807,14 @@ def build_textures(info, frames, sel, imgs, debug_dir=None) -> Textures:
         save("mouth.png", mouth)
         save("masks_a.png", masks_a)
         save("masks_b.png", masks_b)
+        save("masks_c.png", masks_c)
         save("plate_cutout.png", plate * alpha[..., None])
 
     visible = visible_outline(plate, alpha)
     return Textures(width=W, height=H, plate=plate, alpha=alpha, solid=solid, boundary=boundary,
                     visible_outline=visible,
                     eyes_closed=eyes_closed, mouth=mouth, mouth_rect=mouth_rect, masks_a=masks_a,
-                    masks_b=masks_b, lm=lm_slit, slit_line=slit_line, palette=palette,
+                    masks_b=masks_b, masks_c=masks_c, lids=lids, lm=lm_slit, slit_line=slit_line,
+                    palette=palette,
                     info={"silhouette": sil_info, "eyes": eyes, "mouth": mouth_info,
                           "eyesClosedRegistration": eye_reg})

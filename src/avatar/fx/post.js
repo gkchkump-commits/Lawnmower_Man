@@ -85,6 +85,7 @@ vec3 toSRGB(vec3 c) {
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
 float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+float maxc(vec3 c) { return max(c.r, max(c.g, c.b)); }
 void main() {
   vec4 s = texture2D(tScene, vUv);
   vec3 c = s.rgb * uExposure + texture2D(tBloom, vUv).rgb * uBloom;
@@ -97,7 +98,13 @@ void main() {
     // desktop, but only where they actually glow, so dark fringes / the dissolving neck don't
     // paint a dark outline on bright desktops
     float lum = max(c.r, max(c.g, c.b));
-    float a = clamp(max(lum, s.a * uOpacity * smoothstep(0.04, 0.24, lum)), 0.0, 1.0);
+    // The "does it glow here" gate uses the neighbourhood brightness too: gated per pixel, the
+    // dark gaps between the fine grid lines would let a light desktop through as speckles.
+    vec2 o = 1.5 / uResolution;
+    float nb = 0.25 * (maxc(texture2D(tScene, vUv + vec2(o.x, o.y)).rgb) + maxc(texture2D(tScene, vUv + vec2(-o.x, o.y)).rgb)
+      + maxc(texture2D(tScene, vUv + vec2(o.x, -o.y)).rgb) + maxc(texture2D(tScene, vUv + vec2(-o.x, -o.y)).rgb));
+    float glow = max(lum, toSRGB(vec3(nb * uExposure)).r);
+    float a = clamp(max(lum, s.a * uOpacity * smoothstep(0.04, 0.24, glow)), 0.0, 1.0);
     gl_FragColor = vec4(min(c, vec3(a)), a);   // premultiplied
   } else {
     gl_FragColor = vec4(c, 1.0);
@@ -166,15 +173,26 @@ export class Post {
     this._build();
   }
 
+  /** Bloom chain precision (the tier decides). */
   _type() {
     return this.tier.halfFloat && this.canHalf ? THREE.HalfFloatType : THREE.UnsignedByteType;
+  }
+
+  /**
+   * The scene is rendered in LINEAR light and only encoded to sRGB in the composite, so an 8-bit
+   * scene target quantises dim light to steps of 1/255 linear = ~13/255 after encoding: the soft
+   * tails of the aura sprites turn into visible rings / blocks (worst over a light desktop, where
+   * alpha follows that brightness). Half float whenever the GPU can render to it, on every tier.
+   */
+  _sceneType() {
+    return this.canHalf ? THREE.HalfFloatType : THREE.UnsignedByteType;
   }
 
   _build() {
     this._disposeTargets();
     const type = this._type();
     const samples = this.renderer.capabilities.isWebGL2 ? this.tier.msaa : 0;
-    this.sceneRT = makeTarget(this.width, this.height, type, { depth: true, samples });
+    this.sceneRT = makeTarget(this.width, this.height, this._sceneType(), { depth: true, samples });
     this.mips = [];
     this.ups = [];
     let w = Math.max(1, Math.round(this.width * this.tier.bloomScale));
@@ -272,6 +290,13 @@ export class Post {
     r.setClearColor(0x000000, 0);
     r.clear(true, false, false);
     this._pass(this.matComposite, null);
+  }
+
+  /** GL-backed objects owned by the post chain (see stage.forgetDisposeListeners). */
+  glResources() {
+    const out = [this.quad.geometry, this.matPrefilter, this.matDown, this.matUp, this.matComposite];
+    for (const rt of [this.sceneRT, ...this.mips, ...this.ups]) if (rt) out.push(rt, rt.texture);
+    return out;
   }
 
   dispose() {

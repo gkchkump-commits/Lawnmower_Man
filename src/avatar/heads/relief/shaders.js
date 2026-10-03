@@ -17,6 +17,7 @@ uniform vec2 uCornerL;
 uniform vec2 uCornerR;
 uniform vec2 uBrows;
 uniform vec4 uLids;   // upperL, lowerL, upperR, lowerR travel (world units, + closes)
+uniform vec2 uNeckBand; // world y: the neck below .x stays put, everything above .y turns with the head
 
 vec3 applyRig(vec3 p) {
   // eyelids: upper lids move down, lower lids move up
@@ -37,7 +38,9 @@ vec3 applyRig(vec3 p) {
 }
 
 vec3 applyHead(vec3 p) {
-  return uHeadPivot + uHeadRot * (p - uHeadPivot) + vec3(0.0, uBreathY, 0.0);
+  // the bust turns, the lower neck does not (a rigid card would swing the whole neck sideways)
+  vec3 r = uHeadPivot + uHeadRot * (p - uHeadPivot);
+  return mix(p, r, smoothstep(uNeckBand.x, uNeckBand.y, p.y)) + vec3(0.0, uBreathY, 0.0);
 }
 
 // world (relief, pre-rotation) -> plate uv
@@ -67,6 +70,8 @@ uniform sampler2D tPlate;
 uniform sampler2D tClosed;
 uniform sampler2D tMaskA;   // r alpha, g gold lines, b sparkle
 uniform sampler2D tMaskB;   // r eye aperture, g eye region, b mouth region
+uniform sampler2D tMaskC;   // r lid coordinate (0.5 + 0.5 w), g upper lid, b occlusion
+uniform float uHasLids;     // 1 when the pack has masks_c (lid wipe); 0 = legacy cross-fade
 uniform vec2 uPlateSize;    // px
 uniform vec4 uEyeL;         // uv.xy, iris radius (plate heights), -
 uniform vec4 uEyeR;
@@ -111,19 +116,41 @@ void main() {
   float alpha = mA.r;
   if (alpha < 0.012) discard;                 // keep invisible fringe out of the depth buffer
   vec4 mB = texture2D(tMaskB, vUv);
+  vec3 mC = texture2D(tMaskC, vUv).rgb;
+  float w = mC.r * 2.0 - 1.0;                 // lid coordinate (see the blink below)
+  float fw = clamp(fwidth(w), 1e-3, 0.5);     // (derivatives outside any branch)
   float ap = mB.r;
   vec2 suv = vUv;
   if (mB.g > 0.001) suv -= (vUv.x < 0.5 ? gazeWarp(vUv, uEyeL) : gazeWarp(vUv, uEyeR));
-  vec3 col = texture2D(tPlate, suv).rgb;
+  // (mipmapped: a slight negative LOD bias keeps the fine grid crisp when minified)
+  vec3 col = texture2D(tPlate, suv, -0.6).rgb;
   float baseLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
 
-  // blink: cross-fade to the closed-eye frame, sampled where the (squashed) lids now are
-  float bl = vUv2.x < 0.5 ? uBlink.x : uBlink.y;
-  if (bl > 0.001) {
-    // (the region's soft falloff lies on the lid skin, where both frames look alike)
-    float region = clamp(texture2D(tMaskB, vUv2).g * 1.25, 0.0, 1.0);
-    float f = smoothstep(0.15, 0.85, bl) * region;
-    col = mix(col, texture2D(tClosed, vUv2).rgb, f);
+  // Blink = lid wipe. w (baked per pixel) is 0 on the open eye's lid margins, 1 on the closed
+  // lid line of the blink frame and < 0 outside the eye. Where w < blink the lids have swept
+  // over the pixel and the closed-eye frame shows (at the REST uv, nothing slides); elsewhere
+  // the open plate stays untouched, so mid-blink there is no double exposure. The lid skin
+  // around the eye (w < 0, both frames nearly alike there) cross-fades quickly, and a thin
+  // amber lid margin glows along the moving edge.
+  float bl = vUv.x < 0.5 ? uBlink.x : uBlink.y;
+  float lidF = 0.0;
+  if (bl > 0.001 && mB.g > 0.001) {
+    vec3 closedCol = texture2D(tClosed, vUv, -0.6).rgb;
+    if (uHasLids > 0.5) {
+      float inEye = smoothstep(-fw, fw, w);
+      float skin = smoothstep(0.0, 0.3, bl);
+      float covered = (1.0 - smoothstep(bl - fw, bl + fw, w)) * mix(skin, 1.0, smoothstep(0.0, 0.15, w));
+      lidF = mix(skin, covered, inEye) * mB.g;
+      col = mix(col, closedCol, lidF);
+      // the moving lid margin (upper lid bright, the rising lower lid faint)
+      float edge = exp(-pow((w - bl) / (1.3 * fw), 2.0)) * inEye
+                 * smoothstep(0.0, 0.06, bl) * (1.0 - smoothstep(0.88, 1.0, bl));
+      col += uColEye * edge * mix(0.3, 1.0, mC.g) * 0.85;
+    } else {
+      lidF = smoothstep(0.15, 0.85, bl) * mB.g;
+      col = mix(col, closedCol, lidF);
+    }
+    ap *= 1.0 - lidF;
   }
 
   float e = uEnergy - 0.5;                    // 0 at idle: the rest look stays the baked plate
@@ -167,7 +194,15 @@ void main() {
     col = mix(col, vec3(l * 1.15, l * 0.45, l * 0.42) * fl, uError * 0.7);
   }
   col *= (1.0 - 0.5 * uSleep) * (1.0 + e * 0.35);
-  gl_FragColor = vec4(col * alpha, alpha);    // premultiplied
+  // Colour is premultiplied by the silhouette alpha, but only the face and cranium (and only
+  // where they visibly glow) claim desktop coverage: ears, the gap next to them, the fringe and
+  // the dissolving neck stay pure light, so a light desktop shows no grey "dirt" through them.
+  // (masks_c B is baked with a blurred brightness gate; legacy packs approximate it from a coarse
+  // mip level, never per texel, which would let the desktop through between the grid lines)
+  float occl = uHasLids > 0.5 ? mC.b
+    : smoothstep(uChinV - 0.02, uChinV + 0.05, vUv.y)
+      * smoothstep(0.002, 0.012, dot(texture2D(tPlate, vUv, 4.0).rgb, vec3(0.2126, 0.7152, 0.0722)));
+  gl_FragColor = vec4(col * alpha, alpha * occl);
   // Only solid, visibly lit head pixels occlude the particle aura. The soft fringe and the black
   // background enclosed by the silhouette (e.g. between ear and cranium) write "far" depth so
   // motes behind them are not cut out (that would leave a dark band around the head).
@@ -191,7 +226,7 @@ void main() {
 
 export const CAVITY_FRAG = /* glsl */ `
 uniform sampler2D tMouth;
-uniform float uOpen;
+uniform float uTeeth;      // teeth visibility (an O / U pucker shows the dark interior, few teeth)
 uniform vec3 uDark;
 uniform float uSleep;
 varying vec2 vUvM;
@@ -199,7 +234,7 @@ varying float vLayer;
 varying float vSlit;
 void main() {
   vec3 c = texture2D(tMouth, vUvM).rgb;
-  float vis = smoothstep(0.02, 0.2, uOpen);   // teeth only once the lips actually part
+  float vis = smoothstep(0.02, 0.2, uTeeth);  // teeth only once the lips actually part
   if (vLayer > 0.5) {
     float a = smoothstep(0.03, 0.16, max(c.r, max(c.g, c.b))) * vis;
     if (a < 0.01) discard;

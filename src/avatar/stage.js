@@ -13,7 +13,48 @@ import { QUALITY, normalizeQuality } from './quality.js';
  * @property {number} [fov]                    vertical fov in degrees (perspective), default 20
  */
 
-const MAX_DT = 1 / 15;
+/**
+ * Largest simulation step per frame. Below 1/MAX_DT fps the animation slows down instead of
+ * jumping; 1/8 s keeps blinks and lip-sync close to real time on slow (software / iGPU)
+ * renderers. Every consumer integrates or smooths stably at this step.
+ */
+export const MAX_DT = 1 / 8;
+
+/**
+ * Detach three.js' internal 'dispose' listeners from GL resources created before a WebGL context
+ * loss. After the context is restored the renderer re-creates its resource managers and
+ * re-registers fresh listeners on first use, but the stale ones stay attached: disposing the
+ * avatar later would make them delete objects of the LOST context ("WebGL: INVALID_OPERATION:
+ * delete: object does not belong to this context"). Their GL objects died with the old context
+ * anyway, so forgetting them is exactly right. Only three.js adds 'dispose' listeners to these.
+ * @param {Iterable<any>} objects textures, geometries, materials, render targets
+ * @returns {number} how many objects had listeners removed
+ */
+export function forgetDisposeListeners(objects) {
+  let n = 0;
+  for (const o of objects) {
+    const l = o?._listeners;
+    if (l && l.dispose && l.dispose.length) {
+      l.dispose.length = 0;
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Every geometry, material and uniform texture under `root` (for forgetDisposeListeners). */
+export function collectGLResources(root, out = new Set()) {
+  root.traverse?.((obj) => {
+    if (obj.geometry) out.add(obj.geometry);
+    const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : [];
+    for (const m of mats) {
+      out.add(m);
+      for (const u of Object.values(m.uniforms ?? {})) if (u?.value?.isTexture) out.add(u.value);
+      for (const k of ['map', 'alphaMap']) if (m[k]?.isTexture) out.add(m[k]);
+    }
+  });
+  return out;
+}
 
 export class Stage {
   /**
@@ -167,6 +208,9 @@ export class Stage {
     }
     this.viewHeight = viewH;
   }
+
+  /** Smoothed frame rate of the live loop (0 before the second frame). */
+  get fps() { return this._fps; }
 
   /** World units -> device pixels scale at the focal plane. */
   get pixelsPerUnit() {

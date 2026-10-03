@@ -122,3 +122,35 @@ describe('helpers', () => {
     expect(p.line).toBe(DEFAULT_PALETTE.line);
   });
 });
+
+describe('lid map + occlusion (masks_c, baker >= 1.1)', () => {
+  it('is declared in the manifest and validated as an optional pack file', () => {
+    expect(pack.files.masksC).toBe('masks_c.png');
+    expect(pack.channels.masksC).toEqual({ r: 'lidCoord', g: 'upperLid', b: 'occlusion' });
+    const legacy = structuredClone(pack);
+    delete legacy.files.masksC;
+    expect(validatePack(legacy)).toEqual([]);
+    expect(validatePack({ ...pack, files: { ...pack.files, masksC: '../x.png' } }).join()).toMatch(/masksC/);
+    expect(validatePack({ ...pack, files: { ...pack.files, masksC: 'https://e.x/m.png' } }).join()).toMatch(/masksC/);
+    expect(validatePack({ ...pack, files: { ...pack.files, masksC: 3 } }).join()).toMatch(/masksC/);
+  });
+  it('has plausible lid curves for both eyes (upper margin above the closed line above the lower lid)', () => {
+    for (const k of ['L', 'R']) {
+      const e = pack.rig.eyes[k];
+      const l = e.lids;
+      expect(l.x.length).toBe(17);
+      for (let i = 1; i < l.x.length; i++) expect(l.x[i]).toBeGreaterThan(l.x[i - 1]);
+      // the visible eye is wider than MediaPipe's corners and spans the iris
+      expect(l.x[0]).toBeLessThan(e.box[0] + 2);
+      expect(l.x[l.x.length - 1]).toBeGreaterThan(e.box[2] - 2);
+      for (let i = 1; i < l.x.length - 1; i++) {
+        expect(l.upper[i]).toBeLessThan(l.closed[i]);
+        expect(l.closed[i]).toBeLessThan(l.lower[i]);
+      }
+      const mid = 8;
+      // the open eye's upper margin sits near the top of the iris (well above MediaPipe's lid)
+      expect(l.upper[mid]).toBeLessThan(e.center[1] - 0.8 * e.irisRadius);
+      expect(l.closed[mid]).toBeGreaterThan(e.center[1]);
+    }
+  });
+});

@@ -17,6 +17,8 @@
  * @property {number} [zoom]          camera zoom (default 1)
  * @property {Record<string,string>} [colors]  palette overrides: eye, line, rim, grid, wisp, mote (hex)
  * @property {boolean} [autoStart]    start the render loop (default true)
+ * @property {boolean} [autoQuality]  step quality down one tier after ~3 s below 24 fps (default
+ *           true, false with fixedTime)
  */
 
 /**

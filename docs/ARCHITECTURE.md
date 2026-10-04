@@ -104,12 +104,17 @@ lawnmower = {
   voice: {
     info(): Promise<{ status: 'disabled'|'starting'|'ready'|'error'|'stopped', installed?: boolean, url?: string, token?: string,
                       detail?: string, health?: object,
+                      missing?: string[],                // the venv lacks these packages (a setup that failed halfway)
+                      setupLog?: string,                 // the setup log exists (its path)
                       setup?: { state: 'running'|'done'|'failed'|'manual', detail: string, cpu: boolean,
-                                mode?: 'console'|'terminal'|'manual', command?: string } }>,
+                                mode?: 'console'|'terminal'|'manual', command?: string,
+                                errorTail?: string[] /* failed: the last lines of the failed step */ } }>,
     restart(): Promise<void>,
     setup(o?: { cpu?: boolean }): Promise<SetupState>,  // "Set up local voice…": runs the bundled setup script in a
                                                          // visible console/terminal (manual mode: only returns the command);
                                                          // cpu defaults to "no NVIDIA GPU detected". Progress via onStatus.
+    openSetupLog(): Promise<{ ok: boolean, path?: string, error?: string }>,
+                                                         // no arguments: main opens <voice home>/setup.log (only that file)
     onStatus(cb: (info) => void): () => void,
   },
   settings: {
@@ -316,7 +321,10 @@ Launch: `python -m lawnmower_voice --host 127.0.0.1 --port <p> --token <t> [--de
 (token can also come from env `LAWNMOWER_VOICE_TOKEN`; the app passes it only there, plus `--preload`
 so both models load right after start-up, and `--stt-language` from settings, which also picks the
 CPU-fallback Whisper model). Prints one JSON line
-`{"event":"ready","port":p}` to stdout once listening. All endpoints except `/health`
+`{"event":"ready","port":p}` to stdout once listening. When its own packages are missing (a venv
+where the setup stopped halfway) it prints `{"event":"not-installed","missing":["uvicorn",…]}`
+instead and exits with code 2; the app then shows "not fully installed" and does not restart it
+until the setup runs again (or *Restart voice* / a settings change). All endpoints except `/health`
 require `Authorization: Bearer <token>`. CORS: allow `http://127.0.0.1:5173`, `http://localhost:5173`,
 `http://127.0.0.1:4173`, `http://localhost:4173` and `app://lawnmower` (not `null`: any web page can send
 it; `--cors-origin null` opts in for debugging); headers Authorization, Content-Type, X-Sample-Rate.

@@ -113,3 +113,30 @@ export class SetupCards {
     return card;
   }
 }
+
+/**
+ * The settings drawer's view of a failed local-voice setup: the last lines of the step that failed
+ * (monospace, selectable, about 12 lines high and scrollable — it opens at the end, where pip's
+ * "ERROR: …" is), "Open setup log" and "Copy", and where the log is. null when there is nothing
+ * to show.
+ * @param {ReturnType<typeof import('../app/setup-help.js').voiceSetupDiagnostics>} diag
+ * @param {{ onOpenLog: () => void, onCopy: (text: string) => void }} o
+ * @returns {HTMLElement|null}
+ */
+export function setupTailView(diag, o) {
+  if (!diag || (!diag.tail.length && !diag.logPath)) return null;
+  const el = h('div', { class: 'setup-diag' });
+  if (diag.tail.length) {
+    // column-reverse: the scroll box starts at its end (the newest line), without any script
+    el.append(h('div', { class: 'setup-tail', tabindex: '0', role: 'log', 'aria-label': 'Last lines of the voice setup output' },
+      h('pre', null, diag.tail.join('\n'))));
+  }
+  const actions = h('div', { class: 'setup-tail-actions' });
+  if (diag.showOpenLog) actions.append(h('button', { type: 'button', class: 'btn subtle open-setup-log', title: diag.logPath, onclick: () => o.onOpenLog() }, 'Open setup log'));
+  if (diag.copyText && diag.tail.length) {
+    actions.append(h('button', { type: 'button', class: 'btn ghost copy-setup-tail', title: 'Copy the error, these lines and the log location (to report the problem)', onclick: () => o.onCopy(diag.copyText) }, icon('copy', 'icon tiny'), 'Copy'));
+  }
+  if (actions.childNodes.length) el.append(actions);
+  if (diag.logPath) el.append(h('div', { class: 'setup-log-path' }, h('span', { class: 'k' }, 'Setup log: '), diag.logPath));
+  return el;
+}

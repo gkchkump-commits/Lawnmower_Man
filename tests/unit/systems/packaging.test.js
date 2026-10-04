@@ -109,7 +109,7 @@ describe('package.json build (electron-builder)', () => {
     expect(build.files.some((f) => /^(tests|tools|docs|voice|scripts)\b/.test(f))).toBe(false);
     const voice = build.extraResources.find((r) => r.from === 'voice');
     expect(voice.to).toBe('voice');
-    expect(voice.filter).toEqual(expect.arrayContaining(['!.venv/**', '!**/__pycache__/**', '!tests/**', '!models/**', '!**/*.egg-info/**']));
+    expect(voice.filter).toEqual(expect.arrayContaining(['!.venv/**', '!**/__pycache__/**', '!tests/**', '!models/**', '!**/*.egg-info/**', '!setup*.log']));
     const scripts = build.extraResources.find((r) => r.from === 'scripts');
     expect(scripts).toMatchObject({ to: 'scripts', filter: ['setup-voice.ps1', 'setup-voice.cmd', 'setup-voice.sh'] });
     expect(build.extraResources.some((r) => r.from === 'THIRD_PARTY_NOTICES.md')).toBe(true);

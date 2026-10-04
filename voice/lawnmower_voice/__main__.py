@@ -8,11 +8,17 @@ Prints exactly one JSON line to stdout once the HTTP server is listening::
 logs, library chatter, even C-level ``printf`` from native extensions - goes to stderr: file
 descriptor 1 is re-pointed at stderr and the protocol uses a private duplicate of the original
 stdout.
+
+When the server's own Python packages are missing (a setup that failed halfway), it prints
+``{"event": "not-installed", "missing": ["uvicorn", ...]}``, logs "Local voice is not fully
+installed (missing: ...)" and exits with ``EXIT_NOT_INSTALLED`` (2): restarting cannot help,
+the app waits for a new setup run instead.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -38,6 +44,11 @@ from .config import (
 )
 
 log = logging.getLogger("lawnmower_voice")
+
+#: Exit code when the server's own packages are missing (electron/voice-sidecar.js EXIT_NOT_INSTALLED).
+EXIT_NOT_INSTALLED = 2
+#: What the HTTP server itself needs (pyproject.toml dependencies); the engines are optional.
+CORE_MODULES = ("uvicorn", "fastapi", "starlette", "numpy")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,6 +227,31 @@ def _watch_parent(server, interval: float = 2.0) -> None:
     threading.Thread(target=loop, name="parent-watch", daemon=True).start()
 
 
+def missing_core_modules(names: tuple[str, ...] = CORE_MODULES) -> list[str]:
+    """The core packages that cannot be found (without importing them)."""
+    missing = []
+    for name in names:
+        try:
+            found = importlib.util.find_spec(name) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.append(name)
+    return missing
+
+
+def _not_installed(proto: TextIO, missing: list[str], exc: BaseException | None = None) -> int:
+    """Report missing packages (protocol line + log) and return EXIT_NOT_INSTALLED."""
+    _emit(proto, {"event": "not-installed", "missing": missing})
+    # no final full stop: the app appends its own sentence
+    log.error(
+        'Local voice is not fully installed (missing: %s)%s. Run the setup script again ("Set up local voice again" in the app)',
+        ", ".join(missing),
+        f" [{exc}]" if exc else "",
+    )
+    return EXIT_NOT_INSTALLED
+
+
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -238,18 +274,24 @@ def main(argv: list[str] | None = None) -> int:
     proto = _protocol_stream()
     cfg, generated = config_from_args(args)
 
+    missing = missing_core_modules()
+    if missing:
+        return _not_installed(proto, missing)
     try:
         import uvicorn
-    except ImportError as exc:  # pragma: no cover - core dependency
-        log.error("uvicorn is not installed (%s). Run the setup script.", exc)
-        return 2
+    except ModuleNotFoundError as exc:  # a dependency of uvicorn itself
+        return _not_installed(proto, [(exc.name or "uvicorn").split(".")[0]], exc)
 
     _emit(proto, {"event": "status", "detail": "Detecting GPU…"})
     report = detect(cfg)
     for w in report.warnings:
         log.warning("%s", w)
     from .device import DeviceMonitor, resolve_device
-    from .server import create_app
+
+    try:
+        from .server import create_app
+    except ModuleNotFoundError as exc:  # e.g. pydantic, a dependency of fastapi
+        return _not_installed(proto, [(exc.name or "fastapi").split(".")[0]], exc)
 
     device = "cpu" if cfg.fake else resolve_device(cfg.device, report)
     g = report.primary

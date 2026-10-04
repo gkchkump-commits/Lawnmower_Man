@@ -26,7 +26,9 @@ missing, the voice degrades in steps:
 Choose **Set up local voice…** in the tray menu, in the settings drawer's Voice section, or in the
 hint under the voice status. `electron/voice-setup.js` then:
 
-1. stops the voice server if one is running (it keeps files of the venv open);
+1. stops the voice server if one is running (it keeps files of the venv open), and keeps it
+   stopped until the setup has ended: no automatic restart, no *Restart voice*, no settings change
+   starts it while the window installs into the venv (Windows locks files a running server uses);
 2. opens a **visible PowerShell window** running the bundled `resources\scripts\setup-voice.ps1`
    (installed app) or `scripts\setup-voice.ps1` (repository) with `-ExecutionPolicy Bypass`. A
    windowless Windows PowerShell starts it with `Start-Process`, so it gets its own console with
@@ -40,7 +42,9 @@ hint under the voice status. `electron/voice-setup.js` then:
 4. watches the JSON file the script writes when it ends (`-StatusFile`, in the app's settings
    folder). As soon as it reports success, the app turns local voice on and starts the new server
    — no restart, no *Restart voice* needed. A window closed early, or a failure, is reported in the
-   drawer and as a toast, and the previous voice (if any) is started again.
+   drawer and as a toast, and the previous voice (if any) is started again. For a failure the
+   drawer (*Settings › Voice*) also shows the last lines of the step that failed — where pip prints
+   its `ERROR: …` — with **Open setup log** and **Copy** (see [5.1](#51-when-the-setup-fails)).
 
 If **Python 3.12 is missing**, the script offers to install it for the current user with winget
 (`winget install -e --id Python.Python.3.12 --scope user`, Y/n), then re-reads PATH and continues.
@@ -110,6 +114,9 @@ The setup script does the following:
 It is idempotent: re-running it reuses the venv and skips models it already has. It needs no
 admin rights and no CUDA Toolkit, only the NVIDIA driver.
 
+Every run (except `-CheckOnly` / `--check-only`) writes its whole output to **`setup.log`** in the
+voice folder, and keeps the run before as `setup.prev.log` — see [5.1](#51-when-the-setup-fails).
+
 | Option (PowerShell / bash) | Meaning |
 |---|---|
 | `-Cpu` / `--cpu` | CPU-only install (no NVIDIA wheels) |
@@ -122,7 +129,7 @@ admin rights and no CUDA Toolkit, only the NVIDIA driver.
 | `-Recreate` / `--recreate` | Rebuild `voice/.venv` |
 | `-SkipSmoke` / `--skip-smoke` | Skip the final smoke test |
 | `-PauseAtEnd` / `--pause-at-end` | Wait for Enter before the window closes (the app passes it) |
-| `-StatusFile FILE` / `--status-file FILE` | Write the result as JSON (`{ok, error, voiceHome, venv, python, cpu, packaged, check}`); the app watches it |
+| `-StatusFile FILE` / `--status-file FILE` | Write the result as JSON (`{ok, error, errorTail, log, voiceHome, venv, python, cpu, packaged, check}`); the app watches it. On a failure `error` is the failed step plus the last ~20 lines of its output, `errorTail` those lines, `log` the setup log |
 | `-CheckOnly` / `--check-only` | Only report where the voice would go and which Python would be used; changes nothing |
 | `-Yes` | Answer yes to questions (install Python 3.12 with winget) |
 
@@ -390,6 +397,38 @@ Start with `voice\.venv\Scripts\python -m lawnmower_voice.doctor --smoke --human
 | Model download fails (proxy or offline) | Re-run the setup script later. The server reports `Whisper model '…' is not downloaded` with a 503 until then; Kokoro has the same behaviour. Copy model folders from another machine into `voice/models/whisper` (Hugging Face cache layout) and `voice/models/kokoro/`. `--no-download` forbids network access at runtime. |
 | Everything works but runs on the CPU | Read `stt.note` and `tts.note` in `/health`; they quote the GPU error. The CPU fallback is deliberate, so the avatar keeps talking. |
 | Port or start-up problems | The server prints `{"event":"ready",...}` only after binding, and exits non-zero if the port is taken. The app chooses a free port. Logs go to stderr, and the Electron log keeps the tail. |
+| *Server: disabled* — "Local voice is not fully installed (missing: uvicorn)" | The venv exists but the setup stopped before the packages were installed (the server reports `{"event":"not-installed","missing":[…]}` and exits with code 2). The app does not restart it in a loop; it waits for *Set up local voice again…*, *Restart voice* or a changed setting. Find out why the setup stopped in its log (5.1), fix that, run the setup again. |
+
+### 5.1 When the setup fails
+
+The setup window prints the error at the end, and the app shows it in *Settings › Voice*: the
+failed step, the last lines of its output (monospace, scrollable, selectable) and the buttons
+**Open setup log** (opens the log in your text editor) and **Copy** (the error, those lines and
+where the log is, ready to paste into a bug report). *Set up local voice again…* is right below.
+
+The full output of every run is in the voice folder:
+
+| | Log of the last run | The run before |
+|---|---|---|
+| Windows, installed app | `%LOCALAPPDATA%\LawnmowerMan\voice\setup.log` | `…\setup.prev.log` |
+| Linux, installed app | `${XDG_DATA_HOME:-~/.local/share}/lawnmower-man/voice/setup.log` | `…/setup.prev.log` |
+| Repository (`npm start`, or run by hand) | `voice/setup.log` | `voice/setup.prev.log` |
+
+It is UTF-8 text: a header (date, script path and version, PowerShell or bash version, Python,
+the switches, the voice/venv/models folders), every step header, every command with all of its
+output (pip's included) and exit code, the summary, and at the end the result the app received.
+It is written as the setup goes, so it is complete up to the point where a window was closed.
+
+**What to send** when you report a failed setup: `setup.log` (and `setup.prev.log` if you ran it
+twice), plus the app's `main.log` (tray > *Open logs folder*). Paths in them include your Windows
+user name; nothing else personal is logged. The *Copy* text is a good summary for the report
+itself.
+
+Common causes visible in the log: no network or a proxy (`Could not fetch URL`, `ProxyError`),
+no disk space (`No space left on device` / `[Errno 28]`), a file locked by a running program
+(`[WinError 32]` / `[WinError 5] Access is denied` — quit Lawnmower Man and any Python using the
+venv), or a package that pip cannot find for that Python (`No matching distribution found` — the log
+header shows which Python built the venv; 3.10 to 3.12 are supported, 3.12 is recommended).
 
 ---
 
@@ -422,8 +461,9 @@ The tests never download models and need no GPU. They cover:
 | **Verified here** (Linux, no GPU) | The full test suite in a bare Python 3.11 (engines absent) and in a 3.12 venv with the real faster-whisper 1.2.1, CTranslate2 4.8.2, onnxruntime 1.30.0 and kokoro-onnx 0.6.1. |
 | **Verified here** | `scripts/setup-voice.sh --cpu --no-models` end to end, and its re-run. `scripts/setup-voice.ps1 -Cpu -NoModels` under PowerShell 7.6 on Linux. |
 | **Verified here** (2026-10) | *Set up local voice…* in the packaged Linux build (electron-builder `linux dir`, under xvfb, a stand-in terminal): the bundled `setup-voice.sh --cpu` installed into a per-user folder whose path contains a space and `ñ`, Kokoro downloaded, and the app started the new voice server by itself (CPU mode) three seconds after the script finished. `-CheckOnly` of both scripts in a packaged layout under `…/Lawnmower Man ñ & Co (x)/resources` reports the folder the sidecar looks in (unit tests); the winget offer (with a fake winget) under PowerShell 7 on Linux. |
+| **Verified here** (2026-10) | The setup log and error tail of both scripts (PowerShell 7.6 on Linux, bash): a real run with a stand-in Python whose `pip install -e …[gpu]` fails with `ERROR: …` lines on stderr after warnings, non-ASCII, carriage-return and colour output; the status file's `error`/`errorTail` end with pip's `ERROR:` line, `setup.log` has the header, steps, commands and full output, a second run keeps the first as `setup.prev.log`; `VoiceSetupRunner` turns it into the drawer's output tail. The voice server with `uvicorn` (or `pydantic`) blocked exits with code 2 and the `not-installed` line, and the sidecar stops after that one run. |
 | **Verified here** (PowerShell 7 standing in for `powershell.exe`) | The whole Windows launcher chain except the new window: the launcher one-liner → `Start-Process` → the console bootstrap → `setup-voice.ps1 -CheckOnly` in a packaged layout under a path with spaces, `&`, `ñ` and `'`; a script with a parse error or an unknown switch is reported in the window and in the status file; the winget offer with a fake winget that installs Python only into `%LOCALAPPDATA%\Programs\Python\Python312` (stale PATH). `ci.yml`'s Windows job runs the bootstrap and `-CheckOnly` tests with the real Windows PowerShell 5.1. |
-| **Not verifiable here** | The new console window itself (`Start-Process` from the windowless launcher), `Read-Host` answers in that window, the real winget install, a full install under Windows PowerShell 5.1. The release workflow runs the launcher in `-CheckOnly` mode against the installed app on `windows-latest`. |
+| **Not verifiable here** | The new console window itself (`Start-Process` from the windowless launcher), `Read-Host` answers in that window, the real winget install, a full install under Windows PowerShell 5.1 — including its handling of pip's stderr (`2>&1` turning lines into error records, which the script converts back with the error preference at `Continue`) and the console code page (the script sets `PYTHONUTF8`/`PYTHONIOENCODING` and reads the output as UTF-8). The release workflow runs the launcher in `-CheckOnly` mode and the bundled setup for real (`voice-setup` job) on `windows-latest`, and uploads `setup.log`. |
 | **Verified here** | `pip --dry-run` resolution of the `[gpu]` extra for Linux and Windows (cp312). |
 | **Verified here** | Kokoro v1.0 TTS with the **real model on the CPU**: 54 voices, `duration` output present, visemes aligned with the audio, RTF 0.26. |
 | **Verified here, by binary inspection** | sm_120 kernels in onnxruntime-gpu 1.30.0; PTX-only Blackwell support in CTranslate2 4.8.2; the DLL names and wheel layouts above. |

@@ -49,6 +49,8 @@ const api = {
     restart: () => invoke('lm:voice:restart'),
     // "Set up local voice…": opens the bundled setup script in its own console window.
     setup: (options) => invoke('lm:voice:setup', options),
+    // "Open setup log": main opens the setup log of its own voice home (no arguments).
+    openSetupLog: () => invoke('lm:voice:open-setup-log'),
     onStatus: (cb) => subscribe('lm:voice:status', cb),
   },
   settings: {

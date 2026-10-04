@@ -226,6 +226,18 @@ describe('speech services', () => {
     expect(disabled.stt.unavailableReason()).toMatch(/off/);
   });
 
+  it('a half-installed venv: the reason is the sidecar\'s "not fully installed" detail alone (one action named)', () => {
+    const detail = 'Local voice is not fully installed (missing: uvicorn). Choose "Set up local voice again…" in the tray menu or in Settings › Voice.';
+    const vc = new VoiceClient();
+    vc.configure({ status: 'disabled', installed: true, missing: ['uvicorn'], detail });
+    const s = createSpeechServices({ voiceClient: vc, webSpeech: null, getSettings: settings });
+    expect(s.stt.available()).toBe(false);
+    expect(s.stt.unavailableReason()).toBe(detail);
+    // not installed at all: the detail plus the general setup hint, as before
+    vc.configure({ status: 'disabled', installed: false, detail: 'Local voice is not installed.' });
+    expect(s.stt.unavailableReason()).toMatch(/^Local voice is not installed\. Voice input needs the local voice\. Choose "Set up local voice…"/);
+  });
+
   it('server TTS failure falls back to the browser voice for that sentence', async () => {
     const vc = new VoiceClient({ fetch: async () => new Response('{"error":"boom"}', { status: 500 }) });
     vc.configure({ status: 'ready', url: 'http://127.0.0.1:1', token: 't' });

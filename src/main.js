@@ -10,6 +10,7 @@ import { ClickThroughGate, probeAvatar } from './app/click-through.js';
 import { Controller } from './app/controller.js';
 import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
+import { voiceSetupDiagnostics } from './app/setup-help.js';
 import { Mic } from './audio/mic.js';
 import { AudioPlayer } from './audio/player.js';
 import { getBridge } from './bridge/index.js';
@@ -23,6 +24,8 @@ import { Composer } from './ui/composer.js';
 import { h, isControlTarget } from './ui/dom.js';
 import { computeLayout } from './ui/layout.js';
 import { SettingsDrawer } from './ui/settings-drawer.js';
+import { setupTailView } from './ui/setup-cards.js';
+import { copyText } from './ui/transcript.js';
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -267,6 +270,22 @@ async function boot() {
     }
   }
 
+  /** "Open setup log" (drawer): main opens the log of its voice home in the text editor. */
+  async function openSetupLog() {
+    try {
+      const r = await bridge.voice.openSetupLog();
+      if (r && r.ok === false) view.toast(`Could not open the setup log: ${r.error || 'unknown error'}`, 'warn');
+    } catch (err) {
+      view.toast(`Could not open the setup log: ${err?.message || err}`, 'warn');
+    }
+  }
+
+  /** "Copy" next to the setup output: the failure, the output tail and where the log is. @param {string} text */
+  async function copySetupReport(text) {
+    const ok = await copyText(text);
+    view.toast(ok ? 'Copied the setup error to the clipboard.' : 'Could not copy to the clipboard.', ok ? 'success' : 'warn');
+  }
+
   // ---------------------------------------------------------------- voice server
   /** @type {any[]} */
   let voiceList = [];
@@ -338,6 +357,9 @@ async function boot() {
     if (info.detail && info.status !== 'ready') lines.push(h('div', null, info.detail));
     const setup = info.setup || null;
     if (setup && setup.state !== 'manual' && setup.detail && !(setup.state === 'done' && info.status === 'ready')) line('Setup', setup.detail, setup.state === 'failed' ? 'warn' : '');
+    // a failed setup: the last lines of the failed step (pip's "ERROR: …"), the log, a Copy button
+    const diag = voiceSetupDiagnostics(info, { canOpenLog: typeof bridge.voice.openSetupLog === 'function' });
+    lines.push(setupTailView(diag, { onOpenLog: () => openSetupLog(), onCopy: (text) => copySetupReport(text) }));
     const installed = info.installed === true || info.status === 'ready' || info.status === 'starting';
     if (!c.stt && setup?.state !== 'running') {
       lines.push(h('div', { class: 'warn' },

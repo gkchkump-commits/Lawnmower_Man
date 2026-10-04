@@ -956,6 +956,33 @@ body[data-state="speaking"] .status-dot { background: var(--gold); box-shadow: 0
 .setup-link:hover { text-decoration: underline; }
 .setup-actions .btn { margin-left: auto; }
 .field-info .btn.setup-voice-inline { margin-top: 5px; width: 100%; }
+/* a failed local-voice setup: the failed step's last output lines, "Open setup log", "Copy" */
+.field-info .setup-diag { margin: 5px 0 2px; }
+.field-info .setup-tail {
+  display: flex;
+  flex-direction: column-reverse; /* opens scrolled to the end: pip's "ERROR: ..." */
+  max-height: calc(12 * 14px + 10px); /* about 12 lines */
+  overflow: auto;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.38);
+  border: 1px solid rgba(255, 184, 103, 0.28);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 184, 103, 0.3) transparent;
+}
+.field-info .setup-tail:focus-visible { outline: 1px solid var(--amber); outline-offset: 1px; }
+.field-info .setup-tail pre {
+  margin: 0;
+  font: 10px/14px var(--mono);
+  color: #e6f4ff;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+.field-info .setup-tail-actions { display: flex; gap: 6px; margin-top: 5px; }
+.field-info .setup-tail-actions .btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 8px; }
+.field-info .setup-log-path { margin-top: 4px; font-size: 10.5px; }
 
 /* ------------------------------------------------------------------ toasts */
 

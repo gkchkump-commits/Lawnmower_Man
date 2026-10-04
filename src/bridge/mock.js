@@ -11,7 +11,8 @@
 // First-run problems: ?claude=missing (no CLI: the setup card) or ?claude=auth (every turn
 // fails with "Not logged in"); claude.retry() then "finds" a working CLI (after
 // ?claudeRetries=N failed attempts). voice.setup() answers with the manual command, as main
-// does when it cannot open a terminal.
+// does when it cannot open a terminal. ?voiceSetup=failed starts after a failed setup run (the
+// output tail and "Open setup log" in the drawer); voice.openSetupLog() is recorded.
 
 import { DEFAULT_SETTINGS, clone, deepMerge, isPlainObject } from '../app/settings-defaults.js';
 import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
@@ -27,7 +28,21 @@ import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
  * @property {string} [platform]
  * @property {'ok'|'missing'|'auth'} [claude]      simulate a missing / logged-out Claude CLI
  * @property {number} [claudeRetries]             retry() calls that still fail (default 0)
+ * @property {'failed'} [voiceSetup]              start after a failed "Set up local voice…" run
+ *                                                (the half-installed venv of a real bug report)
  */
+
+/** The output tail of the failed setup step that ?voiceSetup=failed shows. */
+export const MOCK_SETUP_TAIL = Object.freeze([
+  'Obtaining file:///…/LawnmowerMan/voice/src',
+  '  Installing build dependencies: started',
+  "  Installing build dependencies: finished with status 'done'",
+  'Collecting faster-whisper<2,>=1.2.1 (from lawnmower-voice==0.1.0)',
+  '  Using cached faster_whisper-1.2.1-py3-none-any.whl (1.1 MB)',
+  'Collecting example-wheel>=1.0 (from lawnmower-voice==0.1.0)',
+  'ERROR: Could not find a version that satisfies the requirement example-wheel>=1.0 (from lawnmower-voice) (from versions: none)',
+  'ERROR: No matching distribution found for example-wheel>=1.0',
+]);
 
 export const MOCK_NOT_FOUND = 'Claude CLI not found. Install Claude Code (https://code.claude.com/docs/en/setup), sign in once by running "claude" in a terminal, or set the CLI path in Settings.';
 export const MOCK_NOT_LOGGED_IN = 'Not logged in · Please run /login';
@@ -425,14 +440,30 @@ export function createMockBridge(options = {}) {
 
   // ---------------------------------------------------------------- voice
   const voiceFetch = opt.voice === 'fake' ? createFakeVoiceFetch({ token: 'mock-token' }) : null;
+  const win = opt.platform === 'win32';
+  const failedSetup = opt.voiceSetup === 'failed';
   /** @type {Record<string, any>|null} the last voice.setup() answer (VoiceInfo.setup) */
-  let voiceSetup = null;
+  let voiceSetup = failedSetup
+    ? {
+        state: 'failed',
+        mode: 'console',
+        cpu: false,
+        detail: `The voice setup failed: Command failed (exit 1): ${win ? 'C:\\Users\\you\\AppData\\Local\\LawnmowerMan\\voice\\.venv\\Scripts\\python.exe' : '/home/you/.local/share/lawnmower-man/voice/.venv/bin/python'} -m pip install --disable-pip-version-check -e …[gpu] — ERROR: No matching distribution found for example-wheel>=1.0`,
+        errorTail: [...MOCK_SETUP_TAIL],
+      }
+    : null;
+  const setupLog = failedSetup ? (win ? 'C:\\Users\\you\\AppData\\Local\\LawnmowerMan\\voice\\setup.log' : '/home/you/.local/share/lawnmower-man/voice/setup.log') : '';
   const voiceInfo = () => {
+    /** @type {Record<string, any>} */
     const info = baseVoiceInfo();
-    return voiceSetup ? { ...info, setup: { ...voiceSetup } } : info;
+    if (setupLog) info.setupLog = setupLog;
+    return voiceSetup ? { ...info, setup: { ...voiceSetup, ...(voiceSetup.errorTail ? { errorTail: [...voiceSetup.errorTail] } : {}) } } : info;
   };
   const baseVoiceInfo = () => {
     if (!settings.voice.enabled) return { status: 'disabled', detail: 'Local voice is turned off in Settings; using the system voice.' };
+    if (failedSetup) {
+      return { status: 'disabled', installed: true, missing: ['uvicorn'], detail: 'Local voice is not fully installed (missing: uvicorn). Choose "Set up local voice again…" in the tray menu or in Settings › Voice.' };
+    }
     if (opt.voice === 'fake') {
       return { status: 'ready', url: 'http://127.0.0.1:59999', token: 'mock-token', detail: 'Fake voice server (mock bridge)', health: clone(FAKE_HEALTH) };
     }
@@ -460,7 +491,6 @@ export function createMockBridge(options = {}) {
     /** "Set up local voice…": a browser cannot open a terminal, so (like main without one) answer with the command. @param {{ cpu?: boolean }} [o] */
     async setup(o = {}) {
       calls.push(['voice.setup', o]);
-      const win = opt.platform === 'win32';
       const cmd = win ? 'powershell -ExecutionPolicy Bypass -File scripts\\setup-voice.ps1' : 'bash scripts/setup-voice.sh';
       voiceSetup = {
         state: 'manual',
@@ -471,6 +501,11 @@ export function createMockBridge(options = {}) {
       };
       queueMicrotask(() => deliver('voice', voiceInfo()));
       return { ...voiceSetup };
+    },
+    /** "Open setup log": main opens the log of its voice home; the mock only records the call. */
+    async openSetupLog(...args) {
+      calls.push(['voice.openSetupLog', ...args]);
+      return setupLog ? { ok: true, path: setupLog } : { ok: false, error: 'There is no setup log yet.' };
     },
     onStatus: (cb) => subscribe('voice', cb),
   };

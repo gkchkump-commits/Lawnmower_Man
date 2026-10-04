@@ -44,8 +44,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SettingsStore } from './settings.js';
 import { ClaudeSession, resolveWorkdir } from './claude-session.js';
-import { VoiceSidecar, voiceVenvDirs } from './voice-sidecar.js';
-import { VoiceSetupRunner, setupScriptPath } from './voice-setup.js';
+import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.js';
+import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
 import { windowLayout, placeWindow, resizeAnchored, reclamp } from './window-manager.js';
@@ -63,6 +63,7 @@ import {
 import { createAppProtocolHandler } from './app-protocol.js';
 import {
   validateBoolean,
+  validateNoArgs,
   validatePermissionResponse,
   validateSettingsPatch,
   validateSetupOptions,
@@ -221,12 +222,17 @@ async function init() {
   state.voice = voice;
 
   // --- "Set up local voice…": the bundled setup script in a visible console window ---
+  // The script logs every run to <voice home>/setup.log: the per-user folder of an installed app
+  // (as packagedVoiceHome, where the script puts the venv), voice/ in a checkout.
+  const voiceHome = app.isPackaged ? packagedVoiceHome() : voiceDir;
   const setup = new VoiceSetupRunner({
     script: setupScriptPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot }),
     statusFile: path.join(userData, 'voice-setup-status.json'),
+    logFile: setupLogPath({ voiceHome }),
     beforeLaunch: async ({ check }) => {
-      // The running voice server keeps files of the venv open: stop it while they are replaced.
-      if (!check) await voice.stop();
+      // The running voice server keeps files of the venv open (Windows locks them): stop it, and
+      // keep it stopped — no restart, no crash backoff — until the setup has finished.
+      if (!check) await voice.hold('setup');
     },
     log,
   });
@@ -235,13 +241,14 @@ async function init() {
     rebuildTray();
   });
   setup.on('finished', (/** @type {any} */ r) => {
-    if (r.check) return;
-    // Start the new install (or bring back the previous one after a failed or cancelled run).
-    // Turning voice on restarts a running sidecar by itself (settings change); a stopped one not.
+    if (r.check || setup.state.check) return; // a check run stopped nothing
+    // Turn local voice on after a successful install (while the hold lasts, the settings change
+    // does not start anything), then end the hold: that starts the new install — or brings back
+    // the previous one after a failed or cancelled run.
     const enabling = r.ok && !settings.get().voice.enabled;
-    const stopped = voice.stopped;
     if (enabling) settings.update({ voice: { enabled: true } });
-    if (!enabling || stopped) voice.restart();
+    // Not held (beforeLaunch failed): turning voice on restarted it already, otherwise restart.
+    if (!voice.release('setup') && !enabling) voice.restart();
   });
   state.setup = setup;
 
@@ -709,6 +716,11 @@ function registerIpc() {
   handle('lm:voice:info', () => voiceInfo());
   // Opens the setup in its own window and returns at once; progress arrives via onStatus.
   handle('lm:voice:setup', (opts) => runVoiceSetup(validateSetupOptions(opts)));
+  // "Open setup log": no arguments — only ever the setup log of this app's voice home.
+  handle('lm:voice:open-setup-log', (...args) => {
+    validateNoArgs(args);
+    return openSetupLog();
+  });
   // Fire-and-forget: a restart can take minutes (model loading); progress arrives via onStatus.
   handle('lm:voice:restart', () => {
     voice.restart();
@@ -744,18 +756,42 @@ function registerIpc() {
 // ---------------------------------------------------------------------------------------------
 // First-run helpers: Claude CLI "Retry", local voice setup
 
-/** The voice status for the renderer: the sidecar's info plus the setup window's state. */
+/**
+ * The voice status for the renderer: the sidecar's info plus the setup window's state, and
+ * `setupLog` (its path) when the setup has written a log.
+ */
 function voiceInfo() {
+  /** @type {Record<string, any>} */
   const info = state.voice ? state.voice.info() : { status: 'stopped' };
+  const log = state.setup ? state.setup.existingLog() : null;
+  if (log) info.setupLog = log;
   const st = state.setup ? state.setup.state : null;
   if (st && st.state !== 'idle') {
     /** @type {Record<string, any>} */
     const setup = { state: st.state, detail: st.detail || '', cpu: !!st.cpu };
     if (st.mode) setup.mode = st.mode;
     if (st.command) setup.command = st.command;
+    if (st.errorTail && st.errorTail.length) setup.errorTail = st.errorTail;
     return { ...info, setup };
   }
   return info;
+}
+
+/**
+ * "Open setup log" (settings drawer): the log of the current voice home, in the user's text
+ * editor. Never a path from the renderer or the status file: only the one main computed, and only
+ * when it is a regular file.
+ * @returns {Promise<{ ok: boolean, path?: string, error?: string }>}
+ */
+async function openSetupLog() {
+  const file = state.setup ? state.setup.existingLog() : null;
+  if (!file) return { ok: false, error: 'There is no setup log yet. It is written when "Set up local voice…" runs.' };
+  const err = await shell.openPath(file);
+  if (err) {
+    state.log('warn', `[voice-setup] could not open ${file}: ${err}`);
+    return { ok: false, path: file, error: err };
+  }
+  return { ok: true, path: file };
 }
 
 /** "Retry" on the Claude setup card: see a CLI installed since start-up, then restart it. */
@@ -816,7 +852,7 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo };
+export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
 
 // scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
 // through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).

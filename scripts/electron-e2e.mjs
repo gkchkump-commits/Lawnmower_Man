@@ -127,7 +127,7 @@ try {
   report.bridge = shape;
   check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'voice', 'window'])
     && JSON.stringify(shape.claude) === JSON.stringify(['cancel', 'interrupt', 'onEvent', 'reset', 'respondPermission', 'retry', 'send', 'status'])
-    && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'restart', 'setup']), shape);
+    && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'openSetupLog', 'restart', 'setup']), shape);
   check('no Node/ipcRenderer in the page', !shape.nodeLeak && !shape.ipcLeak, shape);
 
   // CSP: inline script and remote fetch are blocked, the local voice range is allowed.

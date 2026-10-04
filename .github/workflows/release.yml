@@ -4,13 +4,17 @@ name: Windows installer
 # runner, installs the installer silently into a folder whose path has spaces, checks what the
 # install contains (files, icon, shortcuts, Apps & features entry), launches the INSTALLED app and
 # drives it end to end with the fake Claude CLI (scripts/electron-e2e.mjs --packaged), uninstalls
-# it again, and uploads the executables. Pushing a tag like v0.1.0 also publishes them as a
-# GitHub pre-release; pull requests and manual runs only build and test (nothing is published).
+# it again, and uploads the executables. Publishing happens two ways: pushing a tag like v0.1.0
+# creates a GitHub pre-release with them, and publishing a release from the GitHub web page
+# (Releases -> Draft a new release -> new tag vX.Y.Z on the commit to ship) attaches them to it.
+# Pull requests and manual runs only build and test (nothing is published).
 # The build is unsigned: there is no code-signing certificate (Windows SmartScreen warns).
 
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
   pull_request:
   workflow_dispatch:
 
@@ -184,8 +188,8 @@ jobs:
 
   publish:
     name: Publish pre-release
-    # tag pushes only: pull requests and manual runs never publish
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # v* tag pushes and releases published on GitHub only: pull requests and manual runs never publish
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'release' && startsWith(github.ref, 'refs/tags/v'))
     needs: windows-installer
     runs-on: ubuntu-latest
     permissions:
@@ -215,7 +219,13 @@ jobs:
           sed -i 's/^          //' notes.md
           files=(dist-win/Lawnmower-Man-*.exe dist-win/SHA256SUMS.txt)
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # e.g. a release published from the web page: attach the files, keep its title and flags,
+            # and fill in the notes only when it has none
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            body="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+            if [ -z "${body//[[:space:]]/}" ]; then
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+            fi
           else
             gh release create "$GITHUB_REF_NAME" "${files[@]}" \
               --repo "$GITHUB_REPOSITORY" \

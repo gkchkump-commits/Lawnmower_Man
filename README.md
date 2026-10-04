@@ -144,7 +144,16 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
 | `docs/ARCHITECTURE.md` | the interface contract between all of the above |
-| `.github/workflows/release.yml` | Windows installer build, install + end-to-end test of the installed app, pre-release on `v*` tags |
+| `.github/workflows/release.yml` | Windows installer build, install + end-to-end test of the installed app, publishing on `v*` tags / GitHub releases |
+
+### Publishing a test build
+
+Every pull request builds the Windows installer, installs it on a GitHub Windows runner and drives the installed app; the tested executables are attached to that run as the `lawnmower-man-windows` artifact. To publish them on the [Releases page](https://github.com/gkchkump-commits/Lawnmower_Man/releases), either:
+
+* on GitHub: **Releases → Draft a new release → Choose a tag →** type `v<version from package.json>` (for example `v0.1.0`) **→ Target:** the branch or commit to ship **→** tick *Set as a pre-release* **→ Publish release**. The workflow then builds, tests and attaches the installer, the portable exe and `SHA256SUMS.txt` (about 5 minutes); or
+* push a tag: `git tag v0.1.0 && git push origin v0.1.0`, which creates the pre-release automatically.
+
+The tag must match `version` in `package.json` (the files are named after it): bump the version for the next build.
 
 Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawnmower Man/`). Logs are in its `logs/` folder, reachable from the tray menu's *Open logs folder*.
 

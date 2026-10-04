@@ -161,9 +161,15 @@ describe('.github/workflows/release.yml', () => {
     expect(uninstall).toMatch(/the silent uninstall deleted user data/);
   });
 
-  it('publishes a pre-release only for v* tag pushes', () => {
+  it('publishes only for v* tag pushes and releases published on GitHub (never for PRs or manual runs)', () => {
     expect(yml).toMatch(/tags: \['v\*'\]/);
-    expect(yml).toMatch(/if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)/);
+    expect(yml).toMatch(/release:\n {4}types: \[published\]/);
+    const cond = yml.match(/^ {4}if: (.*)$/m)?.[1] || '';
+    expect(cond).toContain("(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))");
+    expect(cond).toContain("(github.event_name == 'release' && startsWith(github.ref, 'refs/tags/v'))");
+    expect(cond).not.toMatch(/pull_request|workflow_dispatch/);
+    // an existing (web-published) release gets the files; its own notes are kept
+    expect(yml).toMatch(/gh release upload "\$GITHUB_REF_NAME" "\$\{files\[@\]\}" --repo "\$GITHUB_REPOSITORY" --clobber/);
     expect(yml).toMatch(/needs: windows-installer/);
     expect(yml).toMatch(/--prerelease/);
     // write access only in the publish job

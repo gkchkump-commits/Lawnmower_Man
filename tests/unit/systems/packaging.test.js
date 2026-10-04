@@ -8,6 +8,8 @@ import path from 'node:path';
 
 const root = path.resolve('.');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+/** Text as in the repository: Windows checkouts may turn LF into CRLF. @param {string} rel */
+const readText = (rel) => fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n');
 const build = pkg.build;
 
 /** Sizes stored in an .ico file (ICONDIR / ICONDIRENTRY). @param {Buffer} b */
@@ -53,12 +55,12 @@ describe('package.json build (electron-builder)', () => {
       deleteAppDataOnUninstall: false,
     });
     // the install-mode page ("for me / for all users") is skipped: always the current user
-    const nsh = fs.readFileSync(path.join(root, n.include), 'utf8');
+    const nsh = readText(n.include);
     expect(nsh).toMatch(/!macro customInstallMode\s+StrCpy \$isForceCurrentInstall "1"\s+!macroend/);
   });
 
   it('uninstall asks before deleting the voice and settings (default No); updates and /S never delete', () => {
-    const nsh = fs.readFileSync(path.join(root, build.nsis.include), 'utf8');
+    const nsh = readText(build.nsis.include);
     const m = nsh.match(/!macro customUnInstall\n([\s\S]*?)\n!macroend/);
     expect(m, 'customUnInstall macro').toBeTruthy();
     const body = m[1];
@@ -113,7 +115,7 @@ describe('package.json build (electron-builder)', () => {
     expect(build.extraResources.some((r) => r.from === 'THIRD_PARTY_NOTICES.md')).toBe(true);
     // main.js imports only node: built-ins and its own files: no node_modules at runtime
     for (const f of fs.readdirSync(path.join(root, 'electron')).filter((x) => /\.(m?js|cjs)$/.test(x))) {
-      const src = fs.readFileSync(path.join(root, 'electron', f), 'utf8');
+      const src = readText(path.join('electron', f));
       for (const m of src.matchAll(/(?:import\s[^'"]*from\s|import\(|require\()\s*['"]([^'"]+)['"]/g)) {
         expect(m[1].startsWith('node:') || m[1].startsWith('./') || m[1] === 'electron', `${f}: ${m[1]}`).toBe(true);
       }
@@ -128,7 +130,7 @@ describe('package.json build (electron-builder)', () => {
 });
 
 describe('.github/workflows/release.yml', () => {
-  const yml = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  const yml = readText('.github/workflows/release.yml');
 
   it('builds unsigned on windows-latest and tests the INSTALLED app', () => {
     expect(yml).toMatch(/runs-on: windows-latest/);

@@ -29,7 +29,9 @@ import { findOnPath } from '../../../electron/claude-path.js';
 const ROOT = path.resolve('.');
 const tmpDirs = [];
 const tmp = (prefix = 'lm-vsetup-') => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  // Long-form path: Windows %TEMP% is often an 8.3 short name (C:\\Users\\RUNNER~1\\...), while
+  // PowerShell reports the long one (C:\\Users\\runneradmin\\...).
+  const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   tmpDirs.push(d);
   return d;
 };
@@ -309,7 +311,9 @@ describe('VoiceSetupRunner', () => {
     const h = make({ platform: 'linux', findTerminal: () => null });
     const st = await h.r.start({ cpu: true });
     expect(st).toMatchObject({ state: 'manual', mode: 'manual', cpu: true });
-    expect(st.command).toBe(`bash ${h.script.includes(' ') ? `'${h.script}'` : h.script} --cpu`);
+    // POSIX quoting as voice-setup.js does it (a Windows test path has backslashes, which need quotes)
+    const q = /^[A-Za-z0-9_./=:-]+$/.test(h.script) ? h.script : `'${h.script.replace(/'/g, "'\\''")}'`;
+    expect(st.command).toBe(`bash ${q} --cpu`);
     expect(h.spawnImpl).not.toHaveBeenCalled();
     expect(h.beforeLaunch).not.toHaveBeenCalled();
   });

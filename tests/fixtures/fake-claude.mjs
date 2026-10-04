@@ -31,6 +31,7 @@
 //   FAKE_CLAUDE_BOM=1      UTF-8 BOM before the first line
 //   FAKE_CLAUDE_NO_INIT=1  never answer the initialize request
 //   FAKE_CLAUDE_EXIT_AT_START=<code>  exit immediately with that code (startup failure)
+//   FAKE_CLAUDE_IGNORE_SIGTERM=1  ignore SIGTERM (POSIX), so killing it takes the full grace period
 //   --resume <id starting with "missing">  → "No conversation found" + exit 1 (like the real CLI)
 
 import fs from 'node:fs';
@@ -55,6 +56,8 @@ if (process.env.FAKE_CLAUDE_LOG) {
   for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_REMOTE_SESSION_ID', 'ELECTRON_RUN_AS_NODE', 'FAKE_MARKER']) envSubset[k] = process.env[k] ?? null;
   fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ argv, cwd: process.cwd(), env: envSubset, pid: process.pid })}\n`);
 }
+
+if (process.env.FAKE_CLAUDE_IGNORE_SIGTERM) process.on('SIGTERM', () => {});
 
 if (process.env.FAKE_CLAUDE_EXIT_AT_START) {
   process.stderr.write('fake-claude: simulated startup failure\n');

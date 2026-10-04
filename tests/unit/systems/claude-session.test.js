@@ -279,6 +279,23 @@ describe('ClaudeSession with the fake CLI', () => {
     expect(runs[1].argv.slice(runs[1].argv.indexOf('--resume'), runs[1].argv.indexOf('--resume') + 2)).toEqual(['--resume', sid]);
   });
 
+  it('stop() during an interrupt fallback waits for the detached CLI to exit', async () => {
+    // The fallback detaches the old process before killing it; stop() must still wait for that
+    // kill (on Windows a live process keeps its working folder locked).
+    const h = harness({ opts: { interruptTimeoutMs: 200 }, env: { FAKE_CLAUDE_IGNORE_SIGTERM: '1' } });
+    const { turnId } = await h.session.send('hang forever');
+    await h.waitFor((e) => e.type === 'text_delta' && e.turnId === turnId);
+    const [{ pid }] = h.argvLog();
+    const interrupting = h.session.interrupt();
+    await h.waitFor((e) => e.type === 'status' && e.status === 'restarting'); // old CLI detached, kill in flight
+    await h.session.stop();
+    const alive = (() => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    })();
+    expect(alive).toBe(false);
+    await interrupting;
+  });
+
   it('auto-restarts after a crash with --resume and keeps the conversation', async () => {
     const h = harness();
     const t1 = (await h.session.send('hello A')).turnId;

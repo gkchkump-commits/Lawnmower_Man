@@ -217,6 +217,8 @@ export class ClaudeSession extends EventEmitter {
     this._interruptTimeoutMs = opts.interruptTimeoutMs ?? 5000;
     this._initTimeoutMs = opts.initTimeoutMs ?? 20000;
     this._stopGraceMs = opts.stopGraceMs ?? 2000;
+    /** Kills still in flight for processes already detached (interrupt fallback, restarts). @type {Set<Promise<void>>} */
+    this._killing = new Set();
     this._restartCfg = {
       baseDelayMs: opts.restart?.baseDelayMs ?? 1000,
       maxDelayMs: opts.restart?.maxDelayMs ?? 30000,
@@ -471,6 +473,10 @@ export class ClaudeSession extends EventEmitter {
     this._failQueued('Claude was stopped before this message was sent.');
     this._permissions.clear();
     if (info) await this._killInfo(info, { graceful: true });
+    // A process detached by an interrupt fallback or a settings restart may still be exiting:
+    // wait for it too, so "stopped" means no CLI process is left (on Windows a live process
+    // also keeps its working folder locked).
+    await Promise.allSettled([...this._killing]);
     this._setStatus('exited', 'Stopped');
   }
 
@@ -702,11 +708,19 @@ export class ClaudeSession extends EventEmitter {
     if (!info || info.exited) return;
     info.expectedExit = true;
     const child = info.proc;
-    if (o.graceful) {
-      try { child.stdin?.end(); } catch { /* ignore */ }
-      if (await waitForExit(child, this._stopGraceMs)) return;
+    const kill = (async () => {
+      if (o.graceful) {
+        try { child.stdin?.end(); } catch { /* ignore */ }
+        if (await waitForExit(child, this._stopGraceMs)) return;
+      }
+      await killProcessTree(child, { platform: this._platform });
+    })();
+    this._killing.add(kill);
+    try {
+      await kill;
+    } finally {
+      this._killing.delete(kill);
     }
-    await killProcessTree(child, { platform: this._platform });
   }
 
   /** Restart (resuming the same conversation) so new settings take effect. Never throws. */

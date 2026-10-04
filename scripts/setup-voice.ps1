@@ -41,6 +41,16 @@
   and later re-runs of this script use it too.
 .PARAMETER SkipSmoke
   Skip the final load-and-run smoke test.
+.PARAMETER PauseAtEnd
+  Wait for Enter before the window closes (the app opens this script in its own console).
+.PARAMETER StatusFile
+  Write the result as JSON to this file when done ({ok, error, voiceHome, venv, python, ...});
+  the app watches it to start the new voice server as soon as the setup has finished.
+.PARAMETER CheckOnly
+  Only report where the voice would be installed (and which Python would be used), then exit.
+  Changes nothing; used by the app's packaged smoke test.
+.PARAMETER Yes
+  Answer yes to questions (install Python 3.12 with winget when it is missing).
 #>
 [CmdletBinding()]
 param(
@@ -52,7 +62,11 @@ param(
   [switch]$Recreate,
   [string]$SttModel = 'large-v3-turbo',
   [string]$ModelsDir = '',
-  [switch]$SkipSmoke
+  [switch]$SkipSmoke,
+  [switch]$PauseAtEnd,
+  [string]$StatusFile = '',
+  [switch]$CheckOnly,
+  [switch]$Yes
 )
 
 Set-StrictMode -Version 2.0
@@ -62,6 +76,8 @@ $ProgressPreference = 'SilentlyContinue'
 $OnWindows = $true
 if (Test-Path variable:IsWindows) { $OnWindows = [bool]$IsWindows }
 
+try { $Host.UI.RawUI.WindowTitle = 'Lawnmower Man - local voice setup' } catch { }
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 $VoiceDir = Join-Path $Root 'voice'
@@ -69,7 +85,7 @@ $VoiceDir = Join-Path $Root 'voice'
 # install folder on every update/uninstall (and Program Files is not writable), so the venv, the
 # models and a writable copy of the package (pip writes build metadata next to it) go to a
 # per-user folder. Must match electron/voice-sidecar.js packagedVoiceHome().
-$Packaged = Test-Path (Join-Path $Root 'app.asar')
+$Packaged = Test-Path -LiteralPath (Join-Path $Root 'app.asar')
 if ($Packaged) {
   $base = $env:LOCALAPPDATA
   if (-not $base) { $base = Join-Path (Join-Path $HOME 'AppData') 'Local' }
@@ -97,6 +113,48 @@ if (-not $ModelsDir -and $Packaged) { $ModelsDir = Join-Path $VoiceHome 'models'
 
 function Write-Step([string]$Text) { Write-Host ''; Write-Host ('==> ' + $Text) -ForegroundColor Cyan }
 function Write-Warn([string]$Text) { Write-Host ('WARNING: ' + $Text) -ForegroundColor Yellow }
+
+# Can we ask the user something? (not when input is piped, e.g. tests or CI)
+function Test-CanAsk {
+  try { if ([Console]::IsInputRedirected) { return $false } } catch { return $false }
+  return [Environment]::UserInteractive
+}
+
+# Yes/no question; the default answer is yes (Enter). -Yes answers yes without asking.
+function Read-YesNo([string]$Question) {
+  if ($Yes) { Write-Host ($Question + ' [Y/n] y (-Yes)'); return $true }
+  if (-not (Test-CanAsk)) { return $false }
+  $answer = Read-Host ($Question + ' [Y/n]')
+  if ($null -eq $answer) { return $false }
+  $a = $answer.Trim().ToLowerInvariant()
+  return ($a -eq '' -or $a -eq 'y' -or $a -eq 'yes')
+}
+
+# Result for the app (and for -CheckOnly): one JSON object, UTF-8 without BOM.
+$script:Result = [ordered]@{ ok = $false; check = [bool]$CheckOnly; cpu = [bool]$Cpu; packaged = $Packaged; voiceHome = $VoiceHome; venv = $Venv; python = ''; error = '' }
+function Write-Status {
+  if (-not $StatusFile) { return }
+  try {
+    $script:Result['finishedAt'] = (Get-Date).ToUniversalTime().ToString('o')
+    $json = $script:Result | ConvertTo-Json -Compress
+    $dir = Split-Path -Parent $StatusFile
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($StatusFile, $json, (New-Object System.Text.UTF8Encoding $false))
+  } catch {
+    Write-Warn ('Could not write the status file {0}: {1}' -f $StatusFile, $_.Exception.Message)
+  }
+}
+
+# End the script: report to the app, keep the window open if asked, exit with the code.
+function Exit-Setup([int]$Code) {
+  Write-Status
+  if ($PauseAtEnd -and (Test-CanAsk)) {
+    Write-Host ''
+    if ($Code -eq 0) { Write-Host 'Lawnmower Man starts the local voice by itself now.' -ForegroundColor Green }
+    [void](Read-Host 'Press Enter to close this window')
+  }
+  exit $Code
+}
 
 # Run a native command; throw if it fails. Simple function on purpose: arguments such as "-m"
 # must reach the program untouched (an advanced function would try to bind them).
@@ -138,6 +196,17 @@ function Find-Python {
     @('py', @('-3.12')), @('python3.12', @()), @('python', @()), @('python3', @()),
     @('py', @('-3.11')), @('python3.11', @()), @('py', @('-3.10')), @('python3.10', @())
   )
+  # Per-user installs even when PATH is stale (winget just installed one, and this window still
+  # has the old PATH): winget --scope user / python.org "just me" (Programs\Python\Python312),
+  # and the Python install manager (Python\pythoncore-3.12-64).
+  if ($OnWindows -and $env:LOCALAPPDATA) {
+    foreach ($v in @('3.12', '3.11')) {
+      foreach ($rel in @(('Programs\Python\Python{0}\python.exe' -f $v.Replace('.', '')), ('Python\pythoncore-{0}-64\python.exe' -f $v))) {
+        $exe = Join-Path $env:LOCALAPPDATA $rel
+        if (Test-Path -LiteralPath $exe) { $candidates += , @($exe, @()) }
+      }
+    }
+  }
   $found = @{}
   foreach ($c in $candidates) {
     $info = Get-PyInfo $c[0] $c[1]
@@ -146,6 +215,54 @@ function Find-Python {
   }
   foreach ($v in @('3.12', '3.11', '3.10')) { if ($found.ContainsKey($v)) { return $found[$v] } }
   return $null
+}
+
+# Re-read PATH from the registry (an installer just changed it; this window still has the old one).
+function Update-PathFromRegistry {
+  $parts = @()
+  foreach ($scope in @('Machine', 'User')) {
+    $v = [Environment]::GetEnvironmentVariable('Path', $scope)
+    if ($v) { $parts += $v.Split(';') }
+  }
+  $have = @{}
+  $merged = @()
+  foreach ($d in (@(([string]$env:Path).Split(';')) + $parts)) {
+    if (-not $d) { continue }
+    $k = $d.TrimEnd([char]92).ToLowerInvariant()
+    if ($have.ContainsKey($k)) { continue }
+    $have[$k] = $true
+    $merged += $d
+  }
+  $env:Path = $merged -join ';'
+}
+
+# Python 3.12 is missing: offer to install it with winget (per user, no admin), else explain.
+function Install-Python {
+  if (-not $OnWindows) { return $null }
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if (-not $winget) {
+    Write-Host ''
+    Write-Host 'Python 3.12 is needed, and winget (App Installer) is not available on this PC to install it.' -ForegroundColor Yellow
+    Write-Host '  Download Python 3.12 from https://www.python.org/downloads/windows/'
+    Write-Host '  (tick "Add python.exe to PATH" in the installer), then run this setup again.'
+    return $null
+  }
+  Write-Host ''
+  Write-Host 'Python 3.12 was not found. It can be installed now with winget, for this user only (no admin):'
+  Write-Host '    winget install -e --id Python.Python.3.12 --scope user'
+  Write-Host '  (this accepts the winget source and Python license agreements)'
+  if (-not (Read-YesNo 'Install Python 3.12 now?')) {
+    Write-Host 'Not installing Python. Install Python 3.12 (winget or https://www.python.org/downloads/windows/), then run this setup again.'
+    return $null
+  }
+  Write-Step 'Installing Python 3.12 with winget'
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  & $winget.Source install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $old
+  if ($code -ne 0) { Write-Warn ('winget exited with code {0}; checking whether Python is usable anyway.' -f $code) }
+  Update-PathFromRegistry
+  return (Find-Python)
 }
 
 # Clean up a folder argument: Windows PowerShell 5.1 turns  -ModelsDir 'D:\AI Models\'  into
@@ -207,19 +324,33 @@ function Get-LastJson($Lines) {
 }
 
 try {
-  if (-not (Test-Path (Join-Path $VoiceDir 'pyproject.toml'))) { throw ("voice\pyproject.toml not found next to this script ({0})." -f $VoiceDir) }
+  if (-not (Test-Path -LiteralPath (Join-Path $VoiceDir 'pyproject.toml'))) { throw ("voice\pyproject.toml not found next to this script ({0})." -f $VoiceDir) }
   if ($ModelsDir) { $ModelsDir = Get-CleanDir $ModelsDir }
   if ($Packaged) { Write-Host ('Installed app detected: voice files go to {0}' -f $VoiceHome) }
+
+  if ($CheckOnly) {
+    $found = Find-Python
+    if ($found) { $script:Result['python'] = $found.Path }
+    Write-Host ('Voice folder: {0}' -f $VoiceHome)
+    Write-Host ('Venv:         {0}' -f $Venv)
+    $pyText = 'not found'; if ($found) { $pyText = ('{0} (Python {1})' -f $found.Path, $found.Version) }
+    Write-Host ('Python:       {0}' -f $pyText)
+    $script:Result['ok'] = $true
+    Exit-Setup 0
+  }
 
   # -------------------------------------------------------------------------------------------
   Write-Step 'Looking for Python 3.12'
   $py = Find-Python
+  if (-not $py) { $py = Install-Python }
   if (-not $py) {
+    $script:Result['error'] = 'python-missing'
     throw ("Python 3.12 was not found. Install it, then re-run this script:`n" +
-      "    winget install -e --id Python.Python.3.12`n" +
+      "    winget install -e --id Python.Python.3.12 --scope user`n" +
       "  or download it from https://www.python.org/downloads/windows/ (tick 'Add python.exe to PATH').`n" +
       "  The 'python' command that opens the Microsoft Store does not count.")
   }
+  $script:Result['python'] = $py.Path
   switch ($py.Version) {
     '3.12' { }
     '3.11' { Write-Warn ('Using Python 3.11 ({0}). It works; 3.12 is recommended.' -f $py.Path) }
@@ -238,10 +369,10 @@ try {
 
   # -------------------------------------------------------------------------------------------
   Write-Step ('Preparing the virtual environment ({0})' -f $Venv)
-  if (Test-Path $Venv) {
+  if (Test-Path -LiteralPath $Venv) {
     Assert-VoiceNotRunning
     $have = $null
-    if (Test-Path $VenvPy) { $have = Get-PyInfo $VenvPy @() }
+    if (Test-Path -LiteralPath $VenvPy) { $have = Get-PyInfo $VenvPy @() }
     if ($Recreate -or -not $have -or $have.Version -ne $py.Version) {
       $hv = 'broken'
       if ($have) { $hv = $have.Version }
@@ -251,9 +382,9 @@ try {
       Write-Host ('Reusing the existing venv (Python {0})' -f $have.Version)
     }
   }
-  if (-not (Test-Path $VenvPy)) {
+  if (-not (Test-Path -LiteralPath $VenvPy)) {
     $venvParent = Split-Path -Parent $Venv
-    if (-not (Test-Path $venvParent)) { New-Item -ItemType Directory -Force -Path $venvParent | Out-Null }
+    if (-not (Test-Path -LiteralPath $venvParent)) { New-Item -ItemType Directory -Force -Path $venvParent | Out-Null }
     Invoke-Checked $py.Path -m venv $Venv
   }
   if ($ModelsDir) {
@@ -267,12 +398,12 @@ try {
     # pip writes build metadata next to the package: install from a writable copy
     if (Test-Path -LiteralPath $PkgDir) { Remove-Item -Recurse -Force -LiteralPath $PkgDir }
     New-Item -ItemType Directory -Force -Path $PkgDir | Out-Null
-    Copy-Item -Recurse -Force -Path (Join-Path $VoiceDir '*') -Destination $PkgDir
+    Get-ChildItem -LiteralPath $VoiceDir -Force | Copy-Item -Recurse -Force -Destination $PkgDir
   }
 
   if ($OnWindows) {
     try {
-      $drive = (Get-Item (Split-Path -Parent $Venv)).PSDrive
+      $drive = (Get-Item -LiteralPath (Split-Path -Parent $Venv)).PSDrive
       if ($drive -and $drive.Free -and $drive.Free -lt 8GB) {
         Write-Warn ('Only {0:N1} GB free on drive {1}:; the GPU install needs ~5 GB plus ~2.5 GB of models.' -f ($drive.Free / 1GB), $drive.Name)
       }
@@ -291,7 +422,17 @@ try {
       Invoke-Checked $VenvPy -m pip uninstall -y onnxruntime-gpu onnxruntime
       Invoke-Checked $VenvPy -m pip install --disable-pip-version-check --force-reinstall --no-deps 'onnxruntime>=1.20'
     }
-  } else {
+  }
+  if (-not $Cpu -and $OnWindows -and -not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+    Write-Warn 'nvidia-smi not found: no NVIDIA GPU driver is installed (R570+ for RTX 50-series, R580+ for GPU text-to-speech).'
+    if (Read-YesNo 'Install the CPU version instead (smaller; no NVIDIA downloads)?') {
+      $Cpu = $true
+      $script:Result['cpu'] = $true
+      Write-Step 'Installing the CPU voice stack'
+      Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[cpu]' -f $PkgDir)
+    }
+  }
+  if (-not $Cpu) {
     Write-Step 'Installing the NVIDIA GPU voice stack (CUDA 12.8+/13 wheels for RTX 50-series; several GB)'
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
       $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -384,13 +525,16 @@ try {
     foreach ($w in @($s.warnings)) { if ($w) { Write-Warn $w } }
   }
   Write-Host ''
-  Write-Host 'Done. The app starts the voice server automatically (Settings > Voice, or tray > Restart voice).'
+  Write-Host 'Done. The app starts the voice server automatically (or use tray > Restart voice).'
   Write-Host ('Manual run:   "{0}" -m lawnmower_voice --port 8765 --token test --preload' -f $VenvPy)
   Write-Host ('Fake engines: "{0}" -m lawnmower_voice --fake' -f $VenvPy)
   Write-Host ('Diagnostics:  "{0}" -m lawnmower_voice.doctor --smoke --human' -f $VenvPy)
-  exit 0
+  $script:Result['ok'] = $true
+  $script:Result['cpu'] = [bool]$Cpu
+  Exit-Setup 0
 } catch {
   Write-Host ''
   Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
-  exit 1
+  if (-not $script:Result['error']) { $script:Result['error'] = $_.Exception.Message }
+  Exit-Setup 1
 }

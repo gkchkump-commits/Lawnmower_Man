@@ -97,11 +97,19 @@ lawnmower = {
     reset(): Promise<void>,                              // start a fresh conversation
     respondPermission(requestId: string, decision: { behavior: 'allow'|'deny', message?: string, updatedInput?: object }): Promise<void>,
     status(): Promise<ClaudeStatus>,
+    retry(): Promise<void>,                              // setup card "Retry": look for the CLI again (refreshing PATH
+                                                         // from the registry on Windows) and restart it, same conversation
     onEvent(cb: (ev: ClaudeEvent) => void): () => void, // returns unsubscribe
   },
   voice: {
-    info(): Promise<{ status: 'disabled'|'starting'|'ready'|'error'|'stopped', url?: string, token?: string, detail?: string, health?: object }>,
+    info(): Promise<{ status: 'disabled'|'starting'|'ready'|'error'|'stopped', installed?: boolean, url?: string, token?: string,
+                      detail?: string, health?: object,
+                      setup?: { state: 'running'|'done'|'failed'|'manual', detail: string, cpu: boolean,
+                                mode?: 'console'|'terminal'|'manual', command?: string } }>,
     restart(): Promise<void>,
+    setup(o?: { cpu?: boolean }): Promise<SetupState>,  // "Set up local voice…": runs the bundled setup script in a
+                                                         // visible console/terminal (manual mode: only returns the command);
+                                                         // cpu defaults to "no NVIDIA GPU detected". Progress via onStatus.
     onStatus(cb: (info) => void): () => void,
   },
   settings: {
@@ -144,10 +152,19 @@ eases off with distance); without `onCursor` (browser preview) pointer events ov
                                                           // interrupted: interrupt(), or reset()/stop() during the turn
 { type: 'turn_cancelled', turnId: string }                // cancel() dropped a queued turn (no turn_start, never sent to the CLI)
 { type: 'error', message: string, turnId?: string }
+{ type: 'problem', problem: { kind: 'cli-missing'|'auth', detail: string } | null }
+                                                          // something the user must fix outside the app (first run): no CLI
+                                                          // found, or the CLI is not logged in ("Not logged in · Please run
+                                                          // /login", expired OAuth, invalid API key…). Sent before the failed
+                                                          // turn_end; null once fixed (successful turn, CLI found, retry()).
 ```
 
 `ClaudeStatus = { status, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string,
-  activeTurnId?: string, queuedTurnIds: string[], pendingPermissions: [{ requestId, turnId, toolName, input, description? }] }`
+  problem?: { kind, detail }, activeTurnId?: string, queuedTurnIds: string[], pendingPermissions: [{ requestId, turnId, toolName, input, description? }] }`
+
+The renderer shows a `problem` as a setup card (`src/ui/setup-cards.js`, content in `src/app/setup-help.js`): the
+official install commands for the platform (verified against code.claude.com/docs/en/setup) with Copy buttons, the
+`claude` login step and **Retry**. The app never runs an installer itself.
 
 Events are not replayed: a renderer that (re)loads (start-up, crash recovery, F5 in development) calls
 `status()` and picks up the running turn, the queued turns and the open approval cards from it.
@@ -216,6 +233,7 @@ command line — user text only ever travels over stdin; long prompts go in file
     sttLanguage: 'en',
     ttsVoice: 'af_heart',        // Kokoro voice id
     ttsSpeed: 1.0,
+    systemVoice: '',             // Web Speech voice (name or voiceURI) while the local voice is not running; '' = automatic
     device: 'auto',              // 'auto' | 'cuda' | 'cpu'
     handsFree: false,            // continuous VAD listening (half-duplex)
     speakReplies: true,
@@ -337,5 +355,16 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   `tools/visual/` has the screenshot and compare tools (URL parameters in its README).
 * Real app: `ELECTRON_PATH=<electron binary> xvfb-run -a node scripts/electron-e2e.mjs [--live]`
   launches `electron/main.js` with Playwright's Electron driver (fake or real Claude CLI) and checks
-  app://, CSP, the bridge, settings IPC, a streamed turn, voice status and a clean boot without
-  console errors.
+  app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, voice
+  status and a clean boot without console errors.
+* Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>
+  node scripts/electron-e2e.mjs --packaged` (no app path) also checks `app.isPackaged`, the
+  resources an installer must deliver, the per-user voice folder and — through the real launcher in
+  `-CheckOnly` mode — that the bundled setup script reports that same folder. The fake CLI reaches
+  the packaged app through `LAWNMOWER_CLAUDE_CLI` (honoured when packaged on purpose; threat model in
+  `electron/main.js`), `LAWNMOWER_E2E=1` exposes a few main-process helpers to `app.evaluate()`.
+  `.github/workflows/release.yml` runs it against the silently installed NSIS build on windows-latest
+  (`--software-webgl`: the runner has no GPU), then installs the same build over itself (the update
+  path: the previous version's uninstaller runs with `/S --updated`) and checks that the per-user voice
+  folder and the settings folder survive the update and a silent uninstall. An interactive uninstall
+  asks before deleting those two folders (default No; `electron/assets/installer.nsh`).

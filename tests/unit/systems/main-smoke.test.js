@@ -193,8 +193,8 @@ describe('electron/main.js wiring', () => {
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
     expect([...m.handlers.keys()].sort()).toEqual([
-      'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:send', 'lm:claude:status',
-      'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:restart',
+      'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:retry', 'lm:claude:send', 'lm:claude:status',
+      'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:restart', 'lm:voice:setup',
     ]);
   });
 
@@ -325,6 +325,55 @@ describe('electron/main.js wiring', () => {
     expect(info).toMatchObject({ version: '0.1.0-test', platform: process.platform, layout: { avatar: { width: 560, height: 840 } } });
     expect(info.gpu.active.vendor).toBe('NVIDIA');
     expect(await invoke('lm:voice:info')).toMatchObject({ status: 'disabled' });
+  });
+
+  it('Retry re-detects and restarts the Claude CLI in the same conversation', async () => {
+    const before = await invoke('lm:claude:status');
+    await invoke('lm:claude:retry');
+    const after = await invoke('lm:claude:status');
+    expect(after).toMatchObject({ status: 'ready', sessionId: before.sessionId });
+    expect(after.problem).toBeUndefined();
+    const { turnId } = await invoke('lm:claude:send', 'after retry');
+    const [, ev] = await waitForSent(([ch, p]) => ch === 'lm:claude:event' && p.type === 'turn_end' && p.turnId === turnId);
+    expect(ev.result).toBe('You said: after retry');
+  });
+
+  it('"Set up local voice…": GPU choice, tray item, and the voice restarts when the script reports', async () => {
+    const t = main.__test;
+    const setup = t.state.setup;
+    expect(setup._o.script).toBe(path.resolve('scripts', process.platform === 'win32' ? 'setup-voice.ps1' : 'setup-voice.sh'));
+    expect(setup._o.statusFile).toBe(path.join(m.userData.dir, 'voice-setup-status.json'));
+    const tray = () => t.state.tray.menu.template.map((i) => i.label);
+    expect(tray()).toContain('Set up local voice…');
+    // never open a real console window from a unit test: stub the launch
+    const start = vi.spyOn(setup, 'start').mockImplementation(async (o) => setup._set({ state: 'running', mode: 'console', cpu: o.cpu, detail: 'running' }));
+    try {
+      await expect(invoke('lm:voice:setup', { cpu: 'yes' })).rejects.toThrow(/cpu must be true or false/);
+      await expect(invoke('lm:voice:setup', 'nope')).rejects.toThrow(/object/);
+      const r = await invoke('lm:voice:setup');
+      expect(start).toHaveBeenLastCalledWith({ cpu: false, check: false }); // the mocked GPU is an NVIDIA one
+      expect(r.state).toBe('running');
+      const [, info] = await waitForSent(([ch, p]) => ch === 'lm:voice:status' && p.setup?.state === 'running');
+      expect(info.setup).toMatchObject({ state: 'running', cpu: false, mode: 'console' });
+      expect(await invoke('lm:voice:info')).toMatchObject({ setup: { state: 'running' } });
+      expect(tray()).toContain('Local voice setup is running…');
+      await invoke('lm:voice:setup', { cpu: true });
+      expect(start).toHaveBeenLastCalledWith({ cpu: true, check: false });
+
+      // the script reported success: voice gets enabled and (re)started
+      const restart = vi.spyOn(t.state.voice, 'restart');
+      setup._set({ state: 'done', detail: 'Local voice installed. Starting it…' });
+      setup.emit('finished', { ok: true });
+      expect((await invoke('lm:settings:get')).voice.enabled).toBe(true);
+      expect(restart).toHaveBeenCalledTimes(1);
+      // a check-only run changes nothing
+      setup.emit('finished', { ok: true, check: true });
+      expect(restart).toHaveBeenCalledTimes(1);
+      restart.mockRestore();
+      await t.state.voice.stop();
+    } finally {
+      start.mockRestore();
+    }
   });
 
   it('shuts down child processes on will-quit, then quits', async () => {

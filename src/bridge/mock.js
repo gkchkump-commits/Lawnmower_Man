@@ -8,6 +8,10 @@
 // memory with change events; voice.info() reports 'disabled' unless ?voice=fake (an in-page
 // fake voice server, see mock-voice.js) or ?voice=<http url>&voiceToken=<t> (a real one,
 // e.g. `python -m lawnmower_voice --fake`). Window/app methods are recorded no-ops.
+// First-run problems: ?claude=missing (no CLI: the setup card) or ?claude=auth (every turn
+// fails with "Not logged in"); claude.retry() then "finds" a working CLI (after
+// ?claudeRetries=N failed attempts). voice.setup() answers with the manual command, as main
+// does when it cannot open a terminal.
 
 import { DEFAULT_SETTINGS, clone, deepMerge, isPlainObject } from '../app/settings-defaults.js';
 import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
@@ -21,7 +25,12 @@ import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
  * @property {string} [voiceToken]
  * @property {Record<string, any>} [settings]     initial settings patch
  * @property {string} [platform]
+ * @property {'ok'|'missing'|'auth'} [claude]      simulate a missing / logged-out Claude CLI
+ * @property {number} [claudeRetries]             retry() calls that still fail (default 0)
  */
+
+export const MOCK_NOT_FOUND = 'Claude CLI not found. Install Claude Code (https://code.claude.com/docs/en/setup), sign in once by running "claude" in a terminal, or set the CLI path in Settings.';
+export const MOCK_NOT_LOGGED_IN = 'Not logged in · Please run /login';
 
 export const MOCK_REPLIES = Object.freeze({
   greeting: "Hello! I'm Claude, floating on your desktop as a hologram. You can type to me here, or hold Space and talk once the local voice server is installed. What shall we do?",
@@ -119,6 +128,8 @@ export function createMockBridge(options = {}) {
     voice: 'disabled',
     voiceToken: '',
     platform: 'browser',
+    claude: 'ok',
+    claudeRetries: 0,
     ...options,
   };
   /** @type {Record<string, Set<Function>>} */
@@ -181,7 +192,23 @@ export function createMockBridge(options = {}) {
     emit({ type: 'session', sessionId, model: 'claude-mock', tools: settings.claude.mode === 'chat' ? [] : ['Read', 'Glob', 'Grep', 'Bash'] });
   };
   let ready = false;
+  /** 'ok' | 'missing' | 'auth' — the simulated state of the user's CLI */
+  let cli = opt.claude === 'missing' || opt.claude === 'auth' ? opt.claude : 'ok';
+  let retriesLeft = Math.max(0, Number(opt.claudeRetries) || 0);
+  /** @type {{ kind: string, detail: string }|null} */
+  let problem = null;
+  /** @param {{ kind: string, detail: string }|null} p */
+  const setProblem = (p) => {
+    if (JSON.stringify(p) === JSON.stringify(problem)) return;
+    problem = p ? { ...p } : null;
+    emit({ type: 'problem', problem: problem ? { ...problem } : null });
+  };
   const startTimer = setTimeout(() => {
+    if (cli === 'missing') {
+      setProblem({ kind: 'cli-missing', detail: MOCK_NOT_FOUND });
+      setStatus('error', MOCK_NOT_FOUND);
+      return;
+    }
     ready = true;
     emit({ type: 'status', status: 'starting', detail: statusDetail });
     newSession();
@@ -228,6 +255,19 @@ export function createMockBridge(options = {}) {
       emit({ type: 'message_end', turnId: turn.turnId });
     };
 
+    if (cli === 'auth') {
+      // like ClaudeSession with a logged-out CLI: the synthetic reply, the problem, a failed turn
+      await sleep(Math.min(60, opt.firstTokenMs));
+      emit({ type: 'text_delta', turnId: turn.turnId, text: MOCK_NOT_LOGGED_IN });
+      emit({ type: 'message_end', turnId: turn.turnId });
+      setProblem({ kind: 'auth', detail: MOCK_NOT_LOGGED_IN });
+      emit({ type: 'turn_end', turnId: turn.turnId, result: MOCK_NOT_LOGGED_IN, isError: true, durationMs: Date.now() - t0, costUsd: 0, sessionId });
+      active = null;
+      turn.resolveEnded();
+      pump();
+      return;
+    }
+    if (problem && problem.kind === 'auth') setProblem(null);
     const script = pickScript(q.text);
     let isError = false;
     await sleep(opt.firstTokenMs * 0.5);
@@ -281,6 +321,10 @@ export function createMockBridge(options = {}) {
       const clean = text.replace(/\r\n?/g, '\n');
       if (!clean.trim()) throw new Error('Message is empty');
       if (clean.length > 100000) throw new Error('Message is too long (max 100000 characters)');
+      if (cli === 'missing') {
+        setStatus('error', MOCK_NOT_FOUND);
+        throw new Error(MOCK_NOT_FOUND);
+      }
       const turnId = `turn-${++turnCounter}-${Date.now().toString(36)}`;
       queue.push({ turnId, text: clean });
       // like the real session: the turn may start (turn_start) before send() resolves
@@ -329,6 +373,24 @@ export function createMockBridge(options = {}) {
       newSession();
       setStatus('ready');
     },
+    /** Setup card "Retry": the mock "finds" a working CLI (after claudeRetries failures). */
+    async retry() {
+      calls.push(['claude.retry']);
+      if (retriesLeft > 0) {
+        retriesLeft--;
+        await new Promise((r) => setTimeout(r, 30));
+        if (cli === 'missing') throw new Error(MOCK_NOT_FOUND);
+        return;
+      }
+      cli = 'ok';
+      setProblem(null);
+      setStatus('restarting', 'Checking the Claude CLI again…');
+      await new Promise((r) => setTimeout(r, Math.min(150, opt.startupMs)));
+      if (!sessionId) newSession();
+      ready = true;
+      setStatus('ready');
+      pump();
+    },
     /** @param {string} requestId @param {{ behavior: string, message?: string, updatedInput?: object }} decision */
     async respondPermission(requestId, decision) {
       if (typeof requestId !== 'string' || !requestId) throw new TypeError('requestId must be a string');
@@ -346,8 +408,9 @@ export function createMockBridge(options = {}) {
         model: 'claude-mock',
         busy: !!active,
         queue: queue.length,
-        cliPath: '(mock)',
-        cliVersion: 'mock',
+        cliPath: cli === 'missing' ? undefined : '(mock)',
+        cliVersion: cli === 'missing' ? undefined : 'mock',
+        problem: problem ? { ...problem } : undefined,
         mode: settings.claude.mode,
         activeTurnId: active ? active.turnId : undefined,
         queuedTurnIds: queue.map((q) => q.turnId),
@@ -362,15 +425,21 @@ export function createMockBridge(options = {}) {
 
   // ---------------------------------------------------------------- voice
   const voiceFetch = opt.voice === 'fake' ? createFakeVoiceFetch({ token: 'mock-token' }) : null;
+  /** @type {Record<string, any>|null} the last voice.setup() answer (VoiceInfo.setup) */
+  let voiceSetup = null;
   const voiceInfo = () => {
-    if (!settings.voice.enabled) return { status: 'disabled', detail: 'Local voice is turned off in Settings; using the browser voice.' };
+    const info = baseVoiceInfo();
+    return voiceSetup ? { ...info, setup: { ...voiceSetup } } : info;
+  };
+  const baseVoiceInfo = () => {
+    if (!settings.voice.enabled) return { status: 'disabled', detail: 'Local voice is turned off in Settings; using the system voice.' };
     if (opt.voice === 'fake') {
       return { status: 'ready', url: 'http://127.0.0.1:59999', token: 'mock-token', detail: 'Fake voice server (mock bridge)', health: clone(FAKE_HEALTH) };
     }
     if (typeof opt.voice === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/?$/.test(opt.voice)) {
       return { status: 'ready', url: opt.voice.replace(/\/$/, ''), token: opt.voiceToken || '', detail: 'External voice server (mock bridge)' };
     }
-    return { status: 'disabled', detail: 'The local voice server is not available in the browser preview.' };
+    return { status: 'disabled', installed: false, detail: 'The local voice server is not available in the browser preview.' };
   };
   let lastVoice = JSON.stringify(voiceInfo());
   const voiceChanged = () => {
@@ -387,6 +456,21 @@ export function createMockBridge(options = {}) {
     async restart() {
       deliver('voice', { status: 'starting', detail: 'Restarting the voice server…' });
       setTimeout(() => deliver('voice', voiceInfo()), 300);
+    },
+    /** "Set up local voice…": a browser cannot open a terminal, so (like main without one) answer with the command. @param {{ cpu?: boolean }} [o] */
+    async setup(o = {}) {
+      calls.push(['voice.setup', o]);
+      const win = opt.platform === 'win32';
+      const cmd = win ? 'powershell -ExecutionPolicy Bypass -File scripts\\setup-voice.ps1' : 'bash scripts/setup-voice.sh';
+      voiceSetup = {
+        state: 'manual',
+        mode: 'manual',
+        cpu: !!o.cpu,
+        command: o.cpu ? `${cmd} ${win ? '-Cpu' : '--cpu'}` : cmd,
+        detail: 'The browser preview cannot open a terminal. Run this command in one, then choose Restart voice.',
+      };
+      queueMicrotask(() => deliver('voice', voiceInfo()));
+      return { ...voiceSetup };
     },
     onStatus: (cb) => subscribe('voice', cb),
   };

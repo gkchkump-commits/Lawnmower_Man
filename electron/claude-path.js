@@ -32,6 +32,7 @@ import { buildSpawnSpec, cleanChildEnv, getEnv } from './spawn-util.js';
  * @property {'settings'|'path'|'known'|'npm'|null} source
  * @property {string} [version]
  * @property {string} [error]     set when not found
+ * @property {boolean} [notFound]  no CLI executable was found at all
  * @property {string} [warning]   e.g. configured override missing, version probe failed
  * @property {string[]} tried     candidates checked, in order (diagnostics)
  */
@@ -139,6 +140,7 @@ export function knownLocations({ env, platform, homedir, fs }) {
     add(appData, 'npm', 'claude.cmd'); // npm global (default prefix)
     add(userProfile, '.claude', 'local', 'claude.exe');
     add(userProfile, '.claude', 'local', 'claude.cmd');
+    add(localAppData, 'Microsoft', 'WinGet', 'Links', 'claude.exe'); // winget install Anthropic.ClaudeCode
     add(localAppData, 'Volta', 'bin', 'claude.exe');
     add(localAppData, 'pnpm', 'claude.cmd');
     add(userProfile, 'scoop', 'shims', 'claude.exe');
@@ -249,8 +251,11 @@ export async function probeVersion(cliPath, opts = {}) {
   return { error: `"${cliPath} --version" failed${r.code !== null ? ` (exit ${r.code})` : ''}${why ? `: ${why}` : ''}` };
 }
 
+/** Official install guide (verified 2026-10: native installer, WinGet, Homebrew, npm). */
+export const INSTALL_DOCS_URL = 'https://code.claude.com/docs/en/setup';
+
 export const NOT_FOUND_MESSAGE =
-  'Claude CLI not found. Install Claude Code (https://docs.claude.com/en/docs/claude-code/setup), ' +
+  `Claude CLI not found. Install Claude Code (${INSTALL_DOCS_URL}), ` +
   'sign in once by running "claude" in a terminal, or set the CLI path in Settings.';
 
 /**
@@ -324,7 +329,7 @@ export async function resolveClaudeCli(opts = {}) {
     }
   }
 
-  if (!hit) return { path: null, source: null, error: NOT_FOUND_MESSAGE, warning, tried };
+  if (!hit) return { path: null, source: null, error: NOT_FOUND_MESSAGE, notFound: true, warning, tried };
 
   /** @type {ResolveResult} */
   const result = { path: hit.path, source: hit.source, tried, warning };
@@ -334,4 +339,44 @@ export async function resolveClaudeCli(opts = {}) {
     else result.warning = [warning, v.error].filter(Boolean).join(' ');
   }
   return result;
+}
+
+/**
+ * Windows: merge the PATH that is stored in the registry (machine + user, as a new terminal
+ * would see it) into `env.PATH`, so a CLI installed after the app started (WinGet, npm, the
+ * native installer adding %USERPROFILE%\.local\bin) is found by "Retry" without restarting
+ * the app. Entries are only ever added (at the end), never removed or reordered, and only
+ * absolute paths are accepted. Read through PowerShell so non-ASCII user names survive
+ * (reg.exe prints in the OEM code page). No-op on other platforms.
+ * @param {{ env?: Record<string, string|undefined>, platform?: string,
+ *   run?: (file: string, args: string[], timeoutMs: number) => Promise<{ code: number|null, stdout: string, stderr: string }> }} [o]
+ * @returns {Promise<string[]>} the entries that were added
+ */
+export async function refreshPathFromRegistry(o = {}) {
+  const platform = o.platform || process.platform;
+  const env = o.env || process.env;
+  if (platform !== 'win32') return [];
+  const systemRoot = getEnv(env, 'SystemRoot') || 'C:\\Windows';
+  const ps = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+    "[Environment]::GetEnvironmentVariable('Path', 'Machine'); [Environment]::GetEnvironmentVariable('Path', 'User')";
+  const run = o.run || ((f, a, t) => runCapture(f, a, t, { env, platform }));
+  const r = await run(ps, ['-NoProfile', '-NonInteractive', '-Command', script], 15000);
+  if (r.code !== 0) return [];
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'Path';
+  const current = String(env[pathKey] || '');
+  const have = new Set(current.split(';').map((d) => d.trim().replace(/[\\/]+$/, '').toLowerCase()).filter(Boolean));
+  const added = [];
+  for (const line of String(r.stdout || '').split(/\r?\n/)) {
+    for (const raw of line.split(';')) {
+      const dir = raw.trim().replace(/^"(.*)"$/, '$1');
+      if (!dir || !path.win32.isAbsolute(dir) || /[\0\r\n]/.test(dir)) continue;
+      const key = dir.replace(/[\\/]+$/, '').toLowerCase();
+      if (have.has(key)) continue;
+      have.add(key);
+      added.push(dir);
+    }
+  }
+  if (added.length) env[pathKey] = [current.replace(/;+$/, ''), ...added].filter(Boolean).join(';');
+  return added;
 }

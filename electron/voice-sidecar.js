@@ -44,6 +44,7 @@ export const SETUP_HINT_POSIX = 'scripts/setup-voice.sh';
 /**
  * @typedef {object} VoiceInfo
  * @property {'disabled'|'starting'|'ready'|'error'|'stopped'} status
+ * @property {boolean} [installed]  is there a voice venv (Python) to start? (unknown until checked)
  * @property {string} [url]
  * @property {string} [token]
  * @property {string} [detail]
@@ -243,9 +244,16 @@ export class VoiceSidecar extends EventEmitter {
     /** @type {NodeJS.Timeout|null} */
     this._healthTimer = null;
     this._stopped = true;
+    /** @type {boolean|undefined} */
+    this._installed = undefined;
     this._spawnKey = '';
     /** @type {Promise<void>|null} */
     this._op = null;
+  }
+
+  /** stop() was called (app quit, or a setup run that replaces the venv) and no start since. */
+  get stopped() {
+    return this._stopped;
   }
 
   /** @returns {VoiceInfo} */
@@ -342,12 +350,12 @@ export class VoiceSidecar extends EventEmitter {
     if (this._proc) return; // already running
     const s = this._safeSettings();
     this._spawnKey = this._keyFor(s);
-    const setupHint = this._platform === 'win32'
-      ? `run ${SETUP_HINT_WIN} in PowerShell`
-      : `run ${SETUP_HINT_POSIX}`;
+    const script = this._platform === 'win32' ? SETUP_HINT_WIN : SETUP_HINT_POSIX;
+    const setupHint = `choose "Set up local voice…" in the tray menu or in Settings › Voice (it runs ${script} for you)`;
 
     if (!s.enabled) {
-      this._set({ status: 'disabled', detail: 'Local voice is turned off in Settings; using the browser voice.' });
+      if (!this._command) this._installed = !!locatePython({ pythonPath: s.pythonPath, venvDirs: this._venvDirs, platform: this._platform, env: this._env }).python;
+      this._set({ status: 'disabled', detail: 'Local voice is turned off in Settings; using the system voice.' });
       return;
     }
 
@@ -358,13 +366,15 @@ export class VoiceSidecar extends EventEmitter {
     if (this._command) {
       file = this._command.file;
       args = [...(this._command.args || [])];
+      this._installed = true;
     } else {
       const loc = locatePython({ pythonPath: s.pythonPath, venvDirs: this._venvDirs, platform: this._platform, env: this._env });
+      this._installed = !!loc.python;
       if (!loc.python) {
         const custom = s.pythonPath ? ` The configured Python "${s.pythonPath}" was not found.` : '';
         this._set({
           status: 'disabled',
-          detail: `Local GPU voice is not installed.${custom} To enable it, ${setupHint} once and restart voice from the tray menu. Using the browser voice until then.`,
+          detail: `Local voice is not installed.${custom} To install it, ${setupHint}. Using the system voice until then.`,
         });
         return;
       }
@@ -601,6 +611,7 @@ export class VoiceSidecar extends EventEmitter {
   _set(info) {
     /** @type {VoiceInfo} */
     const next = { status: info.status };
+    if (typeof this._installed === 'boolean') next.installed = this._installed;
     if (info.url) next.url = info.url;
     if (info.token) next.token = info.token;
     if (info.detail) next.detail = info.detail;

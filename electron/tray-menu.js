@@ -9,6 +9,9 @@
  * @property {string} [claudeDetail]
  * @property {string} voiceStatus
  * @property {string} [voiceDetail]
+ * @property {boolean} [voiceInstalled]
+ * @property {string} [voiceSetup]       'idle'|'running'|'done'|'failed'|'manual'
+ * @property {string} [claudeProblem]    'cli-missing'|'auth'|''
  * @property {{ name: string, accelerator: string, reason: string }[]} [hotkeyConflicts]
  */
 
@@ -22,6 +25,7 @@
  * @property {(preset: 'small'|'medium'|'large') => void} setSizePreset
  * @property {() => void} newConversation
  * @property {() => void} restartVoice
+ * @property {() => void} [setupVoice]
  * @property {() => void} openSettingsFile
  * @property {() => void} openWorkdir
  * @property {() => void} openLogs
@@ -39,7 +43,14 @@ const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
  * @param {TrayState} st
  */
 export function trayTooltip(st) {
-  return `Lawnmower Man — Claude: ${st.claudeStatus || 'unknown'} · Voice: ${st.voiceStatus || 'unknown'}`;
+  return `Lawnmower Man — Claude: ${claudeLabel(st)} · Voice: ${st.voiceStatus || 'unknown'}`;
+}
+
+/** @param {TrayState} st */
+function claudeLabel(st) {
+  if (st.claudeProblem === 'cli-missing') return 'not installed';
+  if (st.claudeProblem === 'auth') return 'not signed in';
+  return st.claudeStatus || 'unknown';
 }
 
 /**
@@ -52,7 +63,7 @@ export function buildTrayTemplate(st, a) {
   const items = [
     { label: st.visible ? 'Hide avatar' : 'Show avatar', click: () => a.toggleVisible() },
     { type: 'separator' },
-    { label: `Claude: ${cap(st.claudeStatus || 'unknown')}`, enabled: false, toolTip: st.claudeDetail || undefined },
+    { label: `Claude: ${cap(claudeLabel(st))}`, enabled: false, toolTip: st.claudeDetail || undefined },
     { label: `Voice: ${cap(st.voiceStatus || 'unknown')}`, enabled: false, toolTip: st.voiceDetail || undefined },
   ];
   for (const c of st.hotkeyConflicts || []) {
@@ -85,6 +96,9 @@ export function buildTrayTemplate(st, a) {
     { label: 'Click-through background', type: 'checkbox', checked: !!s.window.clickThrough, click: (/** @type {any} */ item) => a.setClickThrough(!!item?.checked) },
     { type: 'separator' },
     { label: 'Restart voice', click: () => a.restartVoice() },
+    st.voiceSetup === 'running'
+      ? { label: 'Local voice setup is running…', enabled: false }
+      : { label: st.voiceInstalled ? 'Set up local voice again…' : 'Set up local voice…', click: () => a.setupVoice?.() },
     { label: 'Open settings file', click: () => a.openSettingsFile() },
     { label: 'Open working folder', click: () => a.openWorkdir() },
     { label: 'Open logs folder', click: () => a.openLogs() },

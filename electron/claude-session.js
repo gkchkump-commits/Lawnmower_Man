@@ -46,6 +46,30 @@ export const ASSISTANT_ALLOWED_TOOLS = 'WebSearch';
 /** Longest single user turn we accept (characters). */
 export const MAX_TURN_CHARS = 100_000;
 
+/**
+ * How the Claude CLI words a missing or expired login (code.claude.com/docs/en/errors, checked
+ * 2026-10): "Not logged in · Please run /login", "Invalid API key · Please run /login",
+ * "OAuth token revoked/has expired", "Login expired", "API Error: 401 Invalid authentication
+ * credentials", "This organization has been disabled" (a stale ANTHROPIC_API_KEY), …
+ * Only error results, CLI error messages and stderr are matched, never normal replies.
+ */
+const AUTH_ERROR_RE = /not logged in|please run \/login|login expired|authentication required|sign in again|invalid api key|oauth (?:token|session)[^.\n]{0,40}(?:expired|revoked|refreshed)|oauth error|failed to authenticate|invalid authentication credentials|authentication_(?:error|failed)|api error: 401|organization has been disabled|access has not been granted/i;
+
+/**
+ * Classify CLI error text: 'auth' when it says the user must (re-)login, otherwise null.
+ * @param {unknown} text
+ * @returns {'auth'|null}
+ */
+export function classifyClaudeError(text) {
+  return typeof text === 'string' && AUTH_ERROR_RE.test(text) ? 'auth' : null;
+}
+
+/** First meaningful line of an error text, shortened (for the setup card). @param {string} text */
+function firstLine(text) {
+  const line = String(text || '').split(/\r?\n/).map((l) => l.trim()).find((l) => l && !l.startsWith('[ede_diagnostic]')) || '';
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+}
+
 const SAFE_MODEL = /^[A-Za-z0-9._:@/[\]-]{1,100}$/;
 const SAFE_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -166,6 +190,11 @@ function isPlainObject(v) {
 const finiteOrUndef = (n) => (typeof n === 'number' && Number.isFinite(n) ? n : undefined);
 
 /**
+ * Something the user has to fix outside the app before Claude can answer (shown as a setup card).
+ * @typedef {{ kind: 'cli-missing'|'auth', detail: string }} ClaudeProblem
+ */
+
+/**
  * @typedef {object} ClaudeSessionOptions
  * @property {() => ClaudeSettings} getSettings  returns the current settings.claude
  * @property {string} personaDir                 where persona files are written (userData/persona)
@@ -261,6 +290,8 @@ export class ClaudeSession extends EventEmitter {
     this._turnCounter = 0;
     this._controlCounter = 0;
     this._lastStderr = new TextRingBuffer(8 * 1024);
+    /** @type {ClaudeProblem|null} */
+    this._problem = null;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -288,7 +319,7 @@ export class ClaudeSession extends EventEmitter {
     // Fail fast (and visibly) when there is no CLI at all, instead of queueing forever.
     if (!this._procInfo && !this._starting) {
       await this._resolveCli(this._safeSettings()).catch((err) => {
-        this._setStatus('error', err.message);
+        this._cliUnavailable(err);
         throw err;
       });
     }
@@ -360,6 +391,34 @@ export class ClaudeSession extends EventEmitter {
   }
 
   /**
+   * "Retry" on the setup card: forget the detected CLI (so it is searched for again: it may
+   * have just been installed), clear the setup problem and the crash counter, and start the
+   * CLI again. A process that is already running is replaced (resuming the same conversation)
+   * so a login the user just completed is picked up; a turn that is still running is left
+   * alone. Never installs anything. Rejects when there is still no CLI.
+   * @returns {Promise<void>}
+   */
+  async retry() {
+    this._stopped = false;
+    this._cli = null;
+    this._failures = 0;
+    this._setProblem(null);
+    if (this._restartTimer) {
+      clearTimeout(this._restartTimer);
+      this._restartTimer = null;
+    }
+    if (this._starting) await this._starting.catch(() => {});
+    if (this._active) return; // never kill a reply mid-way; the next turn shows any problem again
+    const info = this._procInfo;
+    if (info) {
+      this._detach(info);
+      this._setStatus('restarting', 'Checking the Claude CLI again…');
+      await this._killInfo(info, { graceful: true });
+    }
+    await this._ensureRunning();
+  }
+
+  /**
    * Answer a permission_request.
    * @param {string} requestId
    * @param {{ behavior: 'allow'|'deny', message?: string, updatedInput?: Record<string, any> }} decision
@@ -410,7 +469,7 @@ export class ClaudeSession extends EventEmitter {
 
   /**
    * @returns {{ status: string, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string, detail?: string, mode: string,
-   *   activeTurnId?: string, queuedTurnIds: string[],
+   *   problem?: ClaudeProblem, activeTurnId?: string, queuedTurnIds: string[],
    *   pendingPermissions: Array<{ requestId: string, turnId: string|null, toolName: string, input: Record<string, any>, description?: string }> }}
    * `activeTurnId`, `queuedTurnIds` and `pendingPermissions` let a reloaded renderer pick up
    * where the previous one left off (events are not replayed).
@@ -433,6 +492,7 @@ export class ClaudeSession extends EventEmitter {
       cliPath: this._cli?.path,
       cliVersion: this._cli?.version,
       detail: this._statusDetail || undefined,
+      problem: this._problem ? { ...this._problem } : undefined,
       mode: this._safeSettings().mode,
       activeTurnId: this._active ? this._active.turnId : undefined,
       queuedTurnIds: this._queue.map((q) => q.turnId),
@@ -533,10 +593,21 @@ export class ClaudeSession extends EventEmitter {
     }
     const r = await this._resolver({ override: s.cliPath, env: this._env, platform: this._platform, homedir: this._homedir });
     if (r.warning) this._log('warn', `[claude] ${r.warning}`);
-    if (!r.path) throw new Error(r.error || 'Claude CLI not found');
+    if (!r.path) {
+      const err = /** @type {Error & { notFound?: boolean }} */ (new Error(r.error || 'Claude CLI not found'));
+      err.notFound = true;
+      throw err;
+    }
     this._cli = { key, path: r.path, version: r.version, source: r.source || undefined };
     this._log('info', `[claude] using ${r.path}${r.version ? ` (${r.version})` : ''} [${r.source}]`);
+    if (this._problem?.kind === 'cli-missing') this._setProblem(null);
     return this._cli;
+  }
+
+  /** The CLI could not be resolved: status 'error' (+ the setup card when it is missing). @param {Error & { notFound?: boolean }} err */
+  _cliUnavailable(err) {
+    if (err.notFound) this._setProblem({ kind: 'cli-missing', detail: err.message });
+    this._setStatus('error', err.message);
   }
 
   async _spawn() {
@@ -545,7 +616,7 @@ export class ClaudeSession extends EventEmitter {
     try {
       cli = await this._resolveCli(s);
     } catch (err) {
-      this._setStatus('error', /** @type {Error} */ (err).message);
+      this._cliUnavailable(/** @type {Error} */ (err));
       this._failQueued(/** @type {Error} */ (err).message);
       throw err;
     }
@@ -645,7 +716,10 @@ export class ClaudeSession extends EventEmitter {
       info.lastErrorText = err.message;
       this._log('error', `[claude] process error: ${err.message}`);
       const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-      if (code === 'ENOENT' || code === 'EACCES') this._cli = null; // re-detect on the next attempt
+      if (code === 'ENOENT' || code === 'EACCES') {
+        this._cli = null; // re-detect on the next attempt
+        if (code === 'ENOENT') this._setProblem({ kind: 'cli-missing', detail: `The Claude CLI at ${cli.path} could not be started (${err.message}).` });
+      }
       if (child.pid === undefined) this._onExit(info, null, null);
     });
     child.once('close', (code, signal) => this._onExit(info, code, signal));
@@ -777,6 +851,7 @@ export class ClaudeSession extends EventEmitter {
     const tail = info.stderr.tail(8);
     const desc = `Claude CLI exited unexpectedly (${how})`;
     const detail = [desc, tail || info.lastErrorText].filter(Boolean).join(': ');
+    this._noteErrorText(`${tail}\n${info.lastErrorText}`);
     if (this._active) {
       this._emit({ type: 'error', message: detail, turnId: this._active.turnId });
       this._endTurn({ result: '', isError: true });
@@ -1016,6 +1091,11 @@ export class ClaudeSession extends EventEmitter {
     const m = msg.message || {};
     const blocks = Array.isArray(m.content) ? m.content : [];
     const id = typeof m.id === 'string' ? m.id : '';
+    // The CLI reports a missing login as a synthetic assistant message with an error field.
+    if (typeof msg.error === 'string' && /auth|login|credential/i.test(msg.error)) {
+      const said = blocks.map((b) => (b && b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join(' ');
+      this._setProblem({ kind: 'auth', detail: firstLine(said) || msg.error });
+    }
     // Text normally arrives as stream deltas; only messages that were never streamed (e.g.
     // synthetic API-error messages, or a CLI without partial messages) are forwarded here.
     const streamed = id !== '' && t.streamedIds.has(id);
@@ -1066,11 +1146,15 @@ export class ClaudeSession extends EventEmitter {
     if (!this._active) {
       // e.g. the startup error result of a failed --resume.
       if (errors.length) info.lastErrorText = errors.join('\n');
+      this._noteErrorText(errors.join('\n'));
       return;
     }
     const isError = msg.is_error === true || (typeof msg.subtype === 'string' && msg.subtype !== 'success');
     let result = typeof msg.result === 'string' ? msg.result : '';
     if (!result && isError && errors.length) result = errors.join('\n');
+    // Before turn_end, so the renderer shows the login card instead of a generic error.
+    if (isError && !this._active.interrupted) this._noteErrorText(`${result}\n${errors.join('\n')}`);
+    else if (!isError && this._problem?.kind === 'auth') this._setProblem(null); // logged in after all
     this._failures = 0;
     this._endTurn({ result, isError, durationMs: finiteOrUndef(msg.duration_ms), costUsd: finiteOrUndef(msg.total_cost_usd) });
   }
@@ -1141,6 +1225,26 @@ export class ClaudeSession extends EventEmitter {
     } catch (err) {
       this._log('error', `[claude] onSessionId failed: ${/** @type {Error} */ (err).message}`);
     }
+  }
+
+  /**
+   * CLI error output (an error result, stderr of a failed start, …): show the login card when it
+   * says the user is not (or no longer) logged in. @param {string} text
+   */
+  _noteErrorText(text) {
+    if (classifyClaudeError(text) !== 'auth') return;
+    const line = String(text).split(/\r?\n/).find((l) => classifyClaudeError(l)) || text;
+    this._setProblem({ kind: 'auth', detail: firstLine(line) });
+  }
+
+  /** @param {ClaudeProblem|null} problem */
+  _setProblem(problem) {
+    const prev = this._problem;
+    if (!problem && !prev) return;
+    if (problem && prev && problem.kind === prev.kind && problem.detail === prev.detail) return;
+    this._problem = problem ? { kind: problem.kind, detail: String(problem.detail || '') } : null;
+    if (problem) this._log('warn', `[claude] setup problem: ${problem.kind}: ${problem.detail}`);
+    this._emit({ type: 'problem', problem: this._problem ? { ...this._problem } : null });
   }
 
   /** @param {'starting'|'ready'|'busy'|'restarting'|'exited'|'error'} status @param {string} [detail] */

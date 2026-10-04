@@ -21,6 +21,41 @@ missing, the voice degrades in steps:
 
 ## 1. Quick start
 
+### From the app (installed or portable build, and `npm start`)
+
+Choose **Set up local voice…** in the tray menu, in the settings drawer's Voice section, or in the
+hint under the voice status. `electron/voice-setup.js` then:
+
+1. stops the voice server if one is running (it keeps files of the venv open);
+2. opens a **visible PowerShell window** running the bundled `resources\scripts\setup-voice.ps1`
+   (installed app) or `scripts\setup-voice.ps1` (repository) with `-ExecutionPolicy Bypass`. A
+   windowless Windows PowerShell starts it with `Start-Process`, so it gets its own console with
+   working input. All paths travel in environment variables, never on a command line or through
+   `cmd.exe`, so user names with spaces, `&`, `%`, `'` or non-ASCII letters are fine. Both command
+   lines are fixed, readable one-liners (no `-EncodedCommand`, no `-WindowStyle Hidden`). If the
+   script cannot even start (a parse error, an execution policy set by Group Policy), the window
+   shows the error, waits for Enter and reports it to the app instead of closing at once;
+3. passes `-Cpu` when Chromium sees no NVIDIA GPU (`app.getGPUInfo`); when it cannot tell, the
+   script asks (`nvidia-smi` missing → *"Install the CPU version instead? [Y/n]"*);
+4. watches the JSON file the script writes when it ends (`-StatusFile`, in the app's settings
+   folder). As soon as it reports success, the app turns local voice on and starts the new server
+   — no restart, no *Restart voice* needed. A window closed early, or a failure, is reported in the
+   drawer and as a toast, and the previous voice (if any) is started again.
+
+If **Python 3.12 is missing**, the script offers to install it for the current user with winget
+(`winget install -e --id Python.Python.3.12 --scope user`, Y/n), then re-reads PATH and continues.
+Without winget it prints the python.org link and stops cleanly. The window waits for Enter at the
+end (`-PauseAtEnd`) so the output can be read.
+
+**Linux:** the first terminal emulator found (gnome-terminal, konsole, xfce4-terminal, mate-terminal,
+kitty, alacritty, wezterm, foot, xterm) runs `bash setup-voice.sh --pause-at-end --status-file …`;
+without one (or without a display) the app shows the command with a Copy button. The browser
+preview always shows the command.
+
+The app never runs anything elevated, and it only runs the bundled script.
+
+### By hand
+
 **Windows 11** (PowerShell, from the repository folder, or from the installed app's `resources` folder):
 
 ```powershell
@@ -36,9 +71,10 @@ scripts/setup-voice.sh          # GPU
 scripts/setup-voice.sh --cpu    # CPU only
 ```
 
-After that, start the app. The tray menu's "Restart voice" picks up a fresh install. **Quit the
-app before re-running the script** (tray > Quit): the running voice server locks files in the venv,
-and the script refuses to touch a venv that is in use rather than leaving it half-deleted.
+After that, start the app. The tray menu's "Restart voice" picks up a fresh install. **When you run
+the script by hand, quit the app first** (tray > Quit): the running voice server locks files in the
+venv, and the script refuses to touch a venv that is in use rather than leaving it half-deleted.
+(*Set up local voice…* stops the server for you.)
 
 **Installed app.** When the script runs from an installed app's `resources` folder (it finds
 `resources\app.asar`), nothing goes into the install folder — the installer replaces it on every
@@ -50,13 +86,19 @@ update, and Program Files is not writable. Instead (the app looks in the same pl
 | models | `%LOCALAPPDATA%\LawnmowerMan\voice\models` | `…/lawnmower-man/voice/models` |
 | package copy used by pip | `…\voice\src` | `…/voice/src` |
 
-The portable Windows build unpacks to a temporary folder on every start, so it has no setup
-script of its own to run; it uses the local voice only if it was set up through the installer
-build (both look in `%LOCALAPPDATA%\LawnmowerMan\voice`). Otherwise it uses the browser voice.
+The portable Windows build unpacks to a temporary folder on every start, but it bundles the same
+script, and *Set up local voice…* works there too: the script sees `resources\app.asar` and installs
+into `%LOCALAPPDATA%\LawnmowerMan\voice`, where the installed and the portable build both look.
+Until local voice is set up, replies use a system (Windows) voice; *Settings › Voice* lists the
+installed system voices (`voice.systemVoice`; *Automatic* picks the most natural English one).
 
 The setup script does the following:
 
-1. Finds Python 3.12 (`py -3.12`, `python3.12`, then `python`/`python3`; 3.11 is accepted).
+1. Finds Python 3.12 (`py -3.12`, `python3.12`, then `python`/`python3`, then the per-user install
+   folders `%LOCALAPPDATA%\Programs\Python\Python312` (winget / python.org "just me") and
+   `%LOCALAPPDATA%\Python\pythoncore-3.12-64` (Python install manager), which also covers a PATH
+   that is stale right after winget installed Python; 3.11 is accepted). On Windows it offers to
+   install 3.12 with winget when none is found.
 2. Creates `voice/.venv` (or the per-user venv above), and records the models folder in it
    (`lawnmower-models-dir.txt`) when it is not the default, so the app's server finds the models.
 3. Installs the GPU wheels described in section 3.
@@ -79,6 +121,10 @@ admin rights and no CUDA Toolkit, only the NVIDIA driver.
 | `-Python PATH` / `--python PATH` | Use this interpreter |
 | `-Recreate` / `--recreate` | Rebuild `voice/.venv` |
 | `-SkipSmoke` / `--skip-smoke` | Skip the final smoke test |
+| `-PauseAtEnd` / `--pause-at-end` | Wait for Enter before the window closes (the app passes it) |
+| `-StatusFile FILE` / `--status-file FILE` | Write the result as JSON (`{ok, error, voiceHome, venv, python, cpu, packaged, check}`); the app watches it |
+| `-CheckOnly` / `--check-only` | Only report where the voice would go and which Python would be used; changes nothing |
+| `-Yes` | Answer yes to questions (install Python 3.12 with winget) |
 
 **Download sizes.** The GPU wheels are about 1.8 GB:
 
@@ -339,7 +385,7 @@ Start with `voice\.venv\Scripts\python -m lawnmower_voice.doctor --smoke --human
 | User name with non-ASCII letters (`C:\Users\José`), or a very long venv path | espeak-ng opens its data folder with ANSI file APIs on Windows (and has a fixed path buffer), and exits the process when it cannot. The server hands it the 8.3 short path, or makes a one-time copy in `%PROGRAMDATA%\LawnmowerMan\espeak-ng-data` (Linux: `~/.cache/lawnmower-man`). `doctor` warns when this applies. |
 | `OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized` | CTranslate2 and torch (`-TorchTts`, or pulled in by `-Misaki`) each ship Intel OpenMP. The app and the server set `KMP_DUPLICATE_LIB_OK=TRUE` on Windows; set it yourself when you run the server by hand. |
 | `doctor` warns that `nvidia-cudnn-cu12` and `nvidia-cudnn-cu13` are both installed | They overwrite each other's files in `nvidia/cudnn` (typically after a cu12/cu128 torch build on Linux). Re-run the setup script with `--recreate`. |
-| `Python 3.12 was not found` | Run `winget install -e --id Python.Python.3.12`, or use python.org (tick *Add to PATH*). The Store alias does not count. Then re-run. |
+| `Python 3.12 was not found` | Answer **Y** when the setup offers winget, or run `winget install -e --id Python.Python.3.12 --scope user`, or use python.org (tick *Add to PATH*). The Store alias does not count. Then run *Set up local voice…* again. |
 | `running scripts is disabled on this system` | Use `powershell -ExecutionPolicy Bypass -File scripts\setup-voice.ps1`, or `setup-voice.cmd`. Run it in a normal PowerShell window, not the ISE. |
 | Model download fails (proxy or offline) | Re-run the setup script later. The server reports `Whisper model '…' is not downloaded` with a 503 until then; Kokoro has the same behaviour. Copy model folders from another machine into `voice/models/whisper` (Hugging Face cache layout) and `voice/models/kokoro/`. `--no-download` forbids network access at runtime. |
 | Everything works but runs on the CPU | Read `stt.note` and `tts.note` in `/health`; they quote the GPU error. The CPU fallback is deliberate, so the avatar keeps talking. |
@@ -375,6 +421,9 @@ The tests never download models and need no GPU. They cover:
 |---|---|
 | **Verified here** (Linux, no GPU) | The full test suite in a bare Python 3.11 (engines absent) and in a 3.12 venv with the real faster-whisper 1.2.1, CTranslate2 4.8.2, onnxruntime 1.30.0 and kokoro-onnx 0.6.1. |
 | **Verified here** | `scripts/setup-voice.sh --cpu --no-models` end to end, and its re-run. `scripts/setup-voice.ps1 -Cpu -NoModels` under PowerShell 7.6 on Linux. |
+| **Verified here** (2026-10) | *Set up local voice…* in the packaged Linux build (electron-builder `linux dir`, under xvfb, a stand-in terminal): the bundled `setup-voice.sh --cpu` installed into a per-user folder whose path contains a space and `ñ`, Kokoro downloaded, and the app started the new voice server by itself (CPU mode) three seconds after the script finished. `-CheckOnly` of both scripts in a packaged layout under `…/Lawnmower Man ñ & Co (x)/resources` reports the folder the sidecar looks in (unit tests); the winget offer (with a fake winget) under PowerShell 7 on Linux. |
+| **Verified here** (PowerShell 7 standing in for `powershell.exe`) | The whole Windows launcher chain except the new window: the launcher one-liner → `Start-Process` → the console bootstrap → `setup-voice.ps1 -CheckOnly` in a packaged layout under a path with spaces, `&`, `ñ` and `'`; a script with a parse error or an unknown switch is reported in the window and in the status file; the winget offer with a fake winget that installs Python only into `%LOCALAPPDATA%\Programs\Python\Python312` (stale PATH). `ci.yml`'s Windows job runs the bootstrap and `-CheckOnly` tests with the real Windows PowerShell 5.1. |
+| **Not verifiable here** | The new console window itself (`Start-Process` from the windowless launcher), `Read-Host` answers in that window, the real winget install, a full install under Windows PowerShell 5.1. The release workflow runs the launcher in `-CheckOnly` mode against the installed app on `windows-latest`. |
 | **Verified here** | `pip --dry-run` resolution of the `[gpu]` extra for Linux and Windows (cp312). |
 | **Verified here** | Kokoro v1.0 TTS with the **real model on the CPU**: 54 voices, `duration` output present, visemes aligned with the audio, RTF 0.26. |
 | **Verified here, by binary inspection** | sm_120 kernels in onnxruntime-gpu 1.30.0; PTX-only Blackwell support in CTranslate2 4.8.2; the DLL names and wheel layouts above. |

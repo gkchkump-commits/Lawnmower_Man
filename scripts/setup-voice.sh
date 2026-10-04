@@ -28,12 +28,15 @@ Usage: scripts/setup-voice.sh [options]
   --models-dir DIR   model cache (default: voice/models, or $LAWNMOWER_VOICE_MODELS); recorded in
                      the venv so the app and later runs use it too
   --skip-smoke       skip the final load-and-run smoke test
+  --pause-at-end     wait for Enter before exiting (the app opens this script in a terminal)
+  --status-file FILE write the result as JSON to FILE when done (the app watches it)
+  --check-only       only report where the voice would be installed, then exit (changes nothing)
   -h, --help         show this help
 EOF
 }
 
-CPU=0; NO_MODELS=0; TORCH_TTS=0; MISAKI=0; RECREATE=0; SKIP_SMOKE=0
-PYTHON_ARG=""; STT_MODEL="large-v3-turbo"; MODELS_DIR="${LAWNMOWER_VOICE_MODELS:-}"
+CPU=0; NO_MODELS=0; TORCH_TTS=0; MISAKI=0; RECREATE=0; SKIP_SMOKE=0; PAUSE=0; CHECK_ONLY=0
+PYTHON_ARG=""; STT_MODEL="large-v3-turbo"; MODELS_DIR="${LAWNMOWER_VOICE_MODELS:-}"; STATUS_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cpu) CPU=1 ;;
@@ -42,6 +45,9 @@ while [ $# -gt 0 ]; do
     --misaki) MISAKI=1 ;;
     --recreate) RECREATE=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
+    --pause-at-end) PAUSE=1 ;;
+    --check-only) CHECK_ONLY=1 ;;
+    --status-file) STATUS_FILE="${2:?--status-file needs a path}"; shift ;;
     --python) PYTHON_ARG="${2:?--python needs a path}"; shift ;;
     --stt-model) STT_MODEL="${2:?--stt-model needs a name}"; shift ;;
     --models-dir) MODELS_DIR="${2:?--models-dir needs a directory}"; shift ;;
@@ -73,9 +79,42 @@ ORT_GPU_SPEC='onnxruntime-gpu[cuda,cudnn]>=1.27,<2'
 # cu128 index would pull nvidia-cudnn-cu12, which overwrites the same nvidia/cudnn files.
 TORCH_INDEX_CPU="https://download.pytorch.org/whl/cpu"
 
+# Result for the app (--status-file): written once, when the script ends (success or not).
+RESULT_OK=false; RESULT_ERROR=""; RESULT_PYTHON=""
+json_str() { # JSON string literal of $1 (paths may contain spaces, quotes, non-ASCII)
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/}
+  printf '"%s"' "$s"
+}
+write_status() {
+  [ -n "$STATUS_FILE" ] || return 0
+  mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
+  local cpu=false check=false packaged=false
+  [ "$CPU" = 1 ] && cpu=true
+  [ "$CHECK_ONLY" = 1 ] && check=true
+  [ "${PACKAGED:-0}" = 1 ] && packaged=true
+  printf '{"ok":%s,"check":%s,"cpu":%s,"packaged":%s,"voiceHome":%s,"venv":%s,"python":%s,"error":%s,"finishedAt":%s}\n' \
+    "$RESULT_OK" "$check" "$cpu" "$packaged" "$(json_str "${VOICE_HOME:-}")" "$(json_str "${VENV:-}")" \
+    "$(json_str "$RESULT_PYTHON")" "$(json_str "$RESULT_ERROR")" "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" \
+    > "$STATUS_FILE" 2>/dev/null || printf 'WARNING: could not write %s\n' "$STATUS_FILE" >&2
+}
+finish() {
+  local code=$?
+  trap - EXIT
+  if [ "$code" = 0 ]; then RESULT_OK=true; elif [ -z "$RESULT_ERROR" ]; then RESULT_ERROR="setup failed (exit $code)"; fi
+  write_status
+  if [ "$PAUSE" = 1 ] && [ -t 0 ]; then
+    echo
+    if [ "$code" = 0 ]; then echo "Lawnmower Man starts the local voice by itself now."; fi
+    read -r -p "Press Enter to close this window " _ || true
+  fi
+  exit "$code"
+}
+trap finish EXIT
+
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARNING:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; [ -n "$RESULT_ERROR" ] || RESULT_ERROR="$*"; exit 1; }
 
 [ -f "$VOICE_DIR/pyproject.toml" ] || die "voice/pyproject.toml not found next to this script ($VOICE_DIR)."
 [ "$(uname -s)" = "Linux" ] || warn "This script targets Linux; on Windows use scripts\\setup-voice.ps1."
@@ -114,7 +153,15 @@ else
   if [ -z "$PY" ] && [ -n "$PY311" ]; then PY="$PY311"; PYV="3.11"; fi
   if [ -z "$PY" ] && [ -n "$PY310" ]; then PY="$PY310"; PYV="3.10"; fi
 fi
+if [ "$CHECK_ONLY" = 1 ]; then
+  RESULT_PYTHON="$PY"
+  echo "Voice folder: $VOICE_HOME"
+  echo "Venv:         $VENV"
+  echo "Python:       ${PY:-not found}${PYV:+ (Python $PYV)}"
+  exit 0
+fi
 if [ -z "$PY" ]; then
+  RESULT_ERROR="python-missing"
   die "Python 3.12 was not found. Install it, then re-run this script:
     Ubuntu/Debian:  sudo apt install python3.12 python3.12-venv
     Fedora:         sudo dnf install python3.12
@@ -128,6 +175,7 @@ case "$PYV" in
   *) die "Python $PYV at $PY is not supported (need 3.10-3.12; 3.12 recommended)." ;;
 esac
 echo "Using $PY (Python $PYV)"
+RESULT_PYTHON="$PY"
 
 # ---------------------------------------------------------------------------------------------
 say "Preparing the virtual environment ($VENV)"
@@ -274,7 +322,7 @@ for w in s.get("warnings") or []:
 PYEOF
 cat <<EOF
 
-Done. The app starts the voice server automatically (Settings > Voice, or tray > Restart voice).
+Done. The app starts the voice server automatically (or use tray > Restart voice).
 Manual run:   $VPY -m lawnmower_voice --port 8765 --token test --preload
 Fake engines: $VPY -m lawnmower_voice --fake
 Diagnostics:  $VPY -m lawnmower_voice.doctor --smoke --human

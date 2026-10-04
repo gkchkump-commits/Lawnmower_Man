@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     sttLanguage: 'en',
     ttsVoice: 'af_heart',
     ttsSpeed: 1.0,
+    systemVoice: '',
     device: 'auto',
     handsFree: false,
     speakReplies: true,

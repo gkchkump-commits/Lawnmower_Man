@@ -28,7 +28,7 @@ describe('defaults', () => {
     expect(DEFAULT_SETTINGS.claude).toEqual({
       cliPath: '', model: '', effort: '', mode: 'chat', workdir: '', persona: '', resumeLastSession: true, lastSessionId: '',
     });
-    expect(DEFAULT_SETTINGS.voice).toMatchObject({ enabled: true, sttModel: 'large-v3-turbo', ttsVoice: 'af_heart', ttsSpeed: 1.0, device: 'auto', handsFree: false, speakReplies: true });
+    expect(DEFAULT_SETTINGS.voice).toMatchObject({ enabled: true, sttModel: 'large-v3-turbo', ttsVoice: 'af_heart', ttsSpeed: 1.0, systemVoice: '', device: 'auto', handsFree: false, speakReplies: true });
     expect(DEFAULT_SETTINGS.avatar).toEqual({ renderer: 'relief', pack: 'reference', quality: 'high', particles: 1.0, bloom: 1.0, followCursor: true });
     expect(DEFAULT_SETTINGS.window).toMatchObject({ sizePreset: 'medium', alwaysOnTop: true, clickThrough: true, position: null, showChat: true });
     expect(DEFAULT_SETTINGS.hotkeys).toEqual({
@@ -81,6 +81,18 @@ describe('applyPatch validation', () => {
     expect(settings.avatar.bloom).toBe(0);
     expect(settings.voice.ttsSpeed).toBe(0.5);
     expect(applyPatch(base, { avatar: { particles: Number.NaN } }).settings.avatar.particles).toBe(1);
+  });
+
+  it('voice.systemVoice: any one-line voice name or URI; not control characters, newlines or huge strings', () => {
+    const name = 'Microsoft Aria Online (Natural) - English (United States)';
+    expect(applyPatch(base, { voice: { systemVoice: `  ${name}  ` } }).settings.voice.systemVoice).toBe(name);
+    expect(applyPatch(base, { voice: { systemVoice: 'Google 日本語 · ja-JP' } }).settings.voice.systemVoice).toBe('Google 日本語 · ja-JP');
+    expect(applyPatch(base, { voice: { systemVoice: '' } }).settings.voice.systemVoice).toBe('');
+    for (const bad of ['a\nb', 'x\u0007', 'v'.repeat(257), 42, null]) {
+      const r = applyPatch(base, { voice: { systemVoice: bad } });
+      expect(r.settings.voice.systemVoice, JSON.stringify(bad)).toBe('');
+      expect(r.warnings.length).toBe(1);
+    }
   });
 
   it('allows position null and rejects garbage positions', () => {

@@ -16,7 +16,26 @@ A holographic desktop avatar for Claude. A glowing wireframe head floats on your
 
 ---
 
-## Requirements
+## Install (testers)
+
+For Windows 11 (10 works too). No Node, git or Python needed; no admin rights.
+
+1. **Download** `Lawnmower-Man-Setup-<version>.exe` from the [Releases page](https://github.com/gkchkump-commits/Lawnmower_Man/releases) (test builds are marked *Pre-release*; `SHA256SUMS.txt` lists the checksums). Rather not install anything? `Lawnmower-Man-<version>-portable.exe` runs as is.
+2. **SmartScreen:** the build is not code-signed, so Windows says *"Windows protected your PC"*. Click **More info → Run anyway**. (Your browser may also ask whether to keep the download.)
+3. **Install:** the installer is for your user only. Pick a folder or keep the default (`%LOCALAPPDATA%\Programs\Lawnmower Man`); it adds Desktop and Start-menu shortcuts and starts the app at the end.
+4. **Claude CLI (required).** Lawnmower Man is a face for *your own* [Claude Code](https://code.claude.com/docs/en/setup) CLI, which needs a Pro, Max, Team, Enterprise or Console account. If the CLI is missing or not signed in, the app shows a card with the steps and Copy buttons:
+   ```powershell
+   irm https://claude.ai/install.ps1 | iex     # in PowerShell: the official installer (or: winget install Anthropic.ClaudeCode)
+   claude                                      # in a NEW terminal window: sign in once, then type /exit
+   ```
+   Then press **Retry** on the card; no restart needed. The app never runs these commands for you.
+5. **Voice:** replies are spoken with a Windows voice right away (choose one under *Settings › Voice*). For voice input and the natural Kokoro voice, choose **Set up local voice…** in the tray menu (or in the settings drawer's Voice section). A PowerShell window opens and installs faster-whisper and Kokoro into `%LOCALAPPDATA%\LawnmowerMan\voice` (about 2–4 GB with models; an NVIDIA GPU is used when there is one, otherwise the smaller CPU version is installed). It needs Python 3.12 and offers to install it with `winget` if it is missing. When the window says *Done*, the app starts the local voice by itself.
+6. **Update:** run the newer `Lawnmower-Man-Setup-<version>.exe` over the installed one (it closes a running Lawnmower Man first). Your settings and the local voice are kept, so there is normally no need to set the voice up again (if the voice reports an error after an update, choose *Set up local voice again…* in the tray menu: it reuses what is already installed).
+7. **Uninstall:** Windows *Settings → Apps → Installed apps → Lawnmower Man → Uninstall*. The uninstaller asks whether to also delete your data (default: **No**): the local voice (`%LOCALAPPDATA%\LawnmowerMan\voice`, several GB) and the settings and logs (`%APPDATA%\Lawnmower Man`). A silent uninstall (`/S`) keeps both. It never touches Claude's work folder (`%USERPROFILE%\LawnmowerMan`), your Claude CLI or its login (`%USERPROFILE%\.claude`); remove the CLI separately if you want to.
+
+Reporting a problem? The tray menu's *Open logs folder* has `main.log`. On laptops with two GPUs, see the hybrid-graphics tip below.
+
+## Requirements (development)
 
 | | |
 |---|---|
@@ -26,7 +45,7 @@ A holographic desktop avatar for Claude. A glowing wireframe head floats on your
 | GPU | any WebGL2 GPU for the avatar. For local voice on the GPU: an NVIDIA driver **R570+** (R580+ for GPU text to speech) |
 | Python | 3.12 (only for local voice; 3.11 also works) |
 
-## Quick start
+## Quick start (from source)
 
 ```powershell
 git clone https://github.com/gkchkump-commits/Lawnmower_Man.git
@@ -64,7 +83,7 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
 | drag the head | move the window |
-| tray icon | show/hide, always on top, click-through, Claude mode, new conversation, restart voice, logs, quit |
+| tray icon | show/hide, always on top, click-through, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
 Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
@@ -108,8 +127,9 @@ npm test               # unit tests (vitest): Electron main logic, Claude sessio
 npm run test:e2e       # Playwright: the app in Chromium with SwiftShader WebGL and a mock bridge
 npm run test:voice     # pytest for the voice server (engines mocked)
 npm run lint
-npm run dist           # Windows installer + portable exe (electron-builder) into release/
-                       # (the portable exe has local voice only if the installer build set it up; see docs/VOICE.md)
+npm run dist:win       # Windows installer + portable exe (electron-builder, unsigned) into release/
+npm run dist:linux-dir # unpacked Linux build in release/linux-unpacked (quick packaging check)
+npm run test:packaged  # scripts/electron-e2e.mjs --packaged; set ELECTRON_PATH to the built/installed app
 ```
 
 Without Electron, open the app in a browser: `npm run build && npm run preview`, then go to `http://127.0.0.1:4173/index.html?mock=1`. The avatar harness with sliders for every rig control is at `/dev/avatar.html` (see [docs/RENDERER.md](docs/RENDERER.md)).
@@ -124,14 +144,15 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
 | `docs/ARCHITECTURE.md` | the interface contract between all of the above |
+| `.github/workflows/release.yml` | Windows installer build, install + end-to-end test of the installed app, pre-release on `v*` tags |
 
 Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawnmower Man/`). Logs are in its `logs/` folder, reachable from the tray menu's *Open logs folder*.
 
 ## Troubleshooting
 
-* **"Claude CLI not found"**: install it, make sure `claude --version` works in a new terminal, or set *Settings → Claude → CLI path*.
-* **Claude starts, then errors right away**: run `claude` once interactively to log in. The error card shows the CLI's own message.
-* **No voice input / the mic button is disabled**: local voice isn't installed or running. Run the setup script, then use *Restart voice*. The tray shows the voice status.
+* **"Install Claude Code" card**: the CLI was not found. Follow the card, make sure `claude --version` works in a *new* terminal, then press **Retry**. Installed somewhere unusual? Set *Settings → Claude → CLI path*.
+* **"Sign in to Claude Code" card**: the CLI is not logged in (or the login expired). Run `claude` once in a terminal and sign in, then press **Retry**. The card shows the CLI's own message.
+* **No voice input / the mic button is disabled**: local voice isn't installed or running. Choose *Set up local voice…* in the tray menu (or *Restart voice* if it is installed). The tray shows the voice status.
 * **Voice is slow the first time**: on RTX 50-series GPUs, the first Whisper GPU run compiles kernels once (30–90 s). After that it is fast.
 * **More voice issues** (driver, "no kernel image", cuDNN, CPU fallback): see [docs/VOICE.md § Troubleshooting](docs/VOICE.md#5-troubleshooting).
 

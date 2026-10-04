@@ -35,7 +35,9 @@ src/styles/app.css       the glass UI
   The first chunk may be cut early at a clause (~40 characters) for a fast first sound; code
   blocks and tables are never spoken ("I've put the code in the chat.").
 * Speech: the local voice server (Kokoro, with a viseme timeline) when it is running, otherwise
-  the browser's speech synthesis (best English voice), otherwise text only. Up to two sentences
+  the system's speech synthesis (Web Speech: the voice chosen in *Settings › Voice*, saved as
+  `voice.systemVoice`, or the most natural English one; the list refreshes on `voiceschanged`),
+  otherwise text only. Up to two sentences
   are synthesized ahead of the one playing.
 * Lip-sync each frame: visemes at the playback clock (with coarticulation) → `avatar.setMouth`;
   without visemes the audio spectrum drives the mouth; for browser speech, word boundaries drive
@@ -44,7 +46,10 @@ src/styles/app.css       the glass UI
   Permission requests (agent mode) show a card with Allow/Deny and a spoken prompt. Nothing is
   ever approved automatically. Cards disappear when their turn ends or the CLI restarts.
 * Voice input needs the local voice server (faster-whisper). Without it the mic button is
-  disabled and its tooltip explains how to install/enable it.
+  disabled and its tooltip explains how to install it (*Set up local voice…*).
+* First run: a missing or logged-out Claude CLI (main's `problem` event) shows a setup card over
+  the avatar with the official install commands, Copy buttons and Retry (`src/ui/setup-cards.js`,
+  `src/app/setup-help.js`); a voice setup that has to be run by hand shows its command the same way.
 * Hands-free (setting): a VAD listens whenever the conversation is idle and pauses while the
   avatar thinks or speaks (half-duplex, so it never hears itself).
 * After 10 idle minutes the avatar dozes (`sleep` state); any activity wakes it.
@@ -78,6 +83,7 @@ pixels reach the desktop; the head, the panel and cards stay clickable.
 | `mockDelay=ms`, `mockFirst=ms` | streaming speed of the mock |
 | `settings={"avatar":{"quality":"low"}}` | initial settings patch |
 | `clickThrough=1` | exercise click-through decisions (recorded in `__app.bridge.__mock.calls`) |
+| `claude=missing` / `claude=auth` | first run without a Claude CLI / with a CLI that is not logged in: the setup cards; `claudeRetries=N` makes the first N Retry clicks fail |
 | `layout=electron` | use the desktop window's layout rule |
 | `bg=desk` | a colourful backdrop to judge transparency |
 

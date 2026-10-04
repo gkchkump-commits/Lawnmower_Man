@@ -78,3 +78,16 @@ export function validateSizePreset(v) {
   if (v !== 'small' && v !== 'medium' && v !== 'large') throw new Error('Size preset must be small, medium or large');
   return v;
 }
+
+/**
+ * Options of voice.setup() from the renderer: only the CPU/GPU choice (undefined = decide by
+ * the GPU that was detected). @param {unknown} v @returns {{ cpu?: boolean }}
+ */
+export function validateSetupOptions(v) {
+  if (v === undefined || v === null) return {};
+  if (!isPlainObject(v)) throw new Error('Setup options must be an object');
+  /** @type {{ cpu?: boolean }} */
+  const out = {};
+  if (v.cpu !== undefined) out.cpu = validateBoolean(v.cpu, 'cpu');
+  return out;
+}

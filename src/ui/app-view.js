@@ -9,7 +9,9 @@
 //   data-handsfree  true when hands-free listening is armed
 //   data-sleep      true when the avatar dozes
 
+import { claudeSetupModel, voiceManualModel } from '../app/setup-help.js';
 import { PermissionCards } from './permission-cards.js';
+import { SetupCards } from './setup-cards.js';
 import { StatusLine } from './status.js';
 import { Toasts } from './toasts.js';
 import { Transcript } from './transcript.js';
@@ -19,7 +21,8 @@ const HIDE_AFTER_MS = 6000;
 export class AppView {
   /**
    * @param {{ body: HTMLElement, transcript: HTMLElement, cards: HTMLElement, toasts: HTMLElement, status: HTMLElement }} dom
-   * @param {{ onPermission: (requestId: string, allow: boolean) => void, composer?: import('./composer.js').Composer }} o
+   * @param {{ onPermission: (requestId: string, allow: boolean) => void, composer?: import('./composer.js').Composer,
+   *   onRetryClaude?: () => Promise<void>, platform?: string }} o
    */
   constructor(dom, o) {
     this.dom = dom;
@@ -28,6 +31,11 @@ export class AppView {
       onCopied: (ok) => this.toast(ok ? 'Copied to the clipboard.' : 'Could not copy to the clipboard.', ok ? 'success' : 'warn'),
     });
     this.cards = new PermissionCards(dom.cards, { onDecision: o.onPermission });
+    this.platform = o.platform || 'linux';
+    this.setup = new SetupCards(dom.cards, {
+      onRetry: () => (o.onRetryClaude ? o.onRetryClaude() : Promise.resolve()),
+      onCopied: (ok) => this.toast(ok ? 'Copied — paste it into the terminal.' : 'Could not copy to the clipboard.', ok ? 'success' : 'warn'),
+    });
     this.toasts = new Toasts(dom.toasts);
     this.status = new StatusLine(dom.status);
     /** @type {Map<string, { turnId: string|null, toolName: string }>} */
@@ -117,6 +125,18 @@ export class AppView {
 
   setClaudeStatus(st) {
     this.status.setClaude(st);
+  }
+
+  /** First-run card for a missing or logged-out Claude CLI (null hides it). @param {{ kind: string, detail: string }|null} problem */
+  setClaudeProblem(problem) {
+    this.setup.show('claude', problem ? claudeSetupModel(problem, this.platform) : null);
+    this.set('setup', problem ? problem.kind : '');
+    this.refreshPanel();
+  }
+
+  /** The voice setup has to be run by hand: show its command (null hides the card). @param {any} setup VoiceInfo.setup */
+  setVoiceSetup(setup) {
+    this.setup.show('voice', setup && setup.state === 'manual' ? voiceManualModel(setup) : null);
   }
 
   /** @param {any} info @param {{ tts: any, stt: boolean }} caps */

@@ -9,8 +9,8 @@ import { SECTIONS } from '../../../src/ui/settings-drawer.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const docs = ['README.md', ...readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`)];
-// Windows' own Settings app, referenced for GPU selection — not the app's drawer
-const OS_SETTINGS = new Set(['System']);
+// Windows' own Settings app, referenced for GPU selection and uninstalling — not the app's drawer
+const OS_SETTINGS = new Set(['System', 'Apps']);
 
 /** @returns {Array<{ file: string, section: string, field?: string }>} */
 function references() {
@@ -35,7 +35,8 @@ describe('docs ↔ settings drawer', () => {
       const section = SECTIONS.find((s) => s.title === ref.section);
       expect(section, `${ref.file}: no drawer section "${ref.section}"`).toBeTruthy();
       if (ref.field) {
-        const labels = section.fields.map((f) => f.label).filter(Boolean);
+        // a button label may end in "…" ("Set up local voice…"), which the docs pattern stops before
+        const labels = section.fields.map((f) => f.label).filter(Boolean).map((l) => l.replace(/…$/, ''));
         expect(labels, `${ref.file}: no field "${ref.field}" in Settings → ${ref.section}`).toContain(ref.field);
       }
     }

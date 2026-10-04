@@ -40,11 +40,15 @@ const api = {
     reset: () => invoke('lm:claude:reset'),
     respondPermission: (requestId, decision) => invoke('lm:claude:respond-permission', requestId, decision),
     status: () => invoke('lm:claude:status'),
+    // Setup card "Retry": look for the CLI again (it may have just been installed) and restart it.
+    retry: () => invoke('lm:claude:retry'),
     onEvent: (cb) => subscribe('lm:claude:event', cb),
   },
   voice: {
     info: () => invoke('lm:voice:info'),
     restart: () => invoke('lm:voice:restart'),
+    // "Set up local voice…": opens the bundled setup script in its own console window.
+    setup: (options) => invoke('lm:voice:setup', options),
     onStatus: (cb) => subscribe('lm:voice:status', cb),
   },
   settings: {

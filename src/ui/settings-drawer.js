@@ -50,10 +50,13 @@ export const SECTIONS = [
       { type: 'toggle', path: 'voice.speakReplies', label: 'Speak replies' },
       { type: 'toggle', path: 'voice.handsFree', label: 'Hands-free', hint: 'Listen whenever idle; pauses while speaking' },
       { type: 'select', path: 'voice.ttsVoice', label: 'Voice', options: [] },
+      // shown instead of the Kokoro list while the local voice is not running (Web Speech voices)
+      { type: 'select', path: 'voice.systemVoice', label: 'Voice', options: [['', 'Automatic (most natural voice)']] },
       { type: 'range', path: 'voice.ttsSpeed', label: 'Speed', min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
       { type: 'select', path: 'voice.device', label: 'Device', options: [['auto', 'Auto'], ['cuda', 'GPU (CUDA)'], ['cpu', 'CPU']] },
       { type: 'text', path: 'voice.sttModel', label: 'Speech model', suggestions: ['large-v3-turbo', 'distil-large-v3', 'medium.en', 'small.en', 'base.en'] },
       { type: 'button', label: 'Restart voice server', action: 'restartVoice', variant: 'ghost' },
+      { type: 'button', label: 'Set up local voice…', action: 'setupVoice', variant: 'subtle' },
     ],
   },
   {
@@ -114,6 +117,8 @@ export class SettingsDrawer {
     this.controls = new Map();
     /** @type {Map<string, HTMLElement>} */
     this.infos = new Map();
+    /** @type {Map<string, HTMLButtonElement>} action buttons */
+    this.actions = new Map();
     this.settings = null;
     this._recording = null;
     this._build();
@@ -179,6 +184,48 @@ export class SettingsDrawer {
     sel.title = list.length ? '' : 'Voices are listed when the local voice server is running';
   }
 
+  /**
+   * System (Web Speech) voices for the picker used while the local voice is not running.
+   * '' = automatic; a saved voice that is not installed any more stays listed as such.
+   * @param {Array<{ id: string, name: string, lang?: string }>} voices
+   */
+  setSystemVoiceOptions(voices) {
+    const sel = /** @type {HTMLSelectElement|undefined} */ (this.controls.get('voice.systemVoice')?.el);
+    if (!sel) return;
+    const current = this.settings ? String(getPath(this.settings, 'voice.systemVoice') ?? '') : sel.value;
+    const list = Array.isArray(voices) ? voices : [];
+    clear(sel);
+    sel.append(h('option', { value: '' }, 'Automatic (most natural voice)'));
+    for (const v of list) {
+      const lang = v.lang && !String(v.name).includes(v.lang) ? ` · ${v.lang}` : '';
+      sel.append(h('option', { value: v.id }, `${v.name}${lang}`));
+    }
+    if (current && !list.some((v) => v.id === current)) sel.append(h('option', { value: current }, `${current} (not installed)`));
+    sel.value = current;
+    sel.title = list.length ? 'System voice, used while the local voice is not running' : 'No system voices were found on this computer';
+  }
+
+  /**
+   * Which voice list applies right now: the local voice server's (Kokoro) or the system's.
+   * @param {'server'|'system'} source
+   */
+  setVoiceSource(source) {
+    const server = this.controls.get('voice.ttsVoice');
+    const system = this.controls.get('voice.systemVoice');
+    if (server) server.row.hidden = source !== 'server';
+    if (system) system.row.hidden = source === 'server';
+  }
+
+  /** Relabel / hide / disable an action button. @param {string} action @param {{ label?: string, hidden?: boolean, disabled?: boolean, title?: string }} o */
+  setAction(action, o) {
+    const b = this.actions.get(action);
+    if (!b) return;
+    if (o.label !== undefined) b.textContent = o.label;
+    if (o.hidden !== undefined) /** @type {HTMLElement} */ (b.parentElement).hidden = o.hidden;
+    if (o.disabled !== undefined) b.disabled = o.disabled;
+    if (o.title !== undefined) b.title = o.title;
+  }
+
   /** Disable a control with an explanation (e.g. click-through on Linux). @param {string} path @param {string} reason */
   disable(path, reason) {
     const c = this.controls.get(path);
@@ -222,8 +269,9 @@ export class SettingsDrawer {
       return el;
     }
     if (f.type === 'button') {
-      return h('div', { class: 'field field-button' },
-        h('button', { type: 'button', class: `btn ${f.variant || 'subtle'}`, dataset: { action: f.action }, onclick: () => this.onAction(/** @type {string} */ (f.action)) }, f.label));
+      const b = /** @type {HTMLButtonElement} */ (h('button', { type: 'button', class: `btn ${f.variant || 'subtle'}`, dataset: { action: f.action }, onclick: () => this.onAction(/** @type {string} */ (f.action)) }, f.label));
+      this.actions.set(/** @type {string} */ (f.action), b);
+      return h('div', { class: 'field field-button' }, b);
     }
     const path = /** @type {string} */ (f.path);
     const id = `set-${path.replace(/\./g, '-')}`;

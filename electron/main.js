@@ -6,13 +6,23 @@
 // the Claude CLI session and the local voice server.
 //
 // Dev/test environment overrides (all optional):
-//   VITE_DEV_SERVER_URL        load the renderer from a loopback Vite dev server
+//   VITE_DEV_SERVER_URL        load the renderer from a loopback Vite dev server (ignored unless loopback)
 //   LAWNMOWER_CLAUDE_CLI       explicit Claude CLI path (skips auto-detection)
 //   LAWNMOWER_USER_DATA        alternative userData folder (portable / testing)
 //   LAWNMOWER_VOICE_ARGS       extra args for the voice server (e.g. "--fake")
 //   LAWNMOWER_AGENT_PERMISSION_MODE  e.g. "acceptEdits" for agent mode
 //   LAWNMOWER_DEBUG=1          debug logging;  LAWNMOWER_DEVTOOLS=1  allow DevTools when packaged
 //   LAWNMOWER_FORCE_CLICK_THROUGH=1  honour click-through on Linux too (no mouse-move forwarding there)
+//   LAWNMOWER_E2E=1            expose a few main-process helpers to scripts/electron-e2e.mjs
+//                              (globalThis.__lawnmowerE2E; main process only, never the renderer)
+//
+// These are honoured in packaged builds too, deliberately (scripts/electron-e2e.mjs --packaged
+// drives the installed app with them). Threat model: the environment of a desktop process is set
+// by the user who starts it, or by code that already runs as that user — and such code can just
+// as well write settings.json (claude.cliPath and voice.pythonPath choose the programs we run),
+// replace the CLI binary in %USERPROFILE%\.local\bin or start the app with its own flags. None of
+// these variables crosses a privilege boundary or is reachable from the sandboxed renderer or a
+// web page, so ignoring them when packaged would add no protection, only remove the test hook.
 
 import {
   app,
@@ -35,6 +45,8 @@ import { fileURLToPath } from 'node:url';
 import { SettingsStore } from './settings.js';
 import { ClaudeSession, resolveWorkdir } from './claude-session.js';
 import { VoiceSidecar, voiceVenvDirs } from './voice-sidecar.js';
+import { VoiceSetupRunner, setupScriptPath } from './voice-setup.js';
+import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
 import { windowLayout, placeWindow, resizeAnchored, reclamp } from './window-manager.js';
 import {
@@ -53,6 +65,7 @@ import {
   validateBoolean,
   validatePermissionResponse,
   validateSettingsPatch,
+  validateSetupOptions,
   validateSizePreset,
   validateTurnId,
   validateTurnText,
@@ -79,6 +92,7 @@ const state = {
   /** @type {SettingsStore|null} */ settings: null,
   /** @type {ClaudeSession|null} */ claude: null,
   /** @type {VoiceSidecar|null} */ voice: null,
+  /** @type {VoiceSetupRunner|null} */ setup: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
   /** @type {CursorTracker|null} */ cursor: null,
   followCursor: true, // settings.avatar.followCursor, cached (read ~30 times a second)
@@ -89,6 +103,7 @@ const state = {
   rendererCrashes: 0,
   claudeStatus: 'starting',
   claudeDetail: '',
+  /** @type {{ kind: string, detail: string }|null} */ claudeProblem: null,
   /** @type {Record<string, any>|null} */ gpu: null,
 };
 
@@ -182,6 +197,9 @@ async function init() {
       state.claudeDetail = ev.detail || '';
       if (ev.status === 'error' && ev.detail) log('warn', `[claude] ${ev.detail}`);
       rebuildTray();
+    } else if (ev.type === 'problem') {
+      state.claudeProblem = ev.problem || null;
+      rebuildTray();
     }
   });
   state.claude = claude;
@@ -196,11 +214,36 @@ async function init() {
     venvDirs: voiceVenvDirs({ packaged: app.isPackaged, voiceDir }),
     log,
   });
-  voice.on('status', (info) => {
-    sendToRenderer('lm:voice:status', info);
+  voice.on('status', () => {
+    sendToRenderer('lm:voice:status', voiceInfo());
     rebuildTray();
   });
   state.voice = voice;
+
+  // --- "Set up local voice…": the bundled setup script in a visible console window ---
+  const setup = new VoiceSetupRunner({
+    script: setupScriptPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot }),
+    statusFile: path.join(userData, 'voice-setup-status.json'),
+    beforeLaunch: async ({ check }) => {
+      // The running voice server keeps files of the venv open: stop it while they are replaced.
+      if (!check) await voice.stop();
+    },
+    log,
+  });
+  setup.on('state', () => {
+    sendToRenderer('lm:voice:status', voiceInfo());
+    rebuildTray();
+  });
+  setup.on('finished', (/** @type {any} */ r) => {
+    if (r.check) return;
+    // Start the new install (or bring back the previous one after a failed or cancelled run).
+    // Turning voice on restarts a running sidecar by itself (settings change); a stopped one not.
+    const enabling = r.ok && !settings.get().voice.enabled;
+    const stopped = voice.stopped;
+    if (enabling) settings.update({ voice: { enabled: true } });
+    if (!enabling || stopped) voice.restart();
+  });
+  state.setup = setup;
 
   // --- Global cursor follow (the eyes follow the mouse anywhere on the desktop) ---
   state.cursor = new CursorTracker({
@@ -243,6 +286,7 @@ async function init() {
 /** Stop child processes and release OS resources (bounded so quitting never hangs). */
 async function shutdown() {
   state.cursor?.stop();
+  state.setup?.dispose(); // the setup window itself keeps running
   try {
     globalShortcut.unregisterAll();
   } catch { /* ignore */ }
@@ -553,6 +597,9 @@ const trayActions = {
   restartVoice: () => {
     state.voice?.restart();
   },
+  setupVoice: () => {
+    runVoiceSetup().catch((err) => state.log('warn', `[voice-setup] ${err.message}`));
+  },
   openSettingsFile: () => {
     if (state.settings) shell.openPath(state.settings.file).catch(() => {});
   },
@@ -572,14 +619,17 @@ const trayActions = {
 function rebuildTray() {
   const tray = state.tray;
   if (!tray || !state.settings) return;
-  const voiceInfo = state.voice ? state.voice.info() : { status: 'stopped' };
+  const vinfo = state.voice ? state.voice.info() : { status: 'stopped' };
   const st = {
     visible: !!state.win && state.win.isVisible(),
     settings: state.settings.get(),
     claudeStatus: state.claudeStatus,
     claudeDetail: state.claudeDetail,
-    voiceStatus: voiceInfo.status,
-    voiceDetail: voiceInfo.detail,
+    voiceStatus: vinfo.status,
+    voiceDetail: vinfo.detail,
+    voiceInstalled: vinfo.installed,
+    voiceSetup: state.setup ? state.setup.state.state : 'idle',
+    claudeProblem: state.claudeProblem ? state.claudeProblem.kind : '',
     hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
   };
   try {
@@ -647,8 +697,11 @@ function registerIpc() {
     claude.respondPermission(v.requestId, v.decision);
   });
   handle('lm:claude:status', () => claude.status());
+  handle('lm:claude:retry', () => retryClaude());
 
-  handle('lm:voice:info', () => voice.info());
+  handle('lm:voice:info', () => voiceInfo());
+  // Opens the setup in its own window and returns at once; progress arrives via onStatus.
+  handle('lm:voice:setup', (opts) => runVoiceSetup(validateSetupOptions(opts)));
   // Fire-and-forget: a restart can take minutes (model loading); progress arrives via onStatus.
   handle('lm:voice:restart', () => {
     voice.restart();
@@ -682,6 +735,55 @@ function registerIpc() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// First-run helpers: Claude CLI "Retry", local voice setup
+
+/** The voice status for the renderer: the sidecar's info plus the setup window's state. */
+function voiceInfo() {
+  const info = state.voice ? state.voice.info() : { status: 'stopped' };
+  const st = state.setup ? state.setup.state : null;
+  if (st && st.state !== 'idle') {
+    /** @type {Record<string, any>} */
+    const setup = { state: st.state, detail: st.detail || '', cpu: !!st.cpu };
+    if (st.mode) setup.mode = st.mode;
+    if (st.command) setup.command = st.command;
+    return { ...info, setup };
+  }
+  return info;
+}
+
+/** "Retry" on the Claude setup card: see a CLI installed since start-up, then restart it. */
+async function retryClaude() {
+  if (process.platform === 'win32') {
+    const added = await refreshPathFromRegistry().catch(() => []);
+    if (added.length) state.log('info', `[claude] PATH refreshed from the registry: +${added.join(';')}`);
+  }
+  await /** @type {ClaudeSession} */ (state.claude).retry();
+}
+
+/** NVIDIA GPU present? null when Chromium cannot tell. @returns {Promise<boolean|null>} */
+async function hasNvidiaGpu() {
+  if (state.gpu && typeof state.gpu.nvidia === 'boolean') return state.gpu.nvidia;
+  try {
+    const info = /** @type {any} */ (await app.getGPUInfo('basic'));
+    const devices = Array.isArray(info?.gpuDevice) ? info.gpuDevice : [];
+    return devices.length ? devices.some((/** @type {any} */ d) => d.vendorId === 0x10de) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tray / settings drawer "Set up local voice…". Without an NVIDIA GPU the CPU version is
+ * installed (no 1.8 GB of CUDA wheels); when that is unknown the script asks.
+ * @param {{ cpu?: boolean, check?: boolean }} [opts]
+ */
+async function runVoiceSetup(opts = {}) {
+  const setup = /** @type {VoiceSetupRunner} */ (state.setup);
+  const cpu = typeof opts.cpu === 'boolean' ? opts.cpu : (await hasNvidiaGpu()) === false;
+  const r = await setup.start({ cpu, check: !!opts.check });
+  if (r.state === 'running' && !r.already) showWindow(false);
+  return r;
+}
 
 /** Log which GPU Chromium uses (the RTX should be active, WebGL2 hardware accelerated). */
 function logGpuInfo() {
@@ -697,6 +799,7 @@ function logGpuInfo() {
           ? { vendor: /** @type {any} */ (vendors)[active.vendorId] || active.vendorId, deviceId: active.deviceId, driver: active.driverVersion }
           : null,
         devices: devices.length,
+        nvidia: devices.length ? devices.some((/** @type {any} */ d) => d.vendorId === 0x10de) : undefined,
         webgl2: status?.webgl2,
         rasterization: status?.rasterization,
       };
@@ -706,4 +809,19 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking };
+export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo };
+
+// scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
+// through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).
+if (process.env.LAWNMOWER_E2E === '1') {
+  /** @type {any} */ (globalThis).__lawnmowerE2E = {
+    packaged: () => app.isPackaged,
+    resourcesPath: () => process.resourcesPath,
+    voiceVenvDirs: () => (state.voice ? /** @type {any} */ (state.voice)._venvDirs.slice() : []),
+    setupScript: () => (state.setup ? /** @type {any} */ (state.setup)._o.script : ''),
+    voiceSetupCheck: () => runVoiceSetup({ check: true }),
+    voiceSetup: (/** @type {{ cpu?: boolean }} */ o) => runVoiceSetup({ cpu: !!(o && o.cpu) }),
+    voiceInfo: () => voiceInfo(),
+    voiceSetupState: () => (state.setup ? state.setup.state : null),
+  };
+}

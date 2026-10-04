@@ -1,0 +1,225 @@
+name: Windows installer
+
+# Builds the Windows installer (NSIS, per user, no admin) and the portable exe on a real Windows
+# runner, installs the installer silently into a folder whose path has spaces, checks what the
+# install contains (files, icon, shortcuts, Apps & features entry), launches the INSTALLED app and
+# drives it end to end with the fake Claude CLI (scripts/electron-e2e.mjs --packaged), uninstalls
+# it again, and uploads the executables. Pushing a tag like v0.1.0 also publishes them as a
+# GitHub pre-release; pull requests and manual runs only build and test (nothing is published).
+# The build is unsigned: there is no code-signing certificate (Windows SmartScreen warns).
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-installer:
+    name: Build + smoke-test Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Unsigned build: never look for a code-signing certificate.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $v (the artifacts are named after it)"
+            exit 1
+          fi
+      - name: Install npm dependencies (downloads the Electron runtime)
+        run: npm ci
+      - name: Build renderer + package (NSIS installer and portable exe)
+        run: npm run dist:win
+      - name: List build output
+        shell: bash
+        run: ls -la release/
+      - name: Check the artifacts
+        shell: pwsh
+        run: |
+          $v = node -p "require('./package.json').version"
+          foreach ($name in @("Lawnmower-Man-Setup-$v.exe", "Lawnmower-Man-$v-portable.exe")) {
+            $f = Join-Path release $name
+            if (-not (Test-Path -LiteralPath $f)) { throw "missing artifact: $name" }
+            $mb = [math]::Round((Get-Item -LiteralPath $f).Length / 1MB, 1)
+            if ($mb -lt 40) { throw "$name is only $mb MB" }
+            Write-Host "$name  $mb MB"
+          }
+      - name: Install silently into a folder with spaces
+        shell: pwsh
+        run: |
+          $v = node -p "require('./package.json').version"
+          $setup = Join-Path release "Lawnmower-Man-Setup-$v.exe"
+          $dest = Join-Path $env:RUNNER_TEMP 'Install Test\Lawnmower Man'
+          # NSIS: /D= must be last and unquoted (it may contain spaces)
+          $p = Start-Process -FilePath $setup -ArgumentList '/S', "/D=$dest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
+          $exe = Join-Path $dest 'Lawnmower Man.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { Get-ChildItem -Recurse $dest | Select-Object -First 50 | Format-Table FullName; throw 'installed exe not found' }
+          $need = @(
+            'resources\app.asar',
+            'resources\voice\lawnmower_voice\__main__.py',
+            'resources\voice\pyproject.toml',
+            'resources\scripts\setup-voice.ps1',
+            'resources\scripts\setup-voice.cmd',
+            'resources\scripts\setup-voice.sh',
+            'resources\THIRD_PARTY_NOTICES.md',
+            'Uninstall Lawnmower Man.exe'
+          )
+          foreach ($f in $need) { if (-not (Test-Path -LiteralPath (Join-Path $dest $f))) { throw "missing in install: $f" } }
+          foreach ($f in @('resources\voice\tests', 'resources\voice\.venv', 'resources\voice\models')) {
+            if (Test-Path -LiteralPath (Join-Path $dest $f)) { throw "must not be installed: $f" }
+          }
+          # version info and icon of the exe (rcedit), against electron/assets/icon.ico
+          $vi = (Get-Item -LiteralPath $exe).VersionInfo
+          Write-Host ("ProductName={0} CompanyName={1} FileDescription={2} ProductVersion={3}" -f $vi.ProductName, $vi.CompanyName, $vi.FileDescription, $vi.ProductVersion)
+          if ($vi.ProductName -ne 'Lawnmower Man') { throw "unexpected ProductName '$($vi.ProductName)'" }
+          if ($vi.CompanyName -ne 'gkchkump-commits') { Write-Host "::warning::exe CompanyName is '$($vi.CompanyName)'" }
+          Add-Type -AssemblyName System.Drawing
+          $got = [System.Drawing.Icon]::ExtractAssociatedIcon($exe).ToBitmap()
+          $want = (New-Object System.Drawing.Icon ((Resolve-Path 'electron\assets\icon.ico').Path), 32, 32).ToBitmap()
+          $diff = 0; $n = 0
+          for ($y = 0; $y -lt 32; $y += 2) { for ($x = 0; $x -lt 32; $x += 2) {
+            $a = $got.GetPixel($x, $y); $b = $want.GetPixel($x, $y); $n++
+            if ([math]::Abs($a.R - $b.R) + [math]::Abs($a.G - $b.G) + [math]::Abs($a.B - $b.B) + [math]::Abs($a.A - $b.A) -gt 48) { $diff++ }
+          } }
+          Write-Host "exe icon vs icon.ico: $diff of $n sampled pixels differ"
+          if ($diff -gt $n * 0.1) { throw 'the installed exe does not carry electron/assets/icon.ico' }
+          # Apps & features entry (per user: HKCU) and shortcuts
+          $entry = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Lawnmower Man*' } | Select-Object -First 1
+          if (-not $entry) { throw 'no per-user uninstall entry (HKCU) for Lawnmower Man' }
+          Write-Host ("Apps & features: {0} {1} by {2}" -f $entry.DisplayName, $entry.DisplayVersion, $entry.Publisher)
+          if ($entry.Publisher -ne 'gkchkump-commits') { Write-Host "::warning::uninstall entry Publisher is '$($entry.Publisher)'" }
+          $desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Lawnmower Man.lnk'
+          $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Lawnmower Man.lnk'
+          foreach ($l in @($desktop, $menu)) { if (-not (Test-Path -LiteralPath $l)) { Write-Host "::warning::shortcut not found: $l" } }
+          "INSTALL_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INSTALLED_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Launch the installed app and drive it end to end
+        # --software-webgl: the runner has no GPU (WebGL through SwiftShader, like playwright.config.js)
+        run: node scripts/electron-e2e.mjs --packaged --software-webgl --no-setup-check --screenshot release/smoke-windows.png
+        env:
+          ELECTRON_PATH: ${{ env.INSTALLED_EXE }}
+      - name: '"Set up local voice…" launcher in the installed app (check mode, opens a console window)'
+        # Non-fatal: it needs a desktop session in which Start-Process can open a console window.
+        continue-on-error: true
+        run: node scripts/electron-e2e.mjs --packaged --software-webgl
+        env:
+          ELECTRON_PATH: ${{ env.INSTALLED_EXE }}
+      - name: Install again over the existing install (the update path) keeps the local voice and the settings
+        shell: pwsh
+        run: |
+          $v = node -p "require('./package.json').version"
+          $setup = Join-Path release "Lawnmower-Man-Setup-$v.exe"
+          # stand-ins for a tester's data: the per-user voice venv and the settings folder
+          $markers = @(
+            (Join-Path $env:LOCALAPPDATA 'LawnmowerMan\voice\.venv\lawnmower-ci-marker.txt'),
+            (Join-Path $env:APPDATA 'Lawnmower Man\lawnmower-ci-marker.txt')
+          )
+          foreach ($m in $markers) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $m) | Out-Null; Set-Content -LiteralPath $m -Value 'user data' }
+          $stale = Join-Path $env:INSTALL_DIR 'resources\stale-from-previous-version.txt'
+          Set-Content -LiteralPath $stale -Value 'previous version'
+          # the installer runs the previous version's uninstaller (/S --updated) and then installs
+          $p = Start-Process -FilePath $setup -ArgumentList '/S', "/D=$env:INSTALL_DIR" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the second install exited with $($p.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $env:INSTALLED_EXE)) { throw 'the app is missing after installing over it' }
+          if (Test-Path -LiteralPath $stale) { Write-Host '::warning::a file of the previous install survived the update (the old uninstaller did not run?)' }
+          foreach ($m in $markers) { if (-not (Test-Path -LiteralPath $m)) { throw "the update deleted user data: $m" } }
+          $n = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Lawnmower Man*' }).Count
+          if ($n -ne 1) { throw "expected one Apps & features entry after the update, found $n" }
+          Write-Host 'the update kept the voice folder and the settings'
+      - name: Uninstall silently
+        shell: pwsh
+        run: |
+          $u = Join-Path $env:INSTALL_DIR 'Uninstall Lawnmower Man.exe'
+          Start-Process -FilePath $u -ArgumentList '/S' -Wait
+          # the NSIS uninstaller re-launches itself from %TEMP%: wait for it to finish
+          for ($i = 0; $i -lt 60 -and (Test-Path -LiteralPath $env:INSTALLED_EXE); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path -LiteralPath $env:INSTALLED_EXE) { throw 'the uninstaller left the app behind' }
+          $entry = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Lawnmower Man*' }
+          if ($entry) { throw 'the uninstall entry is still there' }
+          # a silent uninstall never asks and keeps the user's data (the interactive one asks, default No)
+          $markers = @(
+            (Join-Path $env:LOCALAPPDATA 'LawnmowerMan\voice\.venv\lawnmower-ci-marker.txt'),
+            (Join-Path $env:APPDATA 'Lawnmower Man\lawnmower-ci-marker.txt')
+          )
+          foreach ($m in $markers) { if (-not (Test-Path -LiteralPath $m)) { throw "the silent uninstall deleted user data: $m" } }
+          Remove-Item -Recurse -Force -LiteralPath (Join-Path $env:LOCALAPPDATA 'LawnmowerMan'), (Join-Path $env:APPDATA 'Lawnmower Man')
+          Write-Host 'uninstalled (user data kept)'
+      - name: SHA-256 checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem release -Filter '*.exe' | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
+      - name: Upload installer artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lawnmower-man-windows
+          path: |
+            release/Lawnmower-Man-*.exe
+            release/SHA256SUMS.txt
+            release/smoke-windows.png
+          if-no-files-found: warn
+          retention-days: 30
+
+  publish:
+    name: Publish pre-release
+    # tag pushes only: pull requests and manual runs never publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: windows-installer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lawnmower-man-windows
+          path: dist-win
+      - name: Create (or update) the GitHub pre-release with the executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist-win
+          cat > notes.md <<EOF
+          Windows build of Lawnmower Man $GITHUB_REF_NAME, for testing. It is **unsigned**: Windows SmartScreen warns ("Windows protected your PC") — choose **More info → Run anyway**.
+
+          **Before you start:** install the Claude CLI and sign in once (the app shows the steps if it is missing):
+          \`irm https://claude.ai/install.ps1 | iex\` in PowerShell, then run \`claude\` in a new terminal and log in.
+
+          * \`Lawnmower-Man-Setup-*.exe\` — installer, for your user only (no admin). To update, run a newer one over it (settings and local voice are kept). Uninstall from Settings → Apps (it asks whether to delete your data too; default: keep).
+          * \`Lawnmower-Man-*-portable.exe\` — runs without installing.
+          * \`SHA256SUMS.txt\` — checksums.
+
+          Optional local voice (speech recognition + natural speech, NVIDIA GPU recommended): tray icon → **Set up local voice…**.
+          EOF
+          sed -i 's/^          //' notes.md
+          files=(dist-win/Lawnmower-Man-*.exe dist-win/SHA256SUMS.txt)
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Lawnmower Man $GITHUB_REF_NAME" \
+              --prerelease \
+              --notes-file notes.md
+          fi

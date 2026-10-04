@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     sttLanguage: 'en',
     ttsVoice: 'af_heart',
     ttsSpeed: 1.0,
+    systemVoice: '', // system (Web Speech) voice name/URI when the local voice is not running; '' = best English voice
     device: 'auto', // 'auto' | 'cuda' | 'cpu'
     handsFree: false,
     speakReplies: true,
@@ -216,6 +217,9 @@ const SCHEMA = {
     sttLanguage: str({ max: 16, pattern: /^(|auto|[a-z]{2,3}([-_][A-Za-z]{2,8})?)$/ }),
     ttsVoice: str({ max: 64, pattern: /^[A-Za-z0-9_.-]+$/ }),
     ttsSpeed: num(0.5, 2.0),
+    // A SpeechSynthesisVoice name or voiceURI ("Microsoft Aria Online (Natural) - English (United
+    // States)"): any printable text on one line. It never reaches a command line.
+    systemVoice: str({ max: 256 }),
     device: oneOf(['auto', 'cuda', 'cpu']),
     handsFree: bool(),
     speakReplies: bool(),

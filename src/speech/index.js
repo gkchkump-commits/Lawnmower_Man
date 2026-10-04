@@ -7,7 +7,7 @@ import { normalizeVisemes } from '../audio/lipsync.js';
 import { VoiceError, isAbortError } from './voice-client.js';
 
 export const VOICE_SETUP_HINT =
-  'Voice input needs the local voice server. Install it with scripts\\setup-voice.ps1 (Windows) or scripts/setup-voice.sh (Linux), turn on "Local voice" in Settings, then choose "Restart voice" in the tray menu.';
+  'Voice input needs the local voice. Choose "Set up local voice…" in Settings › Voice or in the tray menu: it runs setup-voice.ps1 (Windows) or setup-voice.sh (Linux) in its own window and starts the voice when it is done.';
 
 /**
  * @param {object} deps

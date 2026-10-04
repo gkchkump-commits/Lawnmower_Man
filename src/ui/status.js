@@ -12,11 +12,14 @@ export const STATE_LABEL = Object.freeze({
 
 /**
  * Text + tone for the Claude CLI status.
- * @param {{ status?: string, detail?: string, model?: string, mode?: string }} st
+ * @param {{ status?: string, detail?: string, model?: string, mode?: string, problem?: { kind: string, detail?: string } }} st
  * @returns {{ text: string, tone: 'ok'|'busy'|'warn'|'error', title: string }}
  */
 export function describeClaude(st = {}) {
   const model = st.model ? ` · ${shortModel(st.model)}` : '';
+  const problem = /** @type {any} */ (st).problem;
+  if (problem?.kind === 'cli-missing') return { text: 'Claude not installed', tone: 'error', title: problem.detail || 'The Claude CLI was not found' };
+  if (problem?.kind === 'auth') return { text: 'Claude: sign in', tone: 'warn', title: problem.detail || 'The Claude CLI is not logged in' };
   switch (st.status) {
     case 'ready': return { text: `Claude${model}`, tone: 'ok', title: st.detail || 'Claude CLI is ready' };
     case 'busy': return { text: `Claude${model}`, tone: 'busy', title: 'Claude is working on a reply' };

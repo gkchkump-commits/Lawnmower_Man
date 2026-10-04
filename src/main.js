@@ -97,7 +97,7 @@ async function boot() {
 
   view = new AppView(
     { body, transcript: $('transcript'), cards: $('cards'), toasts: $('toasts'), status: $('status') },
-    { composer, onPermission: (id, allow) => controller.respondPermission(id, allow) },
+    { composer, platform, onPermission: (id, allow) => controller.respondPermission(id, allow), onRetryClaude: () => retryClaude() },
   );
 
   const gate = new ClickThroughGate({ apply: (ignore) => bridge.window.setIgnoreMouse(ignore) });
@@ -125,7 +125,7 @@ async function boot() {
   }
 
   // ---------------------------------------------------------------- avatar
-  const app = /** @type {any} */ ({ bridge, isMock, view, drawer, player, mic, voiceClient, services, avatarReady: false, ready: false });
+  const app = /** @type {any} */ ({ bridge, isMock, view, drawer, player, mic, voiceClient, webSpeech, services, avatarReady: false, ready: false });
   window.__app = app;
   const avatarHost = new AvatarHost($('stage'), {
     onCreating: () => {
@@ -181,6 +181,11 @@ async function boot() {
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
     if (!settings.avatar.followCursor) avatarHost.avatar.lookAt(null);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
+    if (prev.voice.systemVoice !== settings.voice.systemVoice) {
+      webSpeech.setPreferred(settings.voice.systemVoice);
+      drawer.setSystemVoiceOptions(webSpeech.allVoices());
+      refreshInfo();
+    }
     // main re-registers global shortcuts on change: show its fresh conflict list
     if (JSON.stringify(prev.hotkeys) !== JSON.stringify(settings.hotkeys)) refreshAppInfo();
   };
@@ -220,6 +225,45 @@ async function boot() {
     } else if (a === 'restartVoice') {
       bridge.voice.restart().catch((err) => view.toast(`Could not restart the voice server: ${err?.message || err}`, 'error'));
       view.toast('Restarting the voice server…', 'info');
+    } else if (a === 'setupVoice') {
+      setupVoice();
+    }
+  }
+
+  /** Setup card "Retry": main looks for the Claude CLI again and restarts it. */
+  async function retryClaude() {
+    if (typeof bridge.claude.retry !== 'function') {
+      view.toast('Restart Lawnmower Man to look for the Claude CLI again.', 'info');
+      return;
+    }
+    const kind = controller.claudeProblem?.kind;
+    try {
+      await bridge.claude.retry();
+      // a login can only be confirmed by the next reply; a found CLI is ready now
+      if (!controller.claudeProblem) view.toast(kind === 'auth' ? 'Claude Code restarted. Send a message to check the sign-in.' : 'Claude Code is ready.', 'success');
+    } catch (err) {
+      view.toast(controller.claudeProblem?.kind === 'cli-missing'
+        ? 'Still not found. Finish the installation, open a new terminal and check that "claude --version" works, then retry.'
+        : `Retry failed: ${err?.message || err}`, 'warn');
+    }
+  }
+
+  /** "Set up local voice…" (drawer, the voice hint): main opens the setup script in its own window. */
+  async function setupVoice() {
+    if (typeof bridge.voice.setup !== 'function') {
+      view.toast(VOICE_SETUP_HINT, 'info');
+      return;
+    }
+    try {
+      const r = await bridge.voice.setup();
+      if (r?.state === 'manual') {
+        view.setVoiceSetup(r); // (again, if the user closed it before)
+        drawer.close(); // the card with the command is over the avatar
+      } else if (r?.already) {
+        view.toast('The voice setup is already running in its own window.', 'info');
+      }
+    } catch (err) {
+      view.toast(`Could not start the voice setup: ${err?.message || err}`, 'error');
     }
   }
 
@@ -233,9 +277,27 @@ async function boot() {
     controller.voiceChanged();
     refreshInfo();
   };
+  let lastSetupKey = '';
+  /**
+   * Toasts for the setup window's progress, and the manual-command card — only when the setup
+   * state changes (voice status repeats it), so a card the user closed stays closed.
+   * @param {any} setup VoiceInfo.setup
+   */
+  const noteVoiceSetup = (setup) => {
+    const st = setup?.state || '';
+    const key = st === 'manual' ? `manual:${setup.command || ''}` : st;
+    if (key === lastSetupKey) return;
+    lastSetupKey = key;
+    view.setVoiceSetup(setup || null);
+    if (st === 'running') view.toast(setup.detail || 'The voice setup is running in its own window.', 'info');
+    else if (st === 'done') view.toast(setup.detail || 'Local voice installed.', 'success');
+    else if (st === 'failed') view.toast(setup.detail || 'The voice setup did not finish.', 'warn');
+  };
+
   /** @param {any} info  bridge.voice.info() / onStatus payload */
   const applyVoice = async (info) => {
     const seq = ++voiceSeq;
+    noteVoiceSetup(info?.setup);
     voiceClient.configure(info);
     if (voiceClient.ready && !voiceClient.health) {
       // the sidecar normally includes /health; ask the server directly when it did not
@@ -271,10 +333,22 @@ async function boot() {
     if (hl.device?.name) line('GPU', `${hl.device.name}${hl.device.capability ? ` (sm ${hl.device.capability})` : ''}${hl.device.vramTotalMB ? ` · ${Math.round(hl.device.vramFreeMB ?? 0)} / ${Math.round(hl.device.vramTotalMB)} MB free` : ''}`);
     if (hl.stt) line('Speech-to-text', `${hl.stt.model || ''} on ${hl.stt.device || '?'}${hl.stt.error ? ` — ${hl.stt.error}` : ''}`, hl.stt.error ? 'warn' : '');
     if (hl.tts) line('Text-to-speech', `${hl.tts.backend || 'Kokoro'} on ${hl.tts.device || '?'}${hl.tts.error ? ` — ${hl.tts.error}` : ''}`, hl.tts.error ? 'warn' : '');
-    line('Replies spoken with', c.tts === 'server' ? 'local voice' : c.tts === 'browser' ? `browser voice${webSpeech.voice ? ` (${webSpeech.voice.name})` : ''}` : 'nothing (text only)');
+    line('Replies spoken with', c.tts === 'server' ? 'local voice' : c.tts === 'browser' ? `system voice${webSpeech.voice ? ` (${webSpeech.voice.name})` : ''}` : 'nothing (text only)');
+    if (c.tts !== 'server' && webSpeech.preferredMissing) lines.push(h('div', { class: 'warn' }, `The chosen system voice "${settings.voice.systemVoice}" is not installed; using the most natural one instead.`));
     if (info.detail && info.status !== 'ready') lines.push(h('div', null, info.detail));
-    if (!c.stt) lines.push(h('div', { class: 'warn' }, VOICE_SETUP_HINT));
+    const setup = info.setup || null;
+    if (setup && setup.state !== 'manual' && setup.detail && !(setup.state === 'done' && info.status === 'ready')) line('Setup', setup.detail, setup.state === 'failed' ? 'warn' : '');
+    const installed = info.installed === true || info.status === 'ready' || info.status === 'starting';
+    if (!c.stt && setup?.state !== 'running') {
+      lines.push(h('div', { class: 'warn' },
+        installed ? 'Voice input needs the local voice server running (see above).' : VOICE_SETUP_HINT,
+        installed ? null : h('button', { type: 'button', class: 'btn subtle setup-voice-inline', onclick: () => setupVoice() }, 'Set up local voice…')));
+    }
     drawer.setInfo('voiceInfo', lines);
+    drawer.setVoiceSource(c.tts === 'server' ? 'server' : 'system');
+    drawer.setAction('setupVoice', setup?.state === 'running'
+      ? { label: 'Voice setup is running…', disabled: true }
+      : { label: installed ? 'Set up local voice again…' : 'Set up local voice…', disabled: false, title: installed ? 'Re-run the setup (repairs or updates the local voice)' : 'Install faster-whisper and Kokoro (opens a window)' });
 
     const st = controller.claudeStatus || {};
     const about = [];
@@ -313,6 +387,11 @@ async function boot() {
 
   // ---------------------------------------------------------------- start
   await controller.start();
+  webSpeech.setPreferred(settings.voice.systemVoice);
+  webSpeech.onVoicesChanged(() => {
+    drawer.setSystemVoiceOptions(webSpeech.allVoices());
+    refreshInfo();
+  });
   webSpeech.init().then(() => updateVoiceStatus());
   try {
     await applyVoice(await bridge.voice.info());
@@ -416,7 +495,7 @@ async function boot() {
     if (!globalCursor) lookAtPoint(e.clientX, e.clientY);
     if (gate.enabled) {
       const t = /** @type {HTMLElement} */ (e.target);
-      const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .toast, .drawer, button, input, textarea, select, a');
+      const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, button, input, textarea, select, a');
       gate.update(overUi || probeAvatar((x, y) => av.hitTest(x, y), e.clientX, e.clientY, gate.interactive));
     }
   }, { passive: true });

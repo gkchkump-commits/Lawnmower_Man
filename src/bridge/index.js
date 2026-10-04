@@ -8,6 +8,8 @@
 //   &mockDelay=<ms>              delay between streamed words (default 28)
 //   &mockFirst=<ms>              delay before the first word (default 450)
 //   &settings=<json>             initial settings patch, e.g. {"avatar":{"quality":"low"}}
+//   &claude=missing|auth         simulate a missing / logged-out Claude CLI (setup cards)
+//   &claudeRetries=<n>           that many Retry clicks fail before the mock "finds" the CLI
 /* global URLSearchParams */
 
 import { createMockBridge } from './mock.js';
@@ -37,6 +39,9 @@ export function getBridge(o = {}) {
   const num = (k) => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : undefined);
   if (num('mockDelay') !== undefined) opts.wordDelayMs = num('mockDelay');
   if (num('mockFirst') !== undefined) opts.firstTokenMs = num('mockFirst');
+  const claude = q.get('claude');
+  if (claude === 'missing' || claude === 'auth') opts.claude = claude;
+  if (num('claudeRetries') !== undefined) opts.claudeRetries = num('claudeRetries');
   if (q.get('settings')) {
     try {
       opts.settings = JSON.parse(q.get('settings') || '{}');

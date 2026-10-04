@@ -82,6 +82,8 @@ export class WebSpeechTTS {
     /** @type {SpeechSynthesisUtterance|null} */
     this._current = null; // keep a reference: Chromium may GC a playing utterance
     this._initPromise = null;
+    /** @type {Set<() => void>} */
+    this._listeners = new Set();
   }
 
   get supported() {
@@ -121,9 +123,34 @@ export class WebSpeechTTS {
       };
       try { this.synth.addEventListener?.('voiceschanged', onChange); } catch { /* ignore */ }
     });
-    // later voice list changes (e.g. online voices arriving) re-pick
-    try { this.synth.addEventListener?.('voiceschanged', () => this._choose()); } catch { /* ignore */ }
+    // later voice list changes (e.g. online voices arriving) re-pick and refresh the picker
+    try {
+      this.synth.addEventListener?.('voiceschanged', () => {
+        this._choose();
+        this._notify();
+      });
+    } catch { /* ignore */ }
+    this._initPromise.then(() => this._notify());
     return this._initPromise;
+  }
+
+  /**
+   * Called whenever the voice list may have changed (after init, on voiceschanged).
+   * @param {() => void} cb @returns {() => void} unsubscribe
+   */
+  onVoicesChanged(cb) {
+    this._listeners.add(cb);
+    return () => this._listeners.delete(cb);
+  }
+
+  _notify() {
+    for (const cb of [...this._listeners]) {
+      try {
+        cb();
+      } catch (err) {
+        console.warn('[web-speech] voices listener threw', err);
+      }
+    }
   }
 
   /** @returns {SpeechSynthesisVoice[]} */
@@ -144,10 +171,40 @@ export class WebSpeechTTS {
     return this._voices().filter((v) => scoreVoice(v, this.lang) > -1000);
   }
 
-  /** @param {string} nameOrUri '' = automatic */
+  /**
+   * Every installed voice for the settings picker: voices for the app's language first (most
+   * natural first), then the others by language and name.
+   * @returns {Array<{ id: string, name: string, lang: string, local: boolean }>}
+   */
+  allVoices() {
+    const list = this._voices().map((v) => ({ v, score: scoreVoice(v, this.lang) }));
+    list.sort((a, b) => {
+      const ma = a.score > -1000;
+      const mb = b.score > -1000;
+      if (ma !== mb) return ma ? -1 : 1;
+      if (ma && a.score !== b.score) return b.score - a.score;
+      return String(a.v.lang).localeCompare(String(b.v.lang)) || String(a.v.name).localeCompare(String(b.v.name));
+    });
+    const seen = new Set();
+    const out = [];
+    for (const { v } of list) {
+      const id = String(v.voiceURI || v.name || '');
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name: String(v.name || id), lang: String(v.lang || ''), local: !!v.localService });
+    }
+    return out;
+  }
+
+  /** settings.voice.systemVoice: a voice name or voiceURI; '' = automatic (best voice). @param {string} nameOrUri */
   setPreferred(nameOrUri) {
-    this.preferred = nameOrUri || '';
+    this.preferred = typeof nameOrUri === 'string' ? nameOrUri : '';
     this._choose();
+  }
+
+  /** The preferred voice is set but not installed (any more): the automatic choice is used. */
+  get preferredMissing() {
+    return !!this.preferred && !this._voices().some((v) => v.voiceURI === this.preferred || v.name === this.preferred);
   }
 
   /**

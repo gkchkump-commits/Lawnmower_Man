@@ -91,6 +91,21 @@ describe('tray menu', () => {
     expect(byLabel(/^Voice: Disabled/)).toBeTruthy();
     expect(trayTooltip(st)).toBe('Lawnmower Man — Claude: ready · Voice: disabled');
   });
+
+  it('offers "Set up local voice…" (disabled while it runs) and names Claude setup problems', () => {
+    const setupVoice = vi.fn();
+    const a = { ...actions, setupVoice };
+    const labels = (s) => flat(buildTrayTemplate(s, a));
+    const item = labels({ ...st, voiceInstalled: false }).find((i) => i.label === 'Set up local voice…');
+    item.click();
+    expect(setupVoice).toHaveBeenCalledTimes(1);
+    expect(labels({ ...st, voiceInstalled: true }).some((i) => i.label === 'Set up local voice again…')).toBe(true);
+    const running = labels({ ...st, voiceSetup: 'running' }).find((i) => /setup is running/.test(i.label || ''));
+    expect(running.enabled).toBe(false);
+    expect(running.click).toBeUndefined();
+    expect(labels({ ...st, claudeStatus: 'error', claudeProblem: 'cli-missing' }).some((i) => i.label === 'Claude: Not installed')).toBe(true);
+    expect(trayTooltip({ ...st, claudeProblem: 'auth' })).toBe('Lawnmower Man — Claude: not signed in · Voice: disabled');
+  });
 });
 
 describe('HotkeyManager', () => {

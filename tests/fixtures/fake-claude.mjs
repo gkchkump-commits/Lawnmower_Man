@@ -21,6 +21,7 @@
 //   "recall"  → replies with the previous user prompt of this session (memory check)
 //   "nostream"→ assistant message without any stream_event (fallback path)
 //   "subagent"→ includes a sub-agent stream (parent_tool_use_id set) that must be ignored
+//   "notloggedin" → answers like a CLI without a login (see FAKE_CLAUDE_AUTH_FILE)
 //   otherwise → "You said: <text>" in a few chunks
 //
 // Env:
@@ -30,8 +31,12 @@
 //   FAKE_CLAUDE_CRLF=1     CRLF line endings
 //   FAKE_CLAUDE_BOM=1      UTF-8 BOM before the first line
 //   FAKE_CLAUDE_NO_INIT=1  never answer the initialize request
-//   FAKE_CLAUDE_EXIT_AT_START=<code>  exit immediately with that code (startup failure)
+//   FAKE_CLAUDE_EXIT_AT_START=<code>  exit immediately with that code (startup failure), printing
+//                     FAKE_CLAUDE_START_MESSAGE (default "fake-claude: simulated startup failure")
 //   FAKE_CLAUDE_IGNORE_SIGTERM=1  ignore SIGTERM (POSIX), so killing it takes the full grace period
+//   FAKE_CLAUDE_AUTH_FILE=<path>  "not logged in" until that file exists (checked per turn): a
+//                     synthetic assistant message with error "authentication_failed" and an
+//                     error result "Not logged in · Please run /login", like the real CLI
 //   --resume <id starting with "missing">  → "No conversation found" + exit 1 (like the real CLI)
 
 import fs from 'node:fs';
@@ -60,7 +65,7 @@ if (process.env.FAKE_CLAUDE_LOG) {
 if (process.env.FAKE_CLAUDE_IGNORE_SIGTERM) process.on('SIGTERM', () => {});
 
 if (process.env.FAKE_CLAUDE_EXIT_AT_START) {
-  process.stderr.write('fake-claude: simulated startup failure\n');
+  process.stderr.write(`${process.env.FAKE_CLAUDE_START_MESSAGE || 'fake-claude: simulated startup failure'}\n`);
   process.exit(Number(process.env.FAKE_CLAUDE_EXIT_AT_START) || 1);
 }
 
@@ -200,6 +205,14 @@ async function runTurn(text) {
   await out({ type: 'weird_future_event', payload: { anything: true } });
 
   const lower = text.toLowerCase();
+
+  const authFile = process.env.FAKE_CLAUDE_AUTH_FILE;
+  if (lower.includes('notloggedin') || (authFile && !fs.existsSync(authFile))) {
+    const t = 'Not logged in · Please run /login';
+    await out({ type: 'assistant', message: { id: msgId(), type: 'message', role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: t }] }, error: 'authentication_failed', ...base() });
+    await out({ type: 'result', subtype: 'success', is_error: true, duration_ms: 3, num_turns: 1, result: t, session_id: sessionId, total_cost_usd: 0, uuid: randomUUID() });
+    return;
+  }
 
   if (lower.includes('crash')) {
     const id = msgId();

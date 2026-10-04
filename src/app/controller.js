@@ -52,6 +52,7 @@ const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watc
  * @property {(on: boolean) => void} [setAttention]
  * @property {(message: string, level?: 'info'|'warn'|'error'|'success') => void} [toast]
  * @property {(status: object) => void} [setClaudeStatus]
+ * @property {(problem: { kind: string, detail: string }|null) => void} [setClaudeProblem]  first-run setup card
  * @property {(available: boolean, reason: string) => void} [setMicAvailable]
  * @property {(on: boolean) => void} [setHandsFree]
  * @property {(level: number) => void} [setMicLevel]
@@ -113,6 +114,8 @@ export class Controller extends Emitter {
     this.listen = null;
     this.handsFree = false;
     this.claudeStatus = /** @type {Record<string, any>} */ ({ status: 'starting' });
+    /** Something the user must fix outside the app (no CLI / not logged in), from main. @type {{ kind: string, detail: string }|null} */
+    this.claudeProblem = null;
 
     this._offs = /** @type {Array<() => void>} */ ([]);
     this._userMsgByTurn = new Map();
@@ -168,7 +171,8 @@ export class Controller extends Emitter {
       if (st && typeof st === 'object') {
         this.claudeStatus = { ...this.claudeStatus, ...st };
         this.view.setClaudeStatus?.(this.claudeStatus);
-        if (st.status === 'error') this._toast(st.detail || 'The Claude CLI is not available.', 'error');
+        if (st.problem && typeof st.problem === 'object') this._onProblem({ problem: st.problem });
+        else if (st.status === 'error') this._toast(st.detail || 'The Claude CLI is not available.', 'error');
         if (st.sessionId) this._noteResumed(st.sessionId);
         this._recover(st);
       }
@@ -277,7 +281,9 @@ export class Controller extends Emitter {
       }, (err) => {
         this.pendingSends = Math.max(0, this.pendingSends - 1);
         this.view.markUserMessage?.(msgId, 'failed', errMsg(err));
-        this._toast(`Could not send the message: ${errMsg(err)}`, 'error');
+        this._toast(this.claudeProblem?.kind === 'cli-missing'
+          ? 'Claude Code is not installed yet: follow the steps on the card, then press Retry.'
+          : `Could not send the message: ${errMsg(err)}`, 'error');
         this._flashError();
         this._maybeIdle();
       });
@@ -509,6 +515,7 @@ export class Controller extends Emitter {
       case 'turn_end': return this._onTurnEnd(ev);
       case 'turn_cancelled': return this._onTurnCancelled(ev);
       case 'error': return this._onError(ev);
+      case 'problem': return this._onProblem(ev);
       default: return undefined; // unknown event types are ignored
     }
   }
@@ -519,9 +526,22 @@ export class Controller extends Emitter {
     this.view.setClaudeStatus?.(this.claudeStatus);
     if (ev.status === 'restarting' || ev.status === 'exited' || ev.status === 'error') this._dropAllPermissions();
     if (ev.status === 'error') {
-      this._toast(ev.detail || 'The Claude CLI reported an error.', 'error');
+      // the setup card already explains a missing CLI; no duplicate toast
+      if (!this.claudeProblem) this._toast(ev.detail || 'The Claude CLI reported an error.', 'error');
       this._flashError();
     }
+  }
+
+  /** @param {{ problem?: { kind?: string, detail?: string }|null }} ev main's `problem` event */
+  _onProblem(ev) {
+    const p = ev.problem && typeof ev.problem === 'object' && typeof ev.problem.kind === 'string'
+      ? { kind: ev.problem.kind, detail: typeof ev.problem.detail === 'string' ? ev.problem.detail : '' }
+      : null;
+    this.claudeProblem = p;
+    this.claudeStatus = { ...this.claudeStatus, problem: p || undefined };
+    this.view.setClaudeStatus?.(this.claudeStatus);
+    this.view.setClaudeProblem?.(p);
+    this.emit('problem', p);
   }
 
   _onSession(ev) {
@@ -696,7 +716,8 @@ export class Controller extends Emitter {
     });
     for (const [id, p] of this.permissions) if (p.turnId === ev.turnId) this._dropPermission(id);
     if (ev.isError && !ev.interrupted && !t.silenced && !(t.errorShown && !result)) {
-      this._toast(result ? `Claude: ${clip(result, 240)}` : 'Claude could not finish this reply.', 'error');
+      // a login problem shows the sign-in card instead of a generic error toast
+      if (this.claudeProblem?.kind !== 'auth') this._toast(result ? `Claude: ${clip(result, 240)}` : 'Claude could not finish this reply.', 'error');
       this._flashError();
     }
     if (this.activeTurnId === ev.turnId) this.activeTurnId = null;

@@ -36,12 +36,29 @@ scripts/setup-voice.sh          # GPU
 scripts/setup-voice.sh --cpu    # CPU only
 ```
 
-After that, start the app. The tray menu's "Restart voice" picks up a fresh install.
+After that, start the app. The tray menu's "Restart voice" picks up a fresh install. **Quit the
+app before re-running the script** (tray > Quit): the running voice server locks files in the venv,
+and the script refuses to touch a venv that is in use rather than leaving it half-deleted.
+
+**Installed app.** When the script runs from an installed app's `resources` folder (it finds
+`resources\app.asar`), nothing goes into the install folder — the installer replaces it on every
+update, and Program Files is not writable. Instead (the app looks in the same places):
+
+| | Windows | Linux |
+|---|---|---|
+| venv | `%LOCALAPPDATA%\LawnmowerMan\voice\.venv` | `${XDG_DATA_HOME:-~/.local/share}/lawnmower-man/voice/.venv` |
+| models | `%LOCALAPPDATA%\LawnmowerMan\voice\models` | `…/lawnmower-man/voice/models` |
+| package copy used by pip | `…\voice\src` | `…/voice/src` |
+
+The portable Windows build unpacks to a temporary folder on every start, so it has no setup
+script of its own to run; it uses the local voice only if it was set up through the installer
+build (both look in `%LOCALAPPDATA%\LawnmowerMan\voice`). Otherwise it uses the browser voice.
 
 The setup script does the following:
 
 1. Finds Python 3.12 (`py -3.12`, `python3.12`, then `python`/`python3`; 3.11 is accepted).
-2. Creates `voice/.venv`.
+2. Creates `voice/.venv` (or the per-user venv above), and records the models folder in it
+   (`lawnmower-models-dir.txt`) when it is not the default, so the app's server finds the models.
 3. Installs the GPU wheels described in section 3.
 4. Removes the CPU `onnxruntime` wheel that dependencies drag in.
 5. Checks CUDA.
@@ -55,10 +72,10 @@ admin rights and no CUDA Toolkit, only the NVIDIA driver.
 |---|---|
 | `-Cpu` / `--cpu` | CPU-only install (no NVIDIA wheels) |
 | `-NoModels` / `--no-models` | Skip model downloads (they download on first use) |
-| `-SttModel NAME` / `--stt-model NAME` | Whisper model to pre-download (default `large-v3-turbo`) |
-| `-ModelsDir DIR` / `--models-dir DIR` | Model cache (default `voice/models`, or `$LAWNMOWER_VOICE_MODELS`) |
+| `-SttModel NAME` / `--stt-model NAME` | Whisper model to pre-download and smoke-test (default `large-v3-turbo`) |
+| `-ModelsDir DIR` / `--models-dir DIR` | Model cache (default `voice/models`, or `$LAWNMOWER_VOICE_MODELS`). Recorded in the venv: the app and later runs use it without the option. A trailing `\` is fine. |
 | `-Misaki` / `--misaki` | Install misaki, Kokoro's English G2P (pulls spaCy) |
-| `-TorchTts` / `--torch-tts` | Install the optional PyTorch Kokoro backend (torch cu128, about 3 GB) |
+| `-TorchTts` / `--torch-tts` | Install the optional PyTorch Kokoro backend (about 3 GB; Windows: torch cu128 from download.pytorch.org, Linux: the PyPI CUDA 13 build, so its cuDNN matches onnxruntime-gpu's) |
 | `-Python PATH` / `--python PATH` | Use this interpreter |
 | `-Recreate` / `--recreate` | Rebuild `voice/.venv` |
 | `-SkipSmoke` / `--skip-smoke` | Skip the final smoke test |
@@ -89,7 +106,8 @@ The models are about 2.0 GB:
 
 ```
 Electron main ── spawn ──► python -m lawnmower_voice --host 127.0.0.1 --port P --device auto
- (voice-sidecar.js)          --stt-model large-v3-turbo --tts-voice af_heart   (cwd voice/, env LAWNMOWER_VOICE_TOKEN)
+ (voice-sidecar.js)          --stt-model large-v3-turbo --stt-language en --tts-voice af_heart --preload
+                             (cwd voice/, env LAWNMOWER_VOICE_TOKEN)
         ▲  stdout: {"event":"status",...}* then {"event":"ready","port":P,"device":"cuda","gpu":"…"}
         │  GET /health polling
 Renderer ── fetch (Bearer token, CORS) ──► FastAPI (uvicorn, 127.0.0.1 only)
@@ -270,7 +288,7 @@ Recognition settings:
 
 ### 4.4 Changing voices and models
 
-* **Voice:** in Settings, choose Voice and set the ttsVoice id. Or pass `--tts-voice`, or send `voice` per request. `GET /voices` lists all 54:
+* **Voice:** *Settings → Voice → Voice* (saved as `voice.ttsVoice`; the list comes from `GET /voices`). Or pass `--tts-voice`, or send `voice` per request. `GET /voices` lists all 54:
 
   | Prefix | Language |
   |---|---|
@@ -286,13 +304,16 @@ Recognition settings:
 
   The espeak language is picked from the voice prefix. Japanese and Mandarin quality is better with misaki's language packs and the torch backend.
 * **Speed:** the `speed` parameter, 0.5 to 2.0 (clamped).
-* **Whisper model:** Settings, Voice, sttModel (passed as `--stt-model`). Any faster-whisper name works (`large-v3-turbo`, `turbo`, `large-v3`, `distil-large-v3.5`, `medium.en`, `small.en`, `base.en`, …), or a path to a CTranslate2 model folder. Pre-download with `voice/.venv/.../python -m lawnmower_voice.download --stt-model NAME`.
-* **Language:** settings `sttLanguage` → `/stt?language=`. Use `auto` to detect.
+* **Whisper model:** *Settings → Voice → Speech model* (`voice.sttModel`, passed as `--stt-model`; changing it restarts the server). Any faster-whisper name works (`large-v3-turbo`, `turbo`, `large-v3`, `distil-large-v3.5`, `medium.en`, `small.en`, `base.en`, …), or a path to a CTranslate2 model folder. Pre-download with `voice/.venv/.../python -m lawnmower_voice.download --stt-model NAME`.
+* **Language:** `voice.sttLanguage` in settings.json (no drawer control) → `/stt?language=` on every request, and `--stt-language` at
+  start-up (it picks the CPU-fallback model: `base.en` for English, multilingual `base` otherwise).
+  `auto` (or empty) detects the language; switching between English and another language restarts the server.
 * **Kokoro precision:** `--tts-model kokoro-v1.0.fp16.onnx` or `kokoro-v1.0.int8.onnx` (int8 is audibly worse). Files come from [model-files-v1.1](https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1); a mirror can be set with `LAWNMOWER_VOICE_KOKORO_URL`.
 * **Better English pronunciation:** `-Misaki` / `--misaki`, then `--tts-g2p misaki` (auto-used when installed).
 * **PyTorch backend:** `-TorchTts`, then `--tts-backend torch`.
-* **Extra server flags from the app:** `LAWNMOWER_VOICE_ARGS="--preload --stt-compute-type int8_float16"` (read by `voice-sidecar.js`).
-* **Model cache location:** `LAWNMOWER_VOICE_MODELS` or `--models-dir`. Whisper files live under `whisper/`, Kokoro files under `kokoro/`.
+* **Extra server flags from the app:** `LAWNMOWER_VOICE_ARGS="--stt-compute-type int8_float16"` (read by `voice-sidecar.js`). The app always passes `--preload`, so both engines load (and the RTX 50-series kernel JIT happens) right after start-up; until speech recognition reports `loaded`, the first `/stt` gets a 4-minute timeout instead of 60 s.
+* **Model cache location:** `LAWNMOWER_VOICE_MODELS` > the folder recorded in the venv by the setup script > the per-user folder (installed app) > `voice/models`. `--models-dir` overrides all. Whisper files live under `whisper/`, Kokoro files under `kokoro/`.
+* **Changing the voice** in Settings takes effect with the next sentence; it does not restart the server.
 
 ---
 
@@ -307,14 +328,17 @@ Start with `voice\.venv\Scripts\python -m lawnmower_voice.doctor --smoke --human
 | `nvidia-smi` missing, or `/health` `device.cuda=false` on the laptop | Install the current NVIDIA Studio or Game Ready driver from nvidia.com. On hybrid laptops, set *NVIDIA Control Panel → Manage 3D settings → Program settings* for `python.exe`/`Lawnmower Man.exe` to *High-performance NVIDIA processor*. |
 | Warning "needs an NVIDIA driver with CUDA 12.8+ (R570 or newer)" | RTX 50-series requires R570 or newer. Update the driver. |
 | TTS on CPU with "driver only supports CUDA 12.x" | onnxruntime-gpu ≥ 1.27 is a CUDA 13 build and needs **R580+**. Update the driver. Speech recognition still uses the GPU. |
-| `no kernel image is available for execution on the device` / `cudaErrorNoKernelImageForDevice` | A library built without sm_120. Check `doctor`: you need `ctranslate2 >= 4.7`, `onnxruntime-gpu >= 1.27` (CUDA 13 build) and, for the torch backend, torch from `https://download.pytorch.org/whl/cu128`. Re-run the setup script. The server already fell back to the next option. |
+| `no kernel image is available for execution on the device` / `cudaErrorNoKernelImageForDevice` | A library built without sm_120. Check `doctor`: you need `ctranslate2 >= 4.7`, `onnxruntime-gpu >= 1.27` (CUDA 13 build) and, for the torch backend, torch 2.7+ with CUDA 12.8 or newer (Windows: `https://download.pytorch.org/whl/cu128`; Linux: the PyPI build). Re-run the setup script. The server already fell back to the next option. |
 | `CUBLAS_STATUS_NOT_SUPPORTED` | CTranslate2 < 4.7 running int8 on Blackwell, or an old cuBLAS from `%CUDA_PATH%`. Re-run setup. The pip cuBLAS 12.9 is pre-loaded by full path. Forcing `--stt-compute-type float16` also avoids it. |
 | `Library cublas64_12.dll is not found or cannot be loaded` | `nvidia-cublas-cu12` is missing from the venv. Run `voice\.venv\Scripts\python -m pip install "nvidia-cublas-cu12>=12.8"`, or re-run setup. |
 | `cudnn64_9.dll` / `Could not locate cudnn_ops64_9.dll` (TTS) | `nvidia-cudnn-cu13` is missing. Run `pip install "onnxruntime-gpu[cuda,cudnn]>=1.27"`, or re-run setup. Do **not** install `nvidia-cudnn-cu12` in the same venv: it uses the same folder and DLL names. |
 | Warning: both `onnxruntime` and `onnxruntime-gpu` installed | Run `pip uninstall -y onnxruntime onnxruntime-gpu`, then `pip install --no-deps --force-reinstall "onnxruntime-gpu>=1.27"`. The setup script does this. |
-| First GPU request after install takes 30 to 90 s | One-time PTX JIT of CTranslate2 kernels for sm_120. It is cached in `%APPDATA%\NVIDIA\ComputeCache` (Windows) or `~/.nv/ComputeCache` (Linux). Use `--preload` (or `/warmup`) so it happens at start-up. |
+| First GPU request after install takes 30 to 90 s | One-time PTX JIT of CTranslate2 kernels for sm_120. It is cached in `%APPDATA%\NVIDIA\ComputeCache` (Windows) or `~/.nv/ComputeCache` (Linux); a driver update invalidates it. The app starts the server with `--preload`, so this happens at start-up (the mic tooltip says "still loading"); run the server with `--preload` (or call `/warmup`) when you start it by hand. |
 | `Microsoft Visual C++ Redistributable is not installed` or a DLL load failure | Run `winget install -e --id Microsoft.VCRedist.2015+.x64`. |
 | `espeak` / `Failed to load espeak shared library` | `espeakng-loader` ships espeak-ng. If your antivirus quarantined it, restore it, or install espeak-ng system-wide and set `PHONEMIZER_ESPEAK_LIBRARY` to `libespeak-ng.dll`/`.so`. |
+| User name with non-ASCII letters (`C:\Users\José`), or a very long venv path | espeak-ng opens its data folder with ANSI file APIs on Windows (and has a fixed path buffer), and exits the process when it cannot. The server hands it the 8.3 short path, or makes a one-time copy in `%PROGRAMDATA%\LawnmowerMan\espeak-ng-data` (Linux: `~/.cache/lawnmower-man`). `doctor` warns when this applies. |
+| `OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized` | CTranslate2 and torch (`-TorchTts`, or pulled in by `-Misaki`) each ship Intel OpenMP. The app and the server set `KMP_DUPLICATE_LIB_OK=TRUE` on Windows; set it yourself when you run the server by hand. |
+| `doctor` warns that `nvidia-cudnn-cu12` and `nvidia-cudnn-cu13` are both installed | They overwrite each other's files in `nvidia/cudnn` (typically after a cu12/cu128 torch build on Linux). Re-run the setup script with `--recreate`. |
 | `Python 3.12 was not found` | Run `winget install -e --id Python.Python.3.12`, or use python.org (tick *Add to PATH*). The Store alias does not count. Then re-run. |
 | `running scripts is disabled on this system` | Use `powershell -ExecutionPolicy Bypass -File scripts\setup-voice.ps1`, or `setup-voice.cmd`. Run it in a normal PowerShell window, not the ISE. |
 | Model download fails (proxy or offline) | Re-run the setup script later. The server reports `Whisper model '…' is not downloaded` with a 503 until then; Kokoro has the same behaviour. Copy model folders from another machine into `voice/models/whisper` (Hugging Face cache layout) and `voice/models/kokoro/`. `--no-download` forbids network access at runtime. |

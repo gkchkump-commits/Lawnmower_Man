@@ -2,7 +2,7 @@
 // Launch the REAL Electron app (electron/main.js) with Playwright's Electron driver and verify
 // the whole main-process stack end to end: window flags, app:// + CSP, the preload bridge
 // (window.lawnmower), settings IPC, a Claude turn streamed back to the renderer, voice status,
-// and a clean shutdown of child processes.
+// a complete renderer boot without console errors, and a clean shutdown of child processes.
 //
 //   node scripts/electron-e2e.mjs                 # fake Claude CLI (free, deterministic)
 //   node scripts/electron-e2e.mjs --live          # the real logged-in `claude` CLI (one tiny turn)
@@ -55,6 +55,10 @@ const check = (name, cond, detail) => {
 const app = await electron.launch({ executablePath, args, env, timeout: 60000 });
 try {
   const page = await app.firstWindow();
+  /** @type {string[]} */
+  const consoleErrors = [];
+  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
   await page.waitForLoadState('domcontentloaded');
   report.url = page.url();
   check('loads app://lawnmower/index.html', report.url === 'app://lawnmower/index.html', report.url);
@@ -79,8 +83,8 @@ try {
     };
   });
   report.bridge = shape;
-  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onHotkey', 'settings', 'voice', 'window'])
-    && JSON.stringify(shape.claude) === JSON.stringify(['interrupt', 'onEvent', 'reset', 'respondPermission', 'send', 'status']), shape);
+  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'voice', 'window'])
+    && JSON.stringify(shape.claude) === JSON.stringify(['cancel', 'interrupt', 'onEvent', 'reset', 'respondPermission', 'send', 'status']), shape);
   check('no Node/ipcRenderer in the page', !shape.nodeLeak && !shape.ipcLeak, shape);
 
   // CSP: inline script and remote fetch are blocked, the local voice range is allowed.
@@ -139,6 +143,16 @@ try {
   const voice = await page.evaluate(() => /** @type {any} */ (window).lawnmower.voice.info());
   report.voice = voice;
   check('voice status reported', ['disabled', 'starting', 'ready', 'error'].includes(voice.status), voice);
+
+  // The renderer booted completely (UI wired, hologram created) and logged no errors on the way.
+  const booted = await page.waitForFunction(() => /** @type {any} */ (window).__app?.ready && /** @type {any} */ (window).__app?.avatarReady, null, { timeout: 60000 })
+    .then(() => page.evaluate(() => /** @type {any} */ (window).__app.avatar?.renderer || 'none'), () => null);
+  report.renderer = booted;
+  check('renderer booted (UI + avatar)', !!booted, booted);
+  // (the CSP probe above logs its own, expected, violations)
+  const unexpected = consoleErrors.filter((t) => !/example\.com|Executing inline script violates/.test(t));
+  report.consoleErrors = unexpected;
+  check('no console errors', unexpected.length === 0, unexpected);
 
   if (screenshot) await page.screenshot({ path: screenshot });
   report.mainLog = fs.readFileSync(path.join(userData, 'logs', 'main.log'), 'utf8').split('\n').filter((l) => /\[gpu\]|\[claude\] using|ERROR/.test(l)).slice(0, 10);

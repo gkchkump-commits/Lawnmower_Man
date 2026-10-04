@@ -10,6 +10,7 @@
 //   --fake-crash-after <ms>    exit(9) <ms> after becoming ready
 //   --fake-ready-delay <ms>    wait before listening
 //   --fake-log-file <path>     append {argv, env} on start
+//   --fake-loading-ms <ms>     /health reports both engines as loading for <ms> after listening
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -41,6 +42,13 @@ const ttsVoice = opt('--tts-voice', 'af_heart');
 process.stdout.write('loading models (this line is not JSON)\n');
 process.stdout.write(`${JSON.stringify({ event: 'status', detail: 'Loading speech models…' })}\n`);
 
+const loadingMs = Number(opt('--fake-loading-ms', '0'));
+let listenedAt = 0;
+const engine = (extra) => {
+  const loading = loadingMs > 0 && Date.now() - listenedAt < loadingMs;
+  return loading ? { backend: 'fake', device, loaded: false, loading: true, ...extra } : { backend: 'fake', device, loaded: true, ...extra };
+};
+
 const server = http.createServer((req, res) => {
   const json = (status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -51,8 +59,8 @@ const server = http.createServer((req, res) => {
       ok: true,
       version: 'fake-1',
       device: { cuda: device !== 'cpu', name: device !== 'cpu' ? 'NVIDIA GeForce RTX 5070 Laptop GPU' : 'cpu', capability: '12.0', vramTotalMB: 8151, vramFreeMB: 7000 },
-      stt: { backend: 'fake', model: sttModel, device, loaded: true },
-      tts: { backend: 'fake', device, loaded: true, voices: [ttsVoice] },
+      stt: engine({ model: sttModel }),
+      tts: engine({ voices: [ttsVoice] }),
     });
   }
   if ((req.headers.authorization || '') !== `Bearer ${token}` || !token) return json(401, { error: 'unauthorized' });
@@ -62,6 +70,7 @@ const server = http.createServer((req, res) => {
 
 setTimeout(() => {
   server.listen(port, host, () => {
+    listenedAt = Date.now();
     const actual = /** @type {any} */ (server.address()).port;
     if (!has('--fake-no-ready')) process.stdout.write(`${JSON.stringify({ event: 'ready', port: actual })}\n`);
     const crashAfter = opt('--fake-crash-after');

@@ -21,6 +21,7 @@ import { clear, h, icon } from './dom.js';
  * @property {(v: number) => string} [format]
  * @property {string[]} [suggestions]
  * @property {string} [placeholder]
+ * @property {string} [emptyValue]  text fields: value saved when the field is cleared
  * @property {string} [action]
  * @property {string} [id]
  * @property {string} [variant]
@@ -35,6 +36,8 @@ export const SECTIONS = [
       { type: 'select', path: 'claude.mode', label: 'Mode', options: [['chat', 'Chat — conversation only'], ['assistant', 'Assistant — read files & web'], ['agent', 'Agent — full Claude Code (asks first)']] },
       { type: 'text', path: 'claude.model', label: 'Model', placeholder: 'CLI default', suggestions: ['sonnet', 'opus', 'haiku'] },
       { type: 'select', path: 'claude.effort', label: 'Effort', options: [['', 'Default'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['xhigh', 'Extra high'], ['max', 'Max']] },
+      { type: 'text', path: 'claude.workdir', label: 'Work folder', placeholder: 'Default: ~/LawnmowerMan' },
+      { type: 'text', path: 'claude.cliPath', label: 'CLI path', placeholder: 'Auto-detect' },
       { type: 'button', label: 'New conversation', action: 'newConversation' },
     ],
   },
@@ -58,6 +61,7 @@ export const SECTIONS = [
     title: 'Avatar',
     fields: [
       { type: 'segmented', path: 'avatar.renderer', label: 'Renderer', options: [['relief', 'Relief'], ['procedural', 'Procedural']] },
+      { type: 'text', path: 'avatar.pack', label: 'Pack', placeholder: 'reference', emptyValue: 'reference' },
       { type: 'segmented', path: 'avatar.quality', label: 'Quality', options: [['low', 'Low'], ['medium', 'Med'], ['high', 'High']] },
       { type: 'range', path: 'avatar.particles', label: 'Particles', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'range', path: 'avatar.bloom', label: 'Glow', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
@@ -299,7 +303,7 @@ export class SettingsDrawer {
       case 'text': {
         const listId = f.suggestions ? `${id}-list` : undefined;
         el = h('input', { id, type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: f.placeholder || '', list: listId,
-          onchange: () => commit(/** @type {HTMLInputElement} */ (el).value.trim()),
+          onchange: () => commit(/** @type {HTMLInputElement} */ (el).value.trim() || (f.emptyValue ?? '')),
           onkeydown: (e) => { if (e.key === 'Enter') /** @type {HTMLInputElement} */ (el).blur(); } });
         set = (v) => {
           if (document.activeElement !== el) /** @type {HTMLInputElement} */ (el).value = String(v ?? '');

@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { defaultHotkeys } from '../../../electron/settings.js';
 
 const m = vi.hoisted(() => {
   const handlers = new Map();
@@ -13,7 +14,8 @@ const m = vi.hoisted(() => {
   const windows = [];
   const display = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 };
   const userData = { dir: '' };
-  return { handlers, listeners, appEvents, windows, display, userData, protocolHandler: null, sessionHandlers: {} };
+  const cursor = { x: 0, y: 0 };
+  return { handlers, listeners, appEvents, windows, display, userData, cursor, protocolHandler: null, sessionHandlers: {} };
 });
 
 vi.mock('electron', () => {
@@ -48,12 +50,13 @@ vi.mock('electron', () => {
     once(ev, cb) { if (ev === 'ready-to-show') setTimeout(cb, 0); else this.events.set(ev, cb); return this; }
     on(ev, cb) { this.events.set(ev, cb); return this; }
     getBounds() { return { ...this.bounds }; }
+    getContentBounds() { return { ...this.bounds }; }
     isVisible() { return this.visible; }
     isDestroyed() { return false; }
     isMinimized() { return false; }
-    show() { this.visible = true; }
-    showInactive() { this.visible = true; }
-    hide() { this.visible = false; }
+    show() { this.visible = true; this.events.get('show')?.(); }
+    showInactive() { this.visible = true; this.events.get('show')?.(); }
+    hide() { this.visible = false; this.events.get('hide')?.(); }
     focus() {}
     restore() {}
     minimize() {}
@@ -89,7 +92,7 @@ vi.mock('electron', () => {
     },
     nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })) },
     protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn((scheme, h) => { m.protocolHandler = h; }) },
-    screen: { getPrimaryDisplay: () => m.display, getAllDisplays: () => [m.display], getDisplayMatching: () => m.display, on: vi.fn() },
+    screen: { getPrimaryDisplay: () => m.display, getAllDisplays: () => [m.display], getDisplayMatching: () => m.display, getCursorScreenPoint: () => ({ ...m.cursor }), on: vi.fn() },
     session: {
       defaultSession: {
         webRequest: { onHeadersReceived: vi.fn((h) => { m.sessionHandlers.headers = h; }) },
@@ -186,11 +189,11 @@ describe('electron/main.js wiring', () => {
   it('exposes exactly the IPC channels the preload uses', () => {
     const preload = fs.readFileSync(path.resolve('electron/preload.cjs'), 'utf8');
     const used = new Set([...preload.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
-    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey'];
+    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor'];
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
     expect([...m.handlers.keys()].sort()).toEqual([
-      'lm:app:info', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:send', 'lm:claude:status',
+      'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:send', 'lm:claude:status',
       'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:restart',
     ]);
   });
@@ -243,6 +246,43 @@ describe('electron/main.js wiring', () => {
     expect(win.setAlwaysOnTop).toHaveBeenLastCalledWith(false, 'floating');
   });
 
+  it('a renderer reload or crash makes a click-through window interactive again (F1)', async () => {
+    await invoke('lm:settings:set', { window: { clickThrough: true } });
+    const ignore = m.listeners.get('lm:window:set-ignore-mouse');
+    ignore(trusted(), true);
+    expect(win.setIgnoreMouseEvents).toHaveBeenLastCalledWith(true, { forward: true });
+    win.webContents.events.get('did-start-loading')(); // F5 / crash-recovery reload
+    expect(win.setIgnoreMouseEvents).toHaveBeenLastCalledWith(false, undefined);
+    ignore(trusted(), true);
+    win.webContents.events.get('render-process-gone')({}, { reason: 'clean-exit', exitCode: 0 });
+    expect(win.setIgnoreMouseEvents).toHaveBeenLastCalledWith(false, undefined);
+  });
+
+  it('sends the global cursor in window coordinates while visible, only when it moves', async () => {
+    const tracker = main.__test.state.cursor;
+    const cursorSent = () => win.webContents.sent.filter(([ch]) => ch === 'lm:cursor');
+    expect(tracker.running).toBe(true); // visible + avatar.followCursor
+    m.cursor.x = win.bounds.x + 50;
+    m.cursor.y = win.bounds.y - 300; // above the window: still reported
+    await waitForSent(([ch, p]) => ch === 'lm:cursor' && p.x === 50 && p.y === -300);
+    const n = cursorSent().length;
+    await new Promise((r) => setTimeout(r, 150)); // ~4 polls with an idle mouse
+    expect(cursorSent().length).toBe(n);
+    win.hide();
+    expect(tracker.running).toBe(false);
+    win.show();
+    expect(tracker.running).toBe(true);
+    await invoke('lm:settings:set', { avatar: { followCursor: false } });
+    expect(tracker.running).toBe(false);
+    await invoke('lm:settings:set', { avatar: { followCursor: true } });
+    expect(tracker.running).toBe(true);
+  });
+
+  it('cancel IPC validates the turn id', async () => {
+    await expect(invoke('lm:claude:cancel', '../x')).rejects.toThrow(/turn id/);
+    expect(await invoke('lm:claude:cancel', 'turn-1-unknown')).toEqual({ cancelled: false, interrupted: false });
+  });
+
   it('serves dist/ through app:// with CSP', async () => {
     expect(m.protocolHandler).toBeTypeOf('function');
     const res = await m.protocolHandler(new Request('app://lawnmower/index.html'));
@@ -276,7 +316,9 @@ describe('electron/main.js wiring', () => {
   it('builds the tray, registers hotkeys and reports app info', async () => {
     const tray = main.__test.state.tray;
     expect(tray.menu.template.some((i) => i.label === 'Quit Lawnmower Man')).toBe(true);
-    expect(boot.shortcuts.map((c) => c[0])).toEqual(['CommandOrControl+Alt+Space', 'CommandOrControl+Alt+C', 'CommandOrControl+Alt+X']);
+    // Windows avoids Ctrl+Alt (= AltGr) shortcuts; elsewhere the classic defaults
+    const hk = defaultHotkeys(process.platform);
+    expect(boot.shortcuts.map((c) => c[0])).toEqual([hk.toggleListen, hk.toggleChat, hk.stopSpeaking]);
     boot.shortcuts[0][1]();
     await waitForSent(([ch, p]) => ch === 'lm:hotkey' && p === 'toggleListen');
     const info = await invoke('lm:app:info');

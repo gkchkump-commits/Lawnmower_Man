@@ -47,11 +47,62 @@ export const DEFAULT_SETTINGS = Object.freeze({
     skipTaskbar: false, // extension to §4: hide the taskbar button (tray icon stays)
   },
   hotkeys: {
+    // Linux/macOS defaults; Windows uses WIN32_HOTKEYS (see defaultSettings()).
     toggleListen: 'CommandOrControl+Alt+Space',
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },
 });
+
+/**
+ * Windows global-shortcut defaults. Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key>
+ * global shortcut also fires for AltGr+<key> and swallows that character in every app
+ * (Polish ć = AltGr+C, ź = AltGr+X; Hungarian/Czech & and #; BÉPO _ = AltGr+Space).
+ */
+export const WIN32_HOTKEYS = Object.freeze({
+  toggleListen: 'Control+Shift+Space',
+  toggleChat: 'Control+Shift+F9',
+  stopSpeaking: 'Control+Shift+F10',
+});
+
+/** Version written into settings.json (top-level "version"); bump when a migration is added. */
+export const SETTINGS_VERSION = 2;
+
+/** @param {string} [platform] */
+export function defaultHotkeys(platform = process.platform) {
+  return { ...(platform === 'win32' ? WIN32_HOTKEYS : DEFAULT_SETTINGS.hotkeys) };
+}
+
+/**
+ * Complete default settings for a platform (only the hotkeys differ).
+ * @param {string} [platform]
+ * @returns {Settings}
+ */
+export function defaultSettings(platform = process.platform) {
+  const s = cloneSettings(DEFAULT_SETTINGS);
+  /** @type {any} */ (s).hotkeys = defaultHotkeys(platform);
+  return s;
+}
+
+/**
+ * Upgrade a parsed settings file written by an older version (mutates `raw`).
+ * v1 → v2 (Windows only): hotkeys that still hold the old Ctrl+Alt defaults move to the new
+ * Windows defaults; shortcuts the user chose are kept.
+ * @param {Record<string, any>} raw @param {number} fromVersion @param {string} platform
+ * @returns {string[]} what changed (for the log)
+ */
+export function migrateSettings(raw, fromVersion, platform) {
+  const notes = [];
+  if (fromVersion < 2 && platform === 'win32' && isPlainObject(raw.hotkeys)) {
+    for (const [name, legacy] of Object.entries(DEFAULT_SETTINGS.hotkeys)) {
+      if (raw.hotkeys[name] === legacy) {
+        raw.hotkeys[name] = /** @type {any} */ (WIN32_HOTKEYS)[name];
+        notes.push(`hotkeys.${name}: ${legacy} → ${raw.hotkeys[name]} (Ctrl+Alt shortcuts swallow AltGr characters on Windows)`);
+      }
+    }
+  }
+  return notes;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Accelerators (Electron global shortcut syntax)
@@ -264,10 +315,10 @@ export function applyPatch(base, patch) {
 
 /**
  * Validate a whole (possibly partial or stale) settings object against the defaults.
- * @param {unknown} input
+ * @param {unknown} input @param {string} [platform]
  */
-export function sanitizeSettings(input) {
-  return applyPatch(cloneSettings(DEFAULT_SETTINGS), input);
+export function sanitizeSettings(input, platform = process.platform) {
+  return applyPatch(defaultSettings(platform), input);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -278,7 +329,7 @@ export function sanitizeSettings(input) {
  */
 export class SettingsStore extends EventEmitter {
   /**
-   * @param {{ dir: string, fileName?: string, fs?: typeof nodeFs, log?: (level: string, msg: string) => void }} opts
+   * @param {{ dir: string, fileName?: string, fs?: typeof nodeFs, log?: (level: string, msg: string) => void, platform?: string }} opts
    */
   constructor(opts) {
     super();
@@ -287,8 +338,9 @@ export class SettingsStore extends EventEmitter {
     this.file = path.join(opts.dir, opts.fileName || 'settings.json');
     this._fs = opts.fs || nodeFs;
     this._log = opts.log || (() => {});
+    this.platform = opts.platform || process.platform;
     /** @type {Settings} */
-    this._settings = cloneSettings(DEFAULT_SETTINGS);
+    this._settings = defaultSettings(this.platform);
     this._loaded = false;
   }
 
@@ -324,11 +376,17 @@ export class SettingsStore extends EventEmitter {
         }
       }
     }
-    const { settings, warnings } = sanitizeSettings(parsed || {});
+    let fileVersion = SETTINGS_VERSION;
+    if (parsed !== null) {
+      fileVersion = typeof parsed.version === 'number' && Number.isFinite(parsed.version) ? parsed.version : 1;
+      delete parsed.version; // file metadata, not a setting
+      for (const note of migrateSettings(parsed, fileVersion, this.platform)) this._log('info', `[settings] migrated ${note}`);
+    }
+    const { settings, warnings } = sanitizeSettings(parsed || {}, this.platform);
     for (const w of warnings) this._warn(w);
     this._settings = settings;
     this._loaded = true;
-    if (parsed === null || warnings.length > 0) {
+    if (parsed === null || warnings.length > 0 || fileVersion < SETTINGS_VERSION) {
       try {
         this._write(settings);
       } catch (err) {
@@ -376,7 +434,7 @@ export class SettingsStore extends EventEmitter {
   _write(settings) {
     const fs = this._fs;
     fs.mkdirSync(this.dir, { recursive: true });
-    const data = `${JSON.stringify(settings, null, 2)}\n`;
+    const data = `${JSON.stringify({ version: SETTINGS_VERSION, ...settings }, null, 2)}\n`;
     const tmp = `${this.file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     const fd = fs.openSync(tmp, 'w');
     try {

@@ -34,6 +34,7 @@ from .config import (
     ENV_TOKEN,
     VoiceConfig,
     default_models_dir,
+    prepare_process_env,
 )
 
 log = logging.getLogger("lawnmower_voice")
@@ -54,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--stt-model", default=DEFAULT_STT_MODEL, help="faster-whisper model name or path (default large-v3-turbo)")
     g.add_argument("--stt-compute-type", default="auto", help="auto | float16 | int8_float16 | int8 | float32")
     g.add_argument("--stt-cpu-model", default=DEFAULT_STT_CPU_MODEL, help="model used on the CPU instead of a large one ('same' keeps --stt-model)")
-    g.add_argument("--stt-language", default="en", help="default language ('auto' = detect)")
+    g.add_argument("--stt-language", default="en", help="default language, also picks the CPU fallback model ('auto' = detect; the app passes the user's setting)")
     g.add_argument("--stt-beam-size", type=int, default=0, help="1-10 (0 = auto: 5 on GPU, 1 on CPU)")
     g.add_argument("--stt-cpu-threads", type=int, default=0)
     g.add_argument("--stt-initial-prompt", default="", help="context prompt, e.g. names the user says often")
@@ -231,6 +232,7 @@ def _configure_logging(level: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    prepare_process_env()  # before any engine library is imported (Windows OpenMP clash)
     args = build_parser().parse_args(argv)
     _configure_logging(args.log_level)
     proto = _protocol_stream()

@@ -261,7 +261,9 @@ body[data-chat="minimal"] #btn-chat {
   border-radius: var(--radius);
   background: var(--glass);
   border: 1px solid var(--line);
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(0, 0, 0, 0.35);
+  /* Outer shadows must stay inside the 8 px window margin: the window is transparent, so a
+     shadow cut off at the window edge shows as a grey band with hard edges on a light desktop. */
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(16px) saturate(1.2);
   overflow: hidden;
   user-select: none;
@@ -278,8 +280,8 @@ body[data-chat="minimal"] #btn-chat {
   background: linear-gradient(90deg, transparent, var(--cyan-soft), var(--amber-soft), transparent);
   opacity: 0.8;
 }
-body[data-state="listening"] .panel { box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), 0 0 22px rgba(127, 227, 255, 0.18); }
-body[data-state="speaking"] .panel { box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), 0 0 22px rgba(255, 184, 103, 0.13); }
+body[data-state="listening"] .panel { box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 8px rgba(127, 227, 255, 0.24); }
+body[data-state="speaking"] .panel { box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 8px rgba(255, 184, 103, 0.18); }
 
 /* minimal mode: the panel floats over the bottom of the avatar and hides when idle */
 body[data-chat="minimal"] .panel {
@@ -372,6 +374,8 @@ body[data-sleep="true"] .panel {
   color: var(--danger);
   margin-top: 2px;
 }
+.msg-user.cancelled .bubble { opacity: 0.55; }
+.msg-user.cancelled .msg-note { color: var(--muted); }
 .msg-claude {
   align-items: flex-start;
 }
@@ -853,7 +857,10 @@ body[data-state="speaking"] .status-dot { background: var(--gold); box-shadow: 0
   color: var(--muted);
   font-size: 10.5px;
 }
-.perm-desc { margin: 4px 0; color: var(--text-2); }
+.perm-desc { margin: 4px 0; color: var(--text-2); overflow-wrap: anywhere; }
+.perm-desc .k { color: var(--muted); }
+.perm-showall { margin-top: 4px; padding: 2px 10px; font-size: 11px; }
+.perm-card.truncated .perm-allow:disabled { cursor: not-allowed; }
 .perm-fields {
   display: grid;
   grid-template-columns: auto 1fr;

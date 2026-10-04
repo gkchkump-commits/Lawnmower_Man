@@ -362,6 +362,10 @@ export function parseInline(src, depth = 0) {
   return out;
 }
 
+/** Longest link label / URL considered (longer ones are shown as plain text). */
+const LINK_MAX_LABEL = 1000;
+const LINK_MAX_URL = 2048;
+
 /**
  * [label](url "title") starting at s[i] === '['.
  * @param {string} s @param {number} i
@@ -370,7 +374,9 @@ export function parseInline(src, depth = 0) {
 function parseLinkAt(s, i) {
   let depth = 0;
   let j = i;
-  for (; j < s.length; j++) {
+  // bounded like emphasis: an unclosed "[" must not scan the rest of the text for every "["
+  const labelEnd = Math.min(s.length, i + LINK_MAX_LABEL);
+  for (; j < labelEnd; j++) {
     const ch = s[j];
     if (ch === '\\') { j++; continue; }
     if (ch === '[') depth++;
@@ -379,25 +385,34 @@ function parseLinkAt(s, i) {
       if (depth === 0) break;
     } else if (ch === '\n' && s[j + 1] === '\n') return null;
   }
-  if (j >= s.length || s[j + 1] !== '(') return null;
+  if (j >= labelEnd || s[j + 1] !== '(') return null;
   const label = s.slice(i + 1, j);
-  let k = j + 2;
+  const start = j + 2;
+  let k = start;
   let parens = 1;
-  let url = '';
-  while (k < s.length && parens > 0) {
+  const urlEnd = Math.min(s.length, k + LINK_MAX_URL);
+  while (k < urlEnd && parens > 0) {
     const ch = s[k];
     if (ch === '(') parens++;
     else if (ch === ')') {
       parens--;
       if (parens === 0) break;
     } else if (ch === '\n') return null;
-    url += ch;
     k++;
   }
   if (parens !== 0) return null;
-  url = url.trim().replace(/\s+("[^"]*"|'[^']*')$/, '').replace(/^<(.*)>$/, '$1');
+  const url = s.slice(start, k).trim().replace(/\s+("[^"]*"|'[^']*')$/, '').replace(/^<(.*)>$/, '$1');
   return { label, url, end: k + 1 };
 }
+
+/**
+ * Bounds for the closer search of one emphasis opener. Without them, text with many unmatched
+ * markers ("*a *a *a …", C pointers, `*args`) costs O(n²) per opener — O(n³) for a paragraph,
+ * re-parsed on every streamed frame — and freezes the window. An opener whose closer is further
+ * away than this is shown literally (real emphasis spans are short).
+ */
+const EMPH_MAX_SPAN = 3000;
+const EMPH_MAX_CANDIDATES = 64;
 
 /**
  * ** __ * _ ~~ emphasis starting at s[i].
@@ -406,10 +421,14 @@ function parseLinkAt(s, i) {
  */
 function parseEmphasis(s, i, depth) {
   const c = s[i];
+  // emphasis never crosses a paragraph break, and the search is bounded (see EMPH_MAX_*)
+  const windowEnd = Math.min(s.length, i + EMPH_MAX_SPAN);
+  const para = s.slice(i + 1, windowEnd).indexOf('\n\n');
+  const limit = para < 0 ? windowEnd : i + 1 + para;
   if ((c === '*' || c === '_') && s[i + 1] === c && s[i + 2] === c) {
     // ***strong emphasis***
     const k = s.indexOf(c + c + c, i + 3);
-    if (k > i + 3 && !/\s/.test(s[i + 3]) && !/\s/.test(s[k - 1])) {
+    if (k > i + 3 && k < limit && !/\s/.test(s[i + 3]) && !/\s/.test(s[k - 1])) {
       const inner = parseInline(s.slice(i + 3, k), depth + 1);
       return { node: { type: 'em', children: [{ type: 'strong', children: inner }] }, end: k + 3 };
     }
@@ -422,10 +441,9 @@ function parseEmphasis(s, i, depth) {
   // intraword underscores are not emphasis (snake_case)
   if (c === '_' && i > 0 && /[\p{L}\p{N}]/u.test(s[i - 1])) return null;
   let j = i + marker.length;
-  while (j < s.length) {
+  for (let tries = 0; j < limit && tries < EMPH_MAX_CANDIDATES; tries++) {
     const k = s.indexOf(marker, j);
-    if (k < 0) return null;
-    if (s.slice(i + marker.length, k).includes('\n\n')) return null;
+    if (k < 0 || k >= limit) return null;
     const before = s[k - 1];
     const next = s[k + marker.length];
     const triple = !double && s[k + 1] === c; // "*a**" ambiguity: skip the double

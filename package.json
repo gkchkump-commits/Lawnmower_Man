@@ -95,6 +95,7 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
+      "selectPerMachineByDefault": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },

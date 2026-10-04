@@ -34,8 +34,15 @@ import {
 import { resolveClaudeCli, expandUserPath } from './claude-path.js';
 import { buildPersona, personaFileName } from './persona.js';
 
-/** Tools enabled (and pre-approved) in assistant mode: read-only file access + web. */
+/** Tools enabled in assistant mode: read-only file access + web. */
 export const ASSISTANT_TOOLS = 'Read,Glob,Grep,WebSearch,WebFetch';
+/**
+ * Tools pre-approved in assistant mode. A bare tool name allows every input, so Read/Glob/Grep
+ * are deliberately NOT listed: the CLI then allows reads inside the working folder by itself and
+ * asks (an approval card) for anything outside it. WebFetch always asks, because a fetch URL can
+ * carry data out (prompt injection); only WebSearch runs without a card.
+ */
+export const ASSISTANT_ALLOWED_TOOLS = 'WebSearch';
 /** Longest single user turn we accept (characters). */
 export const MAX_TURN_CHARS = 100_000;
 
@@ -86,9 +93,13 @@ export function buildClaudeArgs(o) {
     args.push('--resume', o.resumeSessionId);
   }
   if (!o.personaFile) throw new Error('personaFile is required');
+  // Only the user's own settings (~/.claude/settings.json). Project/local settings in the working
+  // folder are NOT loaded: `-p` mode shows no workspace-trust prompt, so a cloned repository's
+  // .claude/settings.json hooks would otherwise run commands with no approval at all.
+  args.push('--setting-sources', 'user');
   switch (o.mode) {
     case 'assistant':
-      args.push('--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_TOOLS, '--append-system-prompt-file', o.personaFile);
+      args.push('--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_ALLOWED_TOOLS, '--append-system-prompt-file', o.personaFile);
       break;
     case 'agent':
       args.push('--append-system-prompt-file', o.personaFile);
@@ -241,7 +252,7 @@ export class ClaudeSession extends EventEmitter {
     this._queue = [];
     /** @type {Turn|null} */
     this._active = null;
-    /** @type {Map<string, { input: Record<string, any>, toolName: string, turnId: string|null, info: any }>} */
+    /** @type {Map<string, { input: Record<string, any>, toolName: string, turnId: string|null, info: any, description?: string }>} */
     this._permissions = new Map();
     /** @type {Map<string, { resolve: (v: any) => void, reject: (e: Error) => void, timer: NodeJS.Timeout|null, info: any, subtype: string }>} */
     this._controls = new Map();
@@ -328,7 +339,11 @@ export class ClaudeSession extends EventEmitter {
     if (this._starting) await this._starting.catch(() => {});
     const info = this._procInfo;
     this._detach(info);
-    if (this._active) this._endTurn({ result: '', isError: true });
+    // The user asked for this (tray / New conversation): an interruption, not a failure.
+    if (this._active) {
+      this._active.interrupted = true;
+      this._endTurn({ result: '', isError: true });
+    }
     this._failQueued('The conversation was reset before this message was sent.');
     this._permissions.clear();
     this._setSessionId('');
@@ -369,8 +384,44 @@ export class ClaudeSession extends EventEmitter {
     this._writePermissionResponse(requestId, response);
   }
 
-  /** @returns {{ status: string, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string, detail?: string, mode: string }} */
+  /**
+   * Drop a turn that has not started yet (it never reaches the CLI) and emit `turn_cancelled`.
+   * A turn that is already running is interrupted instead. Unknown/finished ids are ignored.
+   * @param {string} turnId
+   * @returns {Promise<{ cancelled: boolean, interrupted: boolean }>}
+   */
+  async cancel(turnId) {
+    if (typeof turnId !== 'string' || !turnId) throw new TypeError('turnId must be a string');
+    const i = this._queue.findIndex((q) => q.turnId === turnId);
+    if (i >= 0) {
+      this._queue.splice(i, 1);
+      this._emit({ type: 'turn_cancelled', turnId });
+      this._pump(); // idle again → status 'ready'
+      return { cancelled: true, interrupted: false };
+    }
+    if (this._active && this._active.turnId === turnId) {
+      await this.interrupt();
+      return { cancelled: false, interrupted: true };
+    }
+    return { cancelled: false, interrupted: false };
+  }
+
+  /**
+   * @returns {{ status: string, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string, detail?: string, mode: string,
+   *   activeTurnId?: string, queuedTurnIds: string[],
+   *   pendingPermissions: Array<{ requestId: string, turnId: string|null, toolName: string, input: Record<string, any>, description?: string }> }}
+   * `activeTurnId`, `queuedTurnIds` and `pendingPermissions` let a reloaded renderer pick up
+   * where the previous one left off (events are not replayed).
+   */
   status() {
+    const pendingPermissions = [];
+    for (const [requestId, p] of this._permissions) {
+      if (p.info !== this._procInfo) continue;
+      /** @type {{ requestId: string, turnId: string|null, toolName: string, input: Record<string, any>, description?: string }} */
+      const entry = { requestId, turnId: p.turnId, toolName: p.toolName, input: p.input };
+      if (p.description) entry.description = p.description;
+      pendingPermissions.push(entry);
+    }
     return {
       status: this._status,
       sessionId: this._sessionId || undefined,
@@ -381,6 +432,9 @@ export class ClaudeSession extends EventEmitter {
       cliVersion: this._cli?.version,
       detail: this._statusDetail || undefined,
       mode: this._safeSettings().mode,
+      activeTurnId: this._active ? this._active.turnId : undefined,
+      queuedTurnIds: this._queue.map((q) => q.turnId),
+      pendingPermissions,
     };
   }
 
@@ -410,7 +464,10 @@ export class ClaudeSession extends EventEmitter {
     }
     const info = this._procInfo;
     this._detach(info);
-    if (this._active) this._endTurn({ result: '', isError: true });
+    if (this._active) {
+      this._active.interrupted = true;
+      this._endTurn({ result: '', isError: true });
+    }
     this._failQueued('Claude was stopped before this message was sent.');
     this._permissions.clear();
     if (info) await this._killInfo(info, { graceful: true });
@@ -873,10 +930,10 @@ export class ClaudeSession extends EventEmitter {
       this._writePermissionResponse(id, { behavior: 'deny', message: 'The user interrupted this turn.' });
       return;
     }
-    this._permissions.set(id, { input, toolName, turnId: t ? t.turnId : null, info });
+    const description = typeof req.description === 'string' && req.description ? req.description : typeof req.title === 'string' ? req.title : '';
+    this._permissions.set(id, { input, toolName, turnId: t ? t.turnId : null, info, description });
     /** @type {Record<string, any>} */
     const ev = { type: 'permission_request', turnId: t ? t.turnId : null, requestId: id, toolName, input };
-    const description = typeof req.description === 'string' && req.description ? req.description : typeof req.title === 'string' ? req.title : '';
     if (description) ev.description = description;
     this._emit(ev);
   }

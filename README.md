@@ -2,6 +2,10 @@
 
 A holographic desktop avatar for Claude. A glowing wireframe head floats on your desktop, listens, thinks and talks back, with lip-sync, blinks and eyes that follow your cursor.
 
+<p align="center"><img src="docs/screenshots/hero.jpg" width="390" alt="The avatar and its chat panel on a dark desktop, speaking a reply that is still streaming in"></p>
+
+<p align="center"><em>The real app (relief renderer) mid-reply, captured from Electron with its transparent window composited over a dark desktop.</em></p>
+
 * **Brain:** your locally installed [Claude CLI](https://docs.claude.com/en/docs/claude-code). The app runs one persistent `claude -p` session over stream-json and uses your existing login; no API key is needed.
 * **Face:** a real-time WebGL hologram on your GPU, built from the frames of the reference video (`docs/reference/`).
 * **Voice:** runs locally on an NVIDIA GPU. Speech to text is [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`large-v3-turbo`); text to speech is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Both are tuned for an **RTX 5070 Laptop GPU (8 GB, Blackwell)** and fall back to the CPU automatically.
@@ -55,24 +59,26 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | Type + **Enter** | send a message (Shift+Enter: new line, ↑: recall) |
 | hold **Space** (outside a text field) | push-to-talk; release to send |
 | mic button | click: listen until you stop talking; hold: push-to-talk |
-| **Ctrl+Alt+Space** (global) | talk / interrupt |
-| **Ctrl+Alt+X** (global) | stop speaking |
-| **Ctrl+Alt+C** (global) | show/hide the chat panel |
+| **Ctrl+Shift+Space** (global; Linux/macOS: Ctrl+Alt+Space) | talk / interrupt |
+| **Ctrl+Shift+F10** (global; Linux/macOS: Ctrl+Alt+X) | stop speaking |
+| **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
 | drag the head | move the window |
 | tray icon | show/hide, always on top, click-through, Claude mode, new conversation, restart voice, logs, quit |
 
-Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath.
+Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
+
+Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
 
 ### Claude modes
 
 | Mode | What Claude can do | CLI flags |
 |---|---|---|
 | **chat** (default) | talk only; no tools, no MCP servers | `--tools "" --system-prompt-file <voice persona>` |
-| **assistant** | read files in the work folder, search and fetch the web | `--tools Read,Glob,Grep,WebSearch,WebFetch` |
+| **assistant** | read files in the work folder, search and fetch the web | `--tools Read,Glob,Grep,WebSearch,WebFetch --allowedTools WebSearch`: reads outside the work folder and every web fetch show an Allow/Deny card |
 | **agent** | the full Claude Code tool set | default tools; **every** permission prompt appears as an Allow/Deny card, and the avatar asks out loud |
 
-Nothing is ever approved automatically. Claude works in `~/LawnmowerMan` by default; you can change this under *Settings → Claude → Work folder*. The conversation resumes across restarts (`--resume`); **New conversation** in the tray or panel starts fresh.
+Nothing is ever approved automatically (in assistant mode only web *searches* and reads inside the work folder run without a card). Approval cards show the exact command or content — shortened requests keep Allow disabled until you open *Show all* — and ignore clicks for a moment after they appear, so a click aimed at the window underneath cannot approve anything. Only your own Claude settings (`~/.claude/settings.json`) are loaded: a work folder's `.claude/settings.json` (hooks, permission rules) is ignored, because `claude -p` shows no trust prompt. Claude works in `~/LawnmowerMan` by default; you can change this under *Settings → Claude → Work folder*. The conversation resumes across restarts (`--resume`); **New conversation** in the tray or panel starts fresh.
 
 ## Renderers
 
@@ -81,6 +87,10 @@ Nothing is ever approved automatically. Claude works in `~/LawnmowerMan` by defa
 
 Both share a GPU particle aura (cyan and amber motes, cyan wisps) and bloom, and both output premultiplied alpha, so black is fully transparent on the desktop.
 
+![Both renderers over a light desktop, a wallpaper and a dark checkerboard](docs/screenshots/transparency.jpg)
+
+More comparisons with the reference video: [expressions](docs/screenshots/compare_expressions.jpg) (blink, speaking, teeth), [animation and states](docs/screenshots/animation_strip.jpg), [head motion](docs/screenshots/head_motion.jpg).
+
 ### Make an avatar from your own video
 
 ```bash
@@ -88,7 +98,7 @@ pip install -r tools/bake/requirements.txt
 python tools/bake/bake_avatar.py --video my_head.mp4 --out public/assets/avatars/mine
 ```
 
-Then set *Settings → Avatar → Pack* to `mine` (it maps to `settings.avatar.pack`). The video should show a front-facing face on a dark background with at least one blink; [tools/bake/README.md](tools/bake/README.md) has the details.
+Then set *Settings → Avatar → Pack* to `mine` (it maps to `settings.avatar.pack`). `npm run dev` serves the new pack right away; with `npm start`, restart it so the build copies the pack into `dist/`. The video should show a front-facing face on a dark background with at least one blink; [tools/bake/README.md](tools/bake/README.md) has the details.
 
 ## Development
 
@@ -99,6 +109,7 @@ npm run test:e2e       # Playwright: the app in Chromium with SwiftShader WebGL 
 npm run test:voice     # pytest for the voice server (engines mocked)
 npm run lint
 npm run dist           # Windows installer + portable exe (electron-builder) into release/
+                       # (the portable exe has local voice only if the installer build set it up; see docs/VOICE.md)
 ```
 
 Without Electron, open the app in a browser: `npm run build && npm run preview`, then go to `http://127.0.0.1:4173/index.html?mock=1`. The avatar harness with sliders for every rig control is at `/dev/avatar.html` (see [docs/RENDERER.md](docs/RENDERER.md)).

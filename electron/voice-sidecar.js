@@ -1,12 +1,16 @@
 // VoiceSidecar: starts and supervises the local Python voice server (contract §6).
 //
-//  python -m lawnmower_voice --host 127.0.0.1 --port P --device D --stt-model M --tts-voice V
+//  python -m lawnmower_voice --host 127.0.0.1 --port P --device D --stt-model M
+//         --stt-language L --tts-voice V --preload
 //  (cwd = voice/, env PYTHONUNBUFFERED=1, LAWNMOWER_VOICE_TOKEN=<random token>)
 //
 // The bearer token travels in the environment rather than on the command line, so other
 // users on the machine cannot read it from the process list (the contract allows both).
 // Lifecycle: locate python → free port → spawn → wait for the stdout line
 // {"event":"ready","port":P} → poll GET /health → status 'ready' (url + token for the renderer).
+// --preload makes the server load both engines right after 'ready' (the first Whisper GPU run
+// on RTX 50-series JIT-compiles kernels, which must not happen inside the user's first /stt);
+// /health is polled every couple of seconds until loading settles, so the UI sees it finish.
 // Crashes restart with exponential backoff (bounded); stop() kills the process tree.
 //
 // Status values (window.lawnmower.voice.info): 'disabled'|'starting'|'ready'|'error'|'stopped'.
@@ -81,6 +85,80 @@ export function locatePython(o) {
 }
 
 /**
+ * Per-user folder for the voice venv (and, through the setup script's pointer file, the models)
+ * of a PACKAGED app. The install directory is wiped by every update/uninstall (NSIS) or is a
+ * read-only/temporary mount (AppImage, portable), so nothing large may live there.
+ *   win32  %LOCALAPPDATA%\LawnmowerMan\voice
+ *   darwin ~/Library/Application Support/LawnmowerMan/voice
+ *   other  ${XDG_DATA_HOME:-~/.local/share}/lawnmower-man/voice
+ * Must match scripts/setup-voice.ps1 / setup-voice.sh.
+ * @param {{ platform?: string, env?: Record<string, string|undefined>, homedir?: string }} [o]
+ */
+export function packagedVoiceHome(o = {}) {
+  const platform = o.platform || process.platform;
+  const env = o.env || process.env;
+  const home = o.homedir || os.homedir();
+  if (platform === 'win32') {
+    const base = env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local');
+    return path.win32.join(base, 'LawnmowerMan', 'voice');
+  }
+  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'LawnmowerMan', 'voice');
+  const base = env.XDG_DATA_HOME || path.posix.join(home, '.local', 'share');
+  return path.posix.join(base, 'lawnmower-man', 'voice');
+}
+
+/**
+ * Where to look for the voice venv. Packaged: the per-user voice home first (setup-voice.* puts
+ * it there), then a legacy venv inside the resources folder. Unpackaged (git clone): voice/.venv.
+ * @param {{ packaged: boolean, voiceDir: string, platform?: string, env?: Record<string, string|undefined>, homedir?: string }} o
+ */
+export function voiceVenvDirs(o) {
+  const P = (o.platform || process.platform) === 'win32' ? path.win32 : path.posix;
+  const local = P.join(o.voiceDir, '.venv');
+  return o.packaged ? [P.join(packagedVoiceHome(o), '.venv'), local] : [local];
+}
+
+/**
+ * The value for --stt-language: the user's language, 'auto' for detection ('' means detect too).
+ * @param {unknown} lang
+ */
+export function sttLanguageArg(lang) {
+  const s = typeof lang === 'string' ? lang.trim().toLowerCase() : 'en';
+  if (!s || s === 'auto' || s === 'detect') return 'auto';
+  return /^[a-z]{2,3}([-_][a-z0-9]{2,8})?$/.test(s) ? s : 'en';
+}
+
+/**
+ * Coarse language class for the restart key: the server picks its CPU-fallback Whisper model
+ * from the language (English-only `base.en` vs multilingual `base`), so only switching between
+ * English and another language needs a restart; everything else is sent per request.
+ * @param {string} langArg  result of sttLanguageArg()
+ */
+function languageClass(langArg) {
+  return langArg === 'en' || langArg.startsWith('en-') || langArg.startsWith('en_') ? 'en' : 'multi';
+}
+
+/**
+ * Environment additions for the server process.
+ * @param {{ platform: string, env: Record<string, string|undefined>, token: string }} o
+ * @returns {Record<string, string>}
+ */
+export function voiceServerEnv(o) {
+  /** @type {Record<string, string>} */
+  const extra = {
+    PYTHONUNBUFFERED: '1',
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+    LAWNMOWER_VOICE_TOKEN: o.token,
+  };
+  // Windows: CTranslate2 and torch each ship their own Intel OpenMP (libiomp5md.dll); a second
+  // copy initialising in the same process aborts it ("OMP: Error #15") unless this is set. The
+  // server sets it as well; setting it here also covers anything imported before that.
+  if (o.platform === 'win32' && !o.env.KMP_DUPLICATE_LIB_OK) extra.KMP_DUPLICATE_LIB_OK = 'TRUE';
+  return extra;
+}
+
+/**
  * Ask the OS for a free TCP port on 127.0.0.1.
  * @returns {Promise<number>}
  */
@@ -122,6 +200,8 @@ export function parseArgString(s) {
  * @property {NodeJS.ProcessEnv} [env]
  * @property {number} [readyTimeoutMs]         default 180000 (first CUDA import can be slow)
  * @property {number} [healthIntervalMs]       default 30000
+ * @property {number} [loadingPollMs]          /health interval while an engine is loading (default 2000)
+ * @property {boolean} [preload]               pass --preload (default true)
  * @property {{ baseDelayMs?: number, maxDelayMs?: number, maxAttempts?: number, stableMs?: number }} [restart]
  * @property {typeof fetch} [fetchImpl]
  * @property {(level: 'debug'|'info'|'warn'|'error', msg: string) => void} [log]
@@ -143,6 +223,8 @@ export class VoiceSidecar extends EventEmitter {
     this._platform = opts.platform || process.platform;
     this._readyTimeoutMs = opts.readyTimeoutMs ?? 180000;
     this._healthIntervalMs = opts.healthIntervalMs ?? 30000;
+    this._loadingPollMs = opts.loadingPollMs ?? 2000;
+    this._preload = opts.preload !== false;
     this._restartCfg = {
       baseDelayMs: opts.restart?.baseDelayMs ?? 2000,
       maxDelayMs: opts.restart?.maxDelayMs ?? 30000,
@@ -235,14 +317,20 @@ export class VoiceSidecar extends EventEmitter {
       enabled: s.enabled !== false,
       pythonPath: typeof s.pythonPath === 'string' ? s.pythonPath : '',
       sttModel: typeof s.sttModel === 'string' && s.sttModel ? s.sttModel : 'large-v3-turbo',
+      sttLanguage: sttLanguageArg(s.sttLanguage ?? 'en'),
       ttsVoice: typeof s.ttsVoice === 'string' && s.ttsVoice ? s.ttsVoice : 'af_heart',
       device: s.device === 'cuda' || s.device === 'cpu' ? s.device : 'auto',
     };
   }
 
-  /** @param {ReturnType<VoiceSidecar['_safeSettings']>} s */
+  /**
+   * Fields that need a new server process. ttsVoice is NOT one: the renderer sends the voice
+   * with every /tts request (--tts-voice is only the server's default), so changing it must not
+   * drop the loaded models. The language only matters as English vs. other (CPU model choice).
+   * @param {ReturnType<VoiceSidecar['_safeSettings']>} s
+   */
   _keyFor(s) {
-    return JSON.stringify([s.enabled, s.pythonPath, s.sttModel, s.ttsVoice, s.device]);
+    return JSON.stringify([s.enabled, s.pythonPath, s.sttModel, languageClass(s.sttLanguage), s.device]);
   }
 
   async _start() {
@@ -291,7 +379,11 @@ export class VoiceSidecar extends EventEmitter {
     const port = await findFreePort();
     if (this._stopped || this._proc) return;
     const token = randomBytes(24).toString('hex');
-    args.push('--host', '127.0.0.1', '--port', String(port), '--device', s.device, '--stt-model', s.sttModel, '--tts-voice', s.ttsVoice);
+    args.push(
+      '--host', '127.0.0.1', '--port', String(port), '--device', s.device,
+      '--stt-model', s.sttModel, '--stt-language', s.sttLanguage, '--tts-voice', s.ttsVoice,
+    );
+    if (this._preload && !this._extraArgs.includes('--preload')) args.push('--preload');
     if (this._tokenOnCommandLine) args.push('--token', token);
     args.push(...this._extraArgs);
 
@@ -301,12 +393,7 @@ export class VoiceSidecar extends EventEmitter {
     try {
       ({ child } = spawnPortable(file, args, {
         cwd: this._voiceDir,
-        env: cleanChildEnv(this._env, {
-          PYTHONUNBUFFERED: '1',
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-          LAWNMOWER_VOICE_TOKEN: token,
-        }),
+        env: cleanChildEnv(this._env, voiceServerEnv({ platform: this._platform, env: this._env, token })),
         stdio: ['ignore', 'pipe', 'pipe'],
         platform: this._platform,
         windowsHide: true,
@@ -411,34 +498,55 @@ export class VoiceSidecar extends EventEmitter {
     return body;
   }
 
-  /** @param {any} proc @param {string} url */
+  /**
+   * Periodic /health: every `healthIntervalMs`, or every `loadingPollMs` while the engines are
+   * still loading (so the renderer learns quickly when speech recognition becomes usable).
+   * A server that stops answering is killed (→ restart) — but only after a generous silence,
+   * since a model load can keep it busy for a while (first RTX 50-series run: kernel JIT).
+   * @param {any} proc @param {string} url
+   */
   _startHealthTimer(proc, url) {
     this._stopHealthTimer();
-    if (!this._healthIntervalMs) return;
     let misses = 0;
-    this._healthTimer = setInterval(async () => {
-      if (proc !== this._proc || proc.exited) return this._stopHealthTimer();
+    let lastOk = Date.now();
+    const schedule = () => {
+      const settling = this._loadingPollMs > 0 && healthSettling(this._info.health, this._preload);
+      const ms = settling ? this._loadingPollMs : this._healthIntervalMs;
+      if (!ms) return;
+      this._healthTimer = setTimeout(tick, ms);
+      this._healthTimer.unref?.();
+    };
+    const tick = async () => {
+      this._healthTimer = null;
+      if (proc !== this._proc || proc.exited) return;
+      const settling = healthSettling(this._info.health, this._preload);
       try {
         const health = await this._getHealth(url);
+        if (proc !== this._proc || proc.exited) return;
         misses = 0;
+        lastOk = Date.now();
         const prev = this._info.health;
         const changed = !prev || prev.ok !== health.ok || JSON.stringify(prev.stt) !== JSON.stringify(health.stt) || JSON.stringify(prev.tts) !== JSON.stringify(health.tts);
         this._info = { ...this._info, health, detail: describeHealth(health) };
         if (changed || this._info.status !== 'ready') this._set({ ...this._info, status: 'ready' });
       } catch (err) {
+        if (proc !== this._proc || proc.exited) return;
         misses++;
         this._log('warn', `[voice] health check failed (${misses}): ${/** @type {Error} */ (err).message}`);
-        if (misses >= 3) {
+        const graceMs = settling ? 300000 : Math.max(3 * this._healthIntervalMs, 90000);
+        if (misses >= 3 && Date.now() - lastOk >= graceMs) {
           proc.stderr.push('(stopped answering /health)\n');
           killProcessTree(proc.child, { platform: this._platform });
+          return;
         }
       }
-    }, this._healthIntervalMs);
-    this._healthTimer.unref?.();
+      schedule();
+    };
+    schedule();
   }
 
   _stopHealthTimer() {
-    if (this._healthTimer) clearInterval(this._healthTimer);
+    if (this._healthTimer) clearTimeout(this._healthTimer);
     this._healthTimer = null;
   }
 
@@ -507,6 +615,22 @@ export class VoiceSidecar extends EventEmitter {
 }
 
 /**
+ * Are the engines still on their way to being usable? True while either reports `loading`, or,
+ * when the server was started with --preload, while either is neither loaded nor failed.
+ * @param {Record<string, any>|undefined|null} h  /health payload
+ * @param {boolean} preload
+ */
+export function healthSettling(h, preload) {
+  if (!h || typeof h !== 'object') return false;
+  return ['stt', 'tts'].some((k) => {
+    const e = h[k];
+    if (!e || typeof e !== 'object') return false;
+    if (e.loading) return true;
+    return preload && !e.loaded && !e.error;
+  });
+}
+
+/**
  * One-line human description of a /health payload.
  * @param {Record<string, any>} h
  */
@@ -517,6 +641,7 @@ export function describeHealth(h) {
   const part = (/** @type {any} */ x, /** @type {string} */ label) => {
     if (!x || typeof x !== 'object') return '';
     if (x.error) return `${label} error: ${String(x.error).slice(0, 120)}`;
+    if (x.loading) return `${label} loading…`;
     return `${label} ${x.loaded ? 'loaded' : 'not loaded yet'}`;
   };
   return [where, part(h.stt, 'speech recognition'), part(h.tts, 'voice')].filter(Boolean).join(' · ');

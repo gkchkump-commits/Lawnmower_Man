@@ -6,7 +6,9 @@
 
 /* global DOMException */
 
-export const VOICE_TIMEOUTS = Object.freeze({ health: 4000, stt: 60000, tts: 30000, voices: 8000, warmup: 240000 });
+// sttFirst/ttsFirst: the first request per server while the engine is not known to be loaded
+// (see VoiceClient.timeoutFor) — it may include loading, downloading or JIT-compiling the model.
+export const VOICE_TIMEOUTS = Object.freeze({ health: 4000, stt: 60000, tts: 30000, voices: 8000, warmup: 240000, sttFirst: 240000, ttsFirst: 90000 });
 
 export class VoiceError extends Error {
   /**
@@ -48,11 +50,28 @@ export class VoiceClient {
     this.timeouts = { ...VOICE_TIMEOUTS, ...(deps.timeouts || {}) };
     /** @type {VoiceInfo} */
     this.info = { status: 'stopped' };
+    /** Engines that answered a request on the current server (their model is loaded). */
+    this._warm = { stt: false, tts: false };
   }
 
   /** @param {VoiceInfo|null|undefined} info */
   configure(info) {
+    const prevUrl = this.info.url;
     this.info = info && typeof info === 'object' ? { ...info } : { status: 'stopped' };
+    if (this.info.url !== prevUrl) this._warm = { stt: false, tts: false };
+  }
+
+  /**
+   * Request timeout for an engine. Until it is known to be loaded (from /health, or a request
+   * that succeeded on this server) the server may still be loading — or on the first RTX 50-series
+   * run JIT-compiling — the model inside this request, so allow the warm-up time.
+   * @param {'stt'|'tts'} kind
+   */
+  timeoutFor(kind) {
+    const eng = this.health && this.health[kind];
+    const loaded = this._warm[kind] || !!(eng && eng.loaded);
+    const first = kind === 'stt' ? this.timeouts.sttFirst : this.timeouts.ttsFirst;
+    return loaded ? this.timeouts[kind] : Math.max(this.timeouts[kind], first || 0);
   }
 
   /** The server is up and we have credentials. */
@@ -78,14 +97,17 @@ export class VoiceClient {
    * @returns {Promise<{ text: string, language?: string, durationSec?: number, processingMs?: number }>}
    */
   async transcribe(audio, o = {}) {
-    const q = o.language && o.language !== 'auto' ? `?language=${encodeURIComponent(o.language)}` : '';
+    // 'auto' is sent explicitly (the server then detects the language); omitting it would mean
+    // "the server's default language"
+    const q = o.language ? `?language=${encodeURIComponent(o.language)}` : '';
     const r = await this._request(`/stt${q}`, {
       method: 'POST',
       body: audio,
       headers: { 'Content-Type': 'audio/wav' },
-      timeoutMs: this.timeouts.stt,
+      timeoutMs: this.timeoutFor('stt'),
       signal: o.signal,
     });
+    this._warm.stt = true;
     return { ...r, text: typeof r?.text === 'string' ? r.text : '' };
   }
 
@@ -104,10 +126,11 @@ export class VoiceClient {
       method: 'POST',
       body: JSON.stringify(body),
       headers: { 'Content-Type': 'application/json' },
-      timeoutMs: this.timeouts.tts,
+      timeoutMs: this.timeoutFor('tts'),
       signal: o.signal,
     });
     if (!r || typeof r.audioB64 !== 'string' || !r.audioB64) throw new VoiceError('The voice server returned no audio', { code: 'bad_response' });
+    this._warm.tts = true;
     return r;
   }
 

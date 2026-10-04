@@ -49,6 +49,12 @@ export function fakeBridge() {
         return { turnId: `t${++n}` };
       },
       interrupt: async () => { calls.push(['interrupt']); },
+      cancel: async (turnId) => {
+        calls.push(['cancel', turnId]);
+        // like main: a queued turn is dropped and reported (the test decides when, by default now)
+        if (bridge.autoCancel !== false) em.emit('ev', { type: 'turn_cancelled', turnId });
+        return { cancelled: true, interrupted: false };
+      },
       reset: async () => { calls.push(['reset']); },
       respondPermission: async (id, d) => {
         calls.push(['respondPermission', id, d]);

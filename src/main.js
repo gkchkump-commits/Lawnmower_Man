@@ -8,6 +8,7 @@
 
 import { ClickThroughGate, probeAvatar } from './app/click-through.js';
 import { Controller } from './app/controller.js';
+import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
 import { Mic } from './audio/mic.js';
 import { AudioPlayer } from './audio/player.js';
@@ -113,7 +114,10 @@ async function boot() {
     onToggle: (open) => {
       body.dataset.drawer = open ? 'open' : '';
       gate.hold('drawer', open);
-      if (open) refreshInfo();
+      if (open) {
+        refreshInfo();
+        refreshAppInfo(); // e.g. hotkey conflicts may have changed since boot
+      }
     },
   });
   if (appInfo.clickThroughSupported === false && !isMock) {
@@ -177,7 +181,20 @@ async function boot() {
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
     if (!settings.avatar.followCursor) avatarHost.avatar.lookAt(null);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
+    // main re-registers global shortcuts on change: show its fresh conflict list
+    if (JSON.stringify(prev.hotkeys) !== JSON.stringify(settings.hotkeys)) refreshAppInfo();
   };
+
+  /** Re-read app.info() (hotkey conflicts, GPU) and redraw the drawer's info blocks. */
+  async function refreshAppInfo() {
+    try {
+      const next = await bridge.app.info();
+      if (next && typeof next === 'object') Object.assign(appInfo, next);
+    } catch (err) {
+      console.warn('[app] app.info failed', err);
+    }
+    refreshInfo();
+  }
 
   /** @param {object} patch @param {string} path @param {any} value */
   async function saveSettings(patch, path, value) {
@@ -280,7 +297,16 @@ async function boot() {
     const hk = [h('div', null, 'In this window: hold Space to talk · Esc stops speaking.')];
     for (const cf of conflicts) {
       const acc = typeof cf === 'string' ? cf : cf?.accelerator || cf?.name || JSON.stringify(cf);
-      hk.push(h('div', { class: 'warn' }, `Could not register ${formatAccelerator(String(acc), platform)} — another app uses it.`));
+      const reason = typeof cf === 'object' && typeof cf?.reason === 'string' ? cf.reason : '';
+      const label = formatAccelerator(String(acc), platform);
+      const names = { toggleListen: 'Talk / interrupt', stopSpeaking: 'Stop speaking', toggleChat: 'Show / hide chat' };
+      const nameOf = (/** @type {string} */ n) => names[n] || n;
+      const msg = reason.startsWith('same as ')
+        ? `${label} is set for both “${nameOf(reason.slice(8))}” and “${nameOf(cf.name)}”; only the first works.`
+        : reason === 'invalid shortcut'
+          ? `${label} is not a valid shortcut.`
+          : `Could not register ${label} — another app uses it.`;
+      hk.push(h('div', { class: 'warn' }, msg));
     }
     drawer.setInfo('hotkeyInfo', hk);
   }
@@ -365,18 +391,29 @@ async function boot() {
   // ---------------------------------------------------------------- pointer: gaze + click-through
   const stage = $('stage');
   let releaseGaze = 0;
+  /** Point the eyes at (x, y) in window CSS px; they relax again after `releaseMs` without updates. */
+  const lookAtPoint = (x, y, releaseMs = 5000) => {
+    if (!settings.avatar.followCursor) return;
+    const g = gazeFromPoint(x, y, stage.getBoundingClientRect());
+    if (!g) return;
+    avatarHost.avatar.lookAt(g[0], g[1]);
+    clearTimeout(releaseGaze);
+    releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), releaseMs));
+  };
+  // Desktop app: main reports the cursor anywhere on the screen (~30 Hz, only when it moves),
+  // so the eyes follow it outside the window and over drag regions too. The browser preview
+  // (mock bridge) has no such event and falls back to pointer events over the page.
+  const globalCursor = typeof bridge.onCursor === 'function';
+  if (globalCursor) {
+    bridge.onCursor((p) => {
+      if (p && typeof p === 'object') lookAtPoint(Number(p.x), Number(p.y));
+    });
+  }
   window.addEventListener('pointermove', (e) => {
     view.notePointer();
     controller.noteActivity();
     const av = avatarHost.avatar;
-    if (settings.avatar.followCursor) {
-      const r = stage.getBoundingClientRect();
-      if (r.width && r.height) {
-        av.lookAt(clamp(((e.clientX - r.left) / r.width) * 2 - 1, -1, 1), clamp(1 - ((e.clientY - r.top) / r.height) * 2, -1, 1));
-        clearTimeout(releaseGaze);
-        releaseGaze = /** @type {any} */ (setTimeout(() => av.lookAt(null), 5000));
-      }
-    }
+    if (!globalCursor) lookAtPoint(e.clientX, e.clientY);
     if (gate.enabled) {
       const t = /** @type {HTMLElement} */ (e.target);
       const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .toast, .drawer, button, input, textarea, select, a');
@@ -386,6 +423,7 @@ async function boot() {
   document.documentElement.addEventListener('pointerleave', () => {
     view.pointerLeft();
     gate.leave();
+    if (globalCursor) return; // the global cursor keeps the eyes following outside the window
     clearTimeout(releaseGaze);
     releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), 1200));
   });

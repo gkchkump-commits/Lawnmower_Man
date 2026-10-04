@@ -4,9 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_SETTINGS,
+  SETTINGS_VERSION,
   SettingsStore,
+  WIN32_HOTKEYS,
   applyPatch,
   deepMerge,
+  defaultHotkeys,
+  defaultSettings,
   normalizeAccelerator,
   sanitizeSettings,
 } from '../../../electron/settings.js';
@@ -178,5 +182,46 @@ describe('SettingsStore', () => {
   it('accepts a top-level array file as corrupt', () => {
     fs.writeFileSync(path.join(dir, 'settings.json'), '[1,2,3]');
     expect(new SettingsStore({ dir }).load().window.sizePreset).toBe('medium');
+  });
+});
+
+describe('Windows hotkey defaults (WIN-5: Ctrl+Alt = AltGr)', () => {
+  const ctrlAltPrintable = (acc) => /^(CommandOrControl|Control|Ctrl)\+Alt\+(.|Space)$/i.test(acc);
+
+  it('Windows defaults avoid Ctrl+Alt+<printable key>; other platforms keep the classic ones', () => {
+    for (const acc of Object.values(defaultHotkeys('win32'))) {
+      expect(ctrlAltPrintable(acc), acc).toBe(false);
+      expect(normalizeAccelerator(acc)).toBe(acc);
+    }
+    expect(defaultHotkeys('win32')).toEqual({ ...WIN32_HOTKEYS });
+    expect(defaultHotkeys('linux')).toEqual(DEFAULT_SETTINGS.hotkeys);
+    expect(defaultHotkeys('darwin')).toEqual(DEFAULT_SETTINGS.hotkeys);
+    expect(defaultSettings('win32').hotkeys).toEqual({ ...WIN32_HOTKEYS });
+    expect(sanitizeSettings({}, 'win32').settings.hotkeys).toEqual({ ...WIN32_HOTKEYS });
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().hotkeys).toEqual({ ...WIN32_HOTKEYS });
+    expect(new SettingsStore({ dir: path.join(dir, 'linux'), platform: 'linux' }).load().hotkeys).toEqual(DEFAULT_SETTINGS.hotkeys);
+  });
+
+  it('migrates old stored defaults once on Windows, keeps shortcuts the user chose', () => {
+    const file = path.join(dir, 'settings.json');
+    // a v1 file (no "version"): two old defaults left untouched, one changed by the user
+    fs.writeFileSync(file, JSON.stringify({ hotkeys: { toggleListen: 'CommandOrControl+Alt+Space', toggleChat: 'CommandOrControl+Alt+C', stopSpeaking: 'Alt+F8' } }));
+    const store = new SettingsStore({ dir, platform: 'win32' });
+    expect(store.load().hotkeys).toEqual({ toggleListen: WIN32_HOTKEYS.toggleListen, toggleChat: WIN32_HOTKEYS.toggleChat, stopSpeaking: 'Alt+F8' });
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(onDisk.version).toBe(SETTINGS_VERSION);
+    expect(onDisk.hotkeys.toggleChat).toBe(WIN32_HOTKEYS.toggleChat);
+    expect(store.get().version).toBeUndefined(); // file metadata, not a setting
+
+    // After the migration the user deliberately picks Ctrl+Alt+C again: it is kept from now on.
+    store.update({ hotkeys: { toggleChat: 'CommandOrControl+Alt+C' } });
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().hotkeys.toggleChat).toBe('CommandOrControl+Alt+C');
+  });
+
+  it('does not touch hotkeys on other platforms (but stamps the version)', () => {
+    const file = path.join(dir, 'settings.json');
+    fs.writeFileSync(file, JSON.stringify({ hotkeys: { toggleChat: 'CommandOrControl+Alt+C' } }));
+    expect(new SettingsStore({ dir, platform: 'linux' }).load().hotkeys.toggleChat).toBe('CommandOrControl+Alt+C');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).version).toBe(SETTINGS_VERSION);
   });
 });

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  ASSISTANT_ALLOWED_TOOLS,
   ASSISTANT_TOOLS,
   ClaudeSession,
   buildClaudeArgs,
@@ -94,18 +95,37 @@ function harness(o = {}) {
 
 describe('buildClaudeArgs (contract §3.2)', () => {
   const base = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio'];
+  const userSettingsOnly = ['--setting-sources', 'user'];
   it('chat mode: no tools, full system prompt file, no MCP servers', () => {
-    expect(buildClaudeArgs({ mode: 'chat', personaFile: '/p.txt' })).toEqual([...base, '--tools', '', '--system-prompt-file', '/p.txt', '--strict-mcp-config']);
+    expect(buildClaudeArgs({ mode: 'chat', personaFile: '/p.txt' })).toEqual([...base, ...userSettingsOnly, '--tools', '', '--system-prompt-file', '/p.txt', '--strict-mcp-config']);
   });
-  it('assistant mode: read-only tools pre-approved, appended prompt', () => {
+  it('assistant mode: read-only tools enabled, only WebSearch pre-approved, appended prompt', () => {
     expect(buildClaudeArgs({ mode: 'assistant', personaFile: '/p.txt', model: 'sonnet', effort: 'high', resumeSessionId: 'abc-123' })).toEqual([
-      ...base, '--model', 'sonnet', '--effort', 'high', '--resume', 'abc-123',
-      '--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_TOOLS, '--append-system-prompt-file', '/p.txt',
+      ...base, '--model', 'sonnet', '--effort', 'high', '--resume', 'abc-123', ...userSettingsOnly,
+      '--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_ALLOWED_TOOLS, '--append-system-prompt-file', '/p.txt',
     ]);
     expect(ASSISTANT_TOOLS).toBe('Read,Glob,Grep,WebSearch,WebFetch');
+    expect(ASSISTANT_ALLOWED_TOOLS).toBe('WebSearch');
+  });
+  it('assistant mode never pre-approves bare Read/Glob/Grep/WebFetch (SEC-1)', () => {
+    // A bare tool name allows every input: reads anywhere on disk and fetches to any URL would
+    // run with no approval card. Without a rule the CLI allows reads inside the working folder
+    // by itself and asks for the rest.
+    const args = buildClaudeArgs({ mode: 'assistant', personaFile: '/p.txt' });
+    const allowed = args[args.indexOf('--allowedTools') + 1].split(',').map((x) => x.trim());
+    for (const bare of ['Read', 'Glob', 'Grep', 'WebFetch']) expect(allowed).not.toContain(bare);
+    expect(args.filter((a) => a === '--allowedTools')).toHaveLength(1);
+  });
+  it('every mode loads only user settings, never the working folder\'s .claude/settings*.json (SEC-3)', () => {
+    for (const mode of ['chat', 'assistant', 'agent']) {
+      const args = buildClaudeArgs({ mode, personaFile: '/p.txt' });
+      const i = args.indexOf('--setting-sources');
+      expect(i, mode).toBeGreaterThan(0);
+      expect(args[i + 1]).toBe('user');
+    }
   });
   it('agent mode: default tools, optional permission mode', () => {
-    expect(buildClaudeArgs({ mode: 'agent', personaFile: '/p.txt' })).toEqual([...base, '--append-system-prompt-file', '/p.txt']);
+    expect(buildClaudeArgs({ mode: 'agent', personaFile: '/p.txt' })).toEqual([...base, ...userSettingsOnly, '--append-system-prompt-file', '/p.txt']);
     expect(buildClaudeArgs({ mode: 'agent', personaFile: '/p.txt', agentPermissionMode: 'acceptEdits' }).slice(-2)).toEqual(['--permission-mode', 'acceptEdits']);
   });
   it('rejects unsafe values', () => {
@@ -331,6 +351,49 @@ describe('ClaudeSession with the fake CLI', () => {
     expect(h.argvLog().pop().argv).not.toContain('--resume');
   });
 
+  it('reset() mid-reply ends the turn as interrupted, not as a failure (F7: tray New conversation)', async () => {
+    const h = harness();
+    const slow = (await h.session.send('slow one')).turnId;
+    await h.waitFor((e) => e.type === 'text_delta' && e.turnId === slow);
+    await h.session.reset();
+    expect(h.events.find((e) => e.type === 'turn_end' && e.turnId === slow)).toMatchObject({ isError: true, interrupted: true });
+  });
+
+  it('status() reports the running turn, queued turns and open approval cards (F1: renderer reload)', async () => {
+    const h = harness({ settings: { mode: 'agent' } });
+    const { turnId } = await h.session.send('tool please');
+    const queued = (await h.session.send('next one')).turnId;
+    const perm = await h.waitFor((e) => e.type === 'permission_request');
+    const st = h.session.status();
+    expect(st).toMatchObject({ busy: true, activeTurnId: turnId, queuedTurnIds: [queued] });
+    expect(st.pendingPermissions).toEqual([
+      { requestId: perm.requestId, turnId, toolName: 'Bash', input: { command: 'echo hi', description: 'Say hi' }, description: 'Say hi' },
+    ]);
+    // the restored card can still be answered
+    h.session.respondPermission(perm.requestId, { behavior: 'allow' });
+    await h.turnEnd(turnId);
+    expect(h.session.status().pendingPermissions).toEqual([]);
+    await h.turnEnd(queued);
+    expect(h.session.status()).toMatchObject({ busy: false, activeTurnId: undefined, queuedTurnIds: [] });
+  });
+
+  it('cancel() drops a queued turn before it reaches the CLI; a running one is interrupted (F2)', async () => {
+    const h = harness();
+    const slow = (await h.session.send('slow one')).turnId;
+    const stale = (await h.session.send('stale message')).turnId;
+    const keep = (await h.session.send('newest message')).turnId;
+    await h.waitFor((e) => e.type === 'text_delta' && e.turnId === slow);
+    expect(await h.session.cancel(stale)).toEqual({ cancelled: true, interrupted: false });
+    expect(h.events.filter((e) => e.type === 'turn_cancelled')).toEqual([{ type: 'turn_cancelled', turnId: stale }]);
+    expect(h.session.status().queuedTurnIds).toEqual([keep]);
+    expect(await h.session.cancel(slow)).toEqual({ cancelled: false, interrupted: true });
+    expect(h.events.find((e) => e.type === 'turn_end' && e.turnId === slow)).toMatchObject({ interrupted: true });
+    expect((await h.turnEnd(keep)).result).toBe('You said: newest message');
+    expect(h.events.some((e) => e.type === 'turn_start' && e.turnId === stale)).toBe(false);
+    expect(await h.session.cancel('turn-unknown')).toEqual({ cancelled: false, interrupted: false });
+    await expect(h.session.cancel('')).rejects.toThrow(/turnId/);
+  });
+
   it('gives up after repeated startup failures and reports queued turns', async () => {
     const h = harness({ env: { FAKE_CLAUDE_EXIT_AT_START: '7' } });
     const { turnId } = await h.session.send('anyone there?');
@@ -353,7 +416,7 @@ describe('ClaudeSession with the fake CLI', () => {
     const t2 = (await h.session.send('args please')).turnId;
     const end2 = await h.turnEnd(t2);
     const { argv } = JSON.parse(end2.result);
-    expect(argv).toEqual(expect.arrayContaining(['--model', 'sonnet', '--allowedTools', ASSISTANT_TOOLS, '--resume', end1.sessionId]));
+    expect(argv).toEqual(expect.arrayContaining(['--model', 'sonnet', '--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_ALLOWED_TOOLS, '--resume', end1.sessionId]));
     expect(h.argvLog()).toHaveLength(2);
     // A change that does not affect the process does nothing.
     h.settings.resumeLastSession = false;

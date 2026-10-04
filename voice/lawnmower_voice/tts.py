@@ -17,9 +17,10 @@ import contextlib
 import importlib.util
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -104,6 +105,141 @@ def _installed(module: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------------------------
+# espeak-ng data path
+#
+# kokoro-onnx (and misaki's fallback) point espeak-ng at <venv>/.../espeakng_loader/espeak-ng-data.
+# The Windows espeak-ng DLL opens that folder with narrow ("ANSI") file APIs (fopen, stat,
+# FindFirstFileA) and every build has a fixed-size path buffer: a venv under a profile such as
+# C:\Users\José\... or a very long path makes espeak_Initialize fail - and it then calls exit(1),
+# killing the whole voice server. So hand espeak a path it can open: the path itself when it is
+# short (and ASCII on Windows), else its 8.3 short form, else a one-time copy to an ASCII folder.
+
+#: Longest data path we hand to espeak-ng: its path buffer (N_PATH_HOME) is 230 bytes on Windows
+#: and 160 elsewhere (measured with espeakng-loader 0.2.4 on Linux: 158 works, 160 exits), so
+#: keep some headroom.
+ESPEAK_MAX_PATH = {"win32": 220}
+ESPEAK_MAX_PATH_DEFAULT = 150
+
+
+def espeak_path_ok(path: str, platform: str | None = None) -> bool:
+    """Can espeak-ng open this data folder path? (length, and ASCII-only on Windows)"""
+    platform = platform or sys.platform
+    if len(path.encode("utf-8")) > ESPEAK_MAX_PATH.get(platform, ESPEAK_MAX_PATH_DEFAULT):
+        return False
+    return path.isascii() if platform == "win32" else True
+
+
+def _windows_short_path(path: str) -> str | None:  # pragma: no cover - Windows only
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        fn = ctypes.windll.kernel32.GetShortPathNameW
+        fn.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        fn.restype = wintypes.DWORD
+        n = fn(path, None, 0)
+        if not n:
+            return None
+        buf = ctypes.create_unicode_buffer(n)
+        return buf.value if fn(path, buf, n) else None
+    except Exception:
+        return None
+
+
+def _espeak_copy_roots(platform: str) -> list[Path]:
+    """Writable, normally ASCII and short folders for a copy of espeak-ng-data."""
+    roots: list[Path] = []
+    if platform == "win32":
+        for var in ("PROGRAMDATA", "PUBLIC"):
+            v = os.environ.get(var)
+            if v:
+                roots.append(Path(v) / "LawnmowerMan")
+        roots.append(Path((os.environ.get("SystemDrive") or "C:") + "\\") / "LawnmowerMan")
+    else:
+        roots.append(Path.home() / ".cache" / "lawnmower-man")
+        roots.append(Path("/tmp") / f"lawnmower-man-{os.getuid() if hasattr(os, 'getuid') else 'user'}")
+    return roots
+
+
+def _tree_signature(src: Path) -> str:
+    files = 0
+    size = 0
+    for p in src.rglob("*"):
+        if p.is_file():
+            files += 1
+            size += p.stat().st_size
+    return f"{src}|{files}|{size}"
+
+
+def safe_espeak_data_path(
+    data_path: str,
+    platform: str | None = None,
+    short_path: Callable[[str], str | None] | None = None,
+    roots: list[Path] | None = None,
+) -> str:
+    """A path to espeak-ng-data that espeak-ng can open (see above); copies it once if needed.
+
+    Returns ``data_path`` unchanged when it is fine, or when no usable alternative exists.
+    """
+    platform = platform or sys.platform
+    if espeak_path_ok(data_path, platform):
+        return data_path
+    if platform == "win32":
+        sp = (short_path or _windows_short_path)(data_path)
+        if sp and espeak_path_ok(sp, platform):
+            log.info("espeak-ng data: using the short path %s", sp)
+            return sp
+    src = Path(data_path)
+    if not src.is_dir():
+        return data_path
+    signature = _tree_signature(src)
+    for root in roots if roots is not None else _espeak_copy_roots(platform):
+        dest = root / "espeak-ng-data"
+        if not espeak_path_ok(str(dest), platform):
+            continue
+        marker = dest / ".lawnmower-source"
+        try:
+            if marker.is_file() and marker.read_text(encoding="utf-8") == signature:
+                return str(dest)
+            root.mkdir(parents=True, exist_ok=True)
+            tmp = root / f"espeak-ng-data.tmp-{os.getpid()}"
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(src, tmp)
+            (tmp / ".lawnmower-source").write_text(signature, encoding="utf-8")
+            shutil.rmtree(dest, ignore_errors=True)
+            os.replace(tmp, dest)
+            log.info("espeak-ng data: copied to %s (its venv path cannot be opened by espeak-ng)", dest)
+            return str(dest)
+        except OSError as exc:
+            log.debug("espeak-ng data: cannot use %s (%s)", root, exc)
+            continue
+    log.warning("espeak-ng cannot open its data folder %s (non-ASCII or too long path) and no copy could be made", data_path)
+    return data_path
+
+
+def _espeak_data_override() -> str | None:
+    """The espeak-ng data path to force, or None when the default one works."""
+    try:
+        import espeakng_loader  # noqa: PLC0415
+
+        default = espeakng_loader.get_data_path()
+    except Exception:
+        return None
+    safe = safe_espeak_data_path(default)
+    return safe if safe != default else None
+
+
+def _apply_espeak_data_path(path: str | None) -> None:
+    """Point phonemizer's (process-global) espeak wrapper at ``path`` - misaki resets it on import."""
+    if not path:
+        return
+    with contextlib.suppress(Exception):
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper  # noqa: PLC0415
+
+        EspeakWrapper.set_data_path(path)
+
+
 class _TTSBase(Engine):
     kind = "tts"
 
@@ -151,6 +287,8 @@ class KokoroOnnxTTS(_TTSBase):
         self._kokoro: Any = None
         self._g2p: dict[str, Any] = {}
         self._misaki_ok: bool | None = None
+        #: espeak-ng data path forced because the default one cannot be opened (None = default)
+        self._espeak_data: str | None = None
 
     # -- loading ---------------------------------------------------------------------------
 
@@ -214,9 +352,18 @@ class KokoroOnnxTTS(_TTSBase):
         # for most sentences with punctuation; it is harmless.
         if not log.isEnabledFor(logging.DEBUG):
             logging.getLogger("phonemizer").setLevel(logging.ERROR)
+        kwargs: dict = {}
+        self._espeak_data = _espeak_data_override()
+        if self._espeak_data:
+            try:
+                from kokoro_onnx.config import EspeakConfig  # noqa: PLC0415
+
+                kwargs["espeak_config"] = EspeakConfig(data_path=self._espeak_data)
+            except ImportError:  # very old kokoro-onnx: set the global path instead
+                _apply_espeak_data_path(self._espeak_data)
         if hasattr(Kokoro, "from_session"):
-            return Kokoro.from_session(session, str(voices_path))
-        return Kokoro(str(model_path), str(voices_path))  # older kokoro-onnx: picks providers itself
+            return Kokoro.from_session(session, str(voices_path), **kwargs)
+        return Kokoro(str(model_path), str(voices_path), **kwargs)  # older kokoro-onnx: picks providers itself
 
     def _load(self) -> None:
         if self._kokoro_factory is None and not _installed("kokoro_onnx"):
@@ -272,6 +419,8 @@ class KokoroOnnxTTS(_TTSBase):
         try:
             from misaki import en, espeak  # noqa: PLC0415
 
+            # misaki's espeak module resets the global espeak data path on import
+            _apply_espeak_data_path(self._espeak_data)
             british = lang == "en-gb"
             g2p = en.G2P(trf=False, british=british, fallback=espeak.EspeakFallback(british=british))
             self._g2p[lang] = g2p
@@ -410,6 +559,8 @@ class KokoroTorchTTS(_TTSBase):
         if code not in self._pipelines:
             from kokoro import KPipeline  # noqa: PLC0415
 
+            # kokoro → misaki points espeak-ng at the venv's data folder; make it a safe path
+            _apply_espeak_data_path(_espeak_data_override())
             with contextlib.redirect_stdout(sys.stderr):
                 self._pipelines[code] = KPipeline(lang_code=code, repo_id=self.repo_id, model=self._model)
         return self._pipelines[code]

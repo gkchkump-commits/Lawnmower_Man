@@ -58,6 +58,24 @@ export function pickScript(text) {
   };
 }
 
+/**
+ * Like electron/hotkeys.js, minus the OS: two actions on the same shortcut is a conflict.
+ * @param {Record<string, string>} hotkeys
+ * @returns {Array<{ name: string, accelerator: string, reason: string }>}
+ */
+export function mockHotkeyConflicts(hotkeys) {
+  const seen = new Map();
+  const out = [];
+  for (const name of ['toggleListen', 'toggleChat', 'stopSpeaking']) {
+    const acc = typeof hotkeys?.[name] === 'string' ? hotkeys[name] : '';
+    if (!acc) continue;
+    const key = acc.toLowerCase().split('+').map((p) => p.trim()).sort().join('+');
+    if (seen.has(key)) out.push({ name, accelerator: acc, reason: `same as ${seen.get(key)}` });
+    else seen.set(key, name);
+  }
+  return out;
+}
+
 /** Numeric settings are clamped like electron/settings.js does. */
 const NUMBER_RANGES = /** @type {Record<string, [number, number]>} */ ({
   'voice.ttsSpeed': [0.5, 2],
@@ -222,7 +240,7 @@ export function createMockBridge(options = {}) {
       emit({ type: 'tool_use', turnId: turn.turnId, id: toolId, name: script.tool.name, input: script.tool.input });
       const requestId = `perm-${++permCounter}`;
       const decision = await new Promise((resolve) => {
-        permissions.set(requestId, { turnId: turn.turnId, input: script.tool.input, resolve });
+        permissions.set(requestId, { turnId: turn.turnId, toolName: script.tool.name, input: script.tool.input, resolve });
         turn.wake = () => { permissions.delete(requestId); resolve({ behavior: 'deny', message: 'The user interrupted this turn.' }); };
         emit({ type: 'permission_request', turnId: turn.turnId, requestId, toolName: script.tool.name, input: script.tool.input, description: script.tool.input.description });
       });
@@ -268,6 +286,22 @@ export function createMockBridge(options = {}) {
       // like the real session: the turn may start (turn_start) before send() resolves
       pump();
       return { turnId };
+    },
+    /** Drop a queued turn (turn_cancelled) or interrupt it when it is running. @param {string} turnId */
+    async cancel(turnId) {
+      if (typeof turnId !== 'string' || !turnId) throw new TypeError('turnId must be a string');
+      const i = queue.findIndex((q) => q.turnId === turnId);
+      if (i >= 0) {
+        queue.splice(i, 1);
+        emit({ type: 'turn_cancelled', turnId });
+        if (!active && ready) setStatus('ready');
+        return { cancelled: true, interrupted: false };
+      }
+      if (active && active.turnId === turnId) {
+        await claude.interrupt();
+        return { cancelled: false, interrupted: true };
+      }
+      return { cancelled: false, interrupted: false };
     },
     async interrupt() {
       const t = active;
@@ -315,6 +349,11 @@ export function createMockBridge(options = {}) {
         cliPath: '(mock)',
         cliVersion: 'mock',
         mode: settings.claude.mode,
+        activeTurnId: active ? active.turnId : undefined,
+        queuedTurnIds: queue.map((q) => q.turnId),
+        pendingPermissions: [...permissions.entries()].map(([requestId, p]) => ({
+          requestId, turnId: p.turnId, toolName: p.toolName || 'Bash', input: p.input, description: p.input?.description,
+        })),
       };
     },
     /** @param {(ev: any) => void} cb */
@@ -400,7 +439,7 @@ export function createMockBridge(options = {}) {
           mock: true,
           layout: null,
           clickThroughSupported: false,
-          hotkeyConflicts: [],
+          hotkeyConflicts: mockHotkeyConflicts(settings.hotkeys),
         };
       },
     },

@@ -16,6 +16,11 @@
     powershell -ExecutionPolicy Bypass -File scripts\setup-voice.ps1
     powershell -ExecutionPolicy Bypass -File scripts\setup-voice.ps1 -Cpu
 
+  Installed app (resources\app.asar next to resources\voice): the installer replaces the install
+  folder on every update, so the venv goes to %LOCALAPPDATA%\LawnmowerMan\voice\.venv and the
+  models to %LOCALAPPDATA%\LawnmowerMan\voice\models instead (the app looks there).
+  Quit Lawnmower Man before re-running this script: the running voice server locks venv files.
+
 .PARAMETER Cpu
   CPU-only install (no NVIDIA downloads).
 .PARAMETER NoModels
@@ -27,11 +32,13 @@
 .PARAMETER Python
   Python interpreter to build the venv with (default: py -3.12, then python3.12 / python, then 3.11).
 .PARAMETER Recreate
-  Delete and rebuild voice\.venv.
+  Delete and rebuild the venv.
 .PARAMETER SttModel
-  Whisper model to pre-download (default large-v3-turbo).
+  Whisper model to pre-download and smoke-test (default large-v3-turbo).
 .PARAMETER ModelsDir
-  Model cache directory (default voice\models, or $env:LAWNMOWER_VOICE_MODELS).
+  Model cache directory (default voice\models - or %LOCALAPPDATA%\LawnmowerMan\voice\models for an
+  installed app - or $env:LAWNMOWER_VOICE_MODELS). The choice is recorded in the venv, so the app
+  and later re-runs of this script use it too.
 .PARAMETER SkipSmoke
   Skip the final load-and-run smoke test.
 #>
@@ -58,13 +65,35 @@ if (Test-Path variable:IsWindows) { $OnWindows = [bool]$IsWindows }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 $VoiceDir = Join-Path $Root 'voice'
-$Venv = Join-Path $VoiceDir '.venv'
+# Installed app: resources\app.asar sits next to resources\voice. The installer deletes the whole
+# install folder on every update/uninstall (and Program Files is not writable), so the venv, the
+# models and a writable copy of the package (pip writes build metadata next to it) go to a
+# per-user folder. Must match electron/voice-sidecar.js packagedVoiceHome().
+$Packaged = Test-Path (Join-Path $Root 'app.asar')
+if ($Packaged) {
+  $base = $env:LOCALAPPDATA
+  if (-not $base) { $base = Join-Path (Join-Path $HOME 'AppData') 'Local' }
+  $VoiceHome = Join-Path (Join-Path $base 'LawnmowerMan') 'voice'
+  $Venv = Join-Path $VoiceHome '.venv'
+  $PkgDir = Join-Path $VoiceHome 'src'
+} else {
+  $VoiceHome = $VoiceDir
+  $Venv = Join-Path $VoiceDir '.venv'
+  $PkgDir = $VoiceDir
+}
+# The models folder the app should use is recorded here (read by lawnmower_voice.config).
+$Pointer = Join-Path $Venv 'lawnmower-models-dir.txt'
 if ($OnWindows) { $VenvPy = Join-Path (Join-Path $Venv 'Scripts') 'python.exe' } else { $VenvPy = Join-Path (Join-Path $Venv 'bin') 'python' }
 $OrtGpuSpec = 'onnxruntime-gpu[cuda,cudnn]>=1.27,<2'
 $OrtGpuPlain = 'onnxruntime-gpu>=1.27,<2'
 $TorchIndexGpu = 'https://download.pytorch.org/whl/cu128'
 $TorchIndexCpu = 'https://download.pytorch.org/whl/cpu'
 if (-not $ModelsDir -and $env:LAWNMOWER_VOICE_MODELS) { $ModelsDir = $env:LAWNMOWER_VOICE_MODELS }
+if (-not $ModelsDir -and (Test-Path -LiteralPath $Pointer)) {
+  # chosen on an earlier run (-ModelsDir); keep using it
+  $ModelsDir = ([System.IO.File]::ReadAllText($Pointer)).Trim()
+}
+if (-not $ModelsDir -and $Packaged) { $ModelsDir = Join-Path $VoiceHome 'models' }
 
 function Write-Step([string]$Text) { Write-Host ''; Write-Host ('==> ' + $Text) -ForegroundColor Cyan }
 function Write-Warn([string]$Text) { Write-Host ('WARNING: ' + $Text) -ForegroundColor Yellow }
@@ -119,6 +148,57 @@ function Find-Python {
   return $null
 }
 
+# Clean up a folder argument: Windows PowerShell 5.1 turns  -ModelsDir 'D:\AI Models\'  into
+# D:\AI Models"  (a trailing backslash escapes the closing quote), so drop trailing quotes and
+# separators, then make it absolute (relative to the current PowerShell location).
+function Get-CleanDir([string]$Dir) {
+  $d = $Dir.Trim().Trim('"').Trim()
+  $t = $d.TrimEnd([char[]]@([char]92, [char]47))
+  if ($t -match '^[A-Za-z]:$') { $t = $t + [string][char]92 }
+  if ($t) { $d = $t }
+  if (-not $d) { return '' }
+  return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($d)
+}
+
+# A running voice server (the app) has DLLs and .pyd files of the venv loaded: deleting or
+# upgrading them fails halfway and leaves a broken venv. Refuse before touching anything.
+function Assert-VoiceNotRunning {
+  if (-not $OnWindows -or -not (Test-Path -LiteralPath $Venv)) { return }
+  $procs = @()
+  try {
+    $prefix = (Resolve-Path -LiteralPath $Venv).ProviderPath.TrimEnd([char]92) + [string][char]92
+    $procs = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+        $_.ProcessId -ne $PID -and (
+          ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) -or
+          ($_.CommandLine -and $_.CommandLine -match 'lawnmower_voice(?![.](doctor|download))'))
+      })
+  } catch {
+    return # no CIM (e.g. restricted shell): nothing to check with
+  }
+  if ($procs.Count -gt 0) {
+    $ids = ($procs | ForEach-Object { $_.ProcessId }) -join ', '
+    throw ("The voice server is running (process {0}) and uses files in {1}.`n  Quit Lawnmower Man (tray > Quit), then run this script again." -f $ids, $Venv)
+  }
+}
+
+# Replace the venv without ever leaving a half-deleted one: move it aside first (fails cleanly
+# if something still uses it), then delete the old copy.
+function Remove-Venv {
+  Assert-VoiceNotRunning
+  $leaf = '{0}.old-{1}' -f (Split-Path -Leaf $Venv), (Get-Date -Format 'yyyyMMddHHmmss')
+  $aside = Join-Path (Split-Path -Parent $Venv) $leaf
+  try {
+    Rename-Item -LiteralPath $Venv -NewName $leaf -ErrorAction Stop
+  } catch {
+    throw ("Could not replace the venv at {0} ({1}).`n  Quit Lawnmower Man (tray > Quit), then run this script again." -f $Venv, $_.Exception.Message)
+  }
+  try {
+    Remove-Item -Recurse -Force -LiteralPath $aside -ErrorAction Stop
+  } catch {
+    Write-Warn ('Could not delete the old venv {0} ({1}); delete it later.' -f $aside, $_.Exception.Message)
+  }
+}
+
 function Get-LastJson($Lines) {
   $json = $null
   foreach ($l in @($Lines)) { $s = [string]$l; if ($s.TrimStart().StartsWith('{')) { $json = $s } }
@@ -128,6 +208,8 @@ function Get-LastJson($Lines) {
 
 try {
   if (-not (Test-Path (Join-Path $VoiceDir 'pyproject.toml'))) { throw ("voice\pyproject.toml not found next to this script ({0})." -f $VoiceDir) }
+  if ($ModelsDir) { $ModelsDir = Get-CleanDir $ModelsDir }
+  if ($Packaged) { Write-Host ('Installed app detected: voice files go to {0}' -f $VoiceHome) }
 
   # -------------------------------------------------------------------------------------------
   Write-Step 'Looking for Python 3.12'
@@ -157,25 +239,40 @@ try {
   # -------------------------------------------------------------------------------------------
   Write-Step ('Preparing the virtual environment ({0})' -f $Venv)
   if (Test-Path $Venv) {
+    Assert-VoiceNotRunning
     $have = $null
     if (Test-Path $VenvPy) { $have = Get-PyInfo $VenvPy @() }
     if ($Recreate -or -not $have -or $have.Version -ne $py.Version) {
       $hv = 'broken'
       if ($have) { $hv = $have.Version }
       Write-Host ('Removing the existing venv (Python {0}; want {1})' -f $hv, $py.Version)
-      Remove-Item -Recurse -Force $Venv
+      Remove-Venv
     } else {
       Write-Host ('Reusing the existing venv (Python {0})' -f $have.Version)
     }
   }
   if (-not (Test-Path $VenvPy)) {
+    $venvParent = Split-Path -Parent $Venv
+    if (-not (Test-Path $venvParent)) { New-Item -ItemType Directory -Force -Path $venvParent | Out-Null }
     Invoke-Checked $py.Path -m venv $Venv
+  }
+  if ($ModelsDir) {
+    # where the app's voice server finds the models (no BOM: Python reads it as UTF-8)
+    [System.IO.File]::WriteAllText($Pointer, $ModelsDir, (New-Object System.Text.UTF8Encoding $false))
+    Write-Host ('Models folder: {0}' -f $ModelsDir)
   }
   Invoke-Checked $VenvPy -m pip install --upgrade --disable-pip-version-check pip setuptools wheel
 
+  if ($Packaged) {
+    # pip writes build metadata next to the package: install from a writable copy
+    if (Test-Path -LiteralPath $PkgDir) { Remove-Item -Recurse -Force -LiteralPath $PkgDir }
+    New-Item -ItemType Directory -Force -Path $PkgDir | Out-Null
+    Copy-Item -Recurse -Force -Path (Join-Path $VoiceDir '*') -Destination $PkgDir
+  }
+
   if ($OnWindows) {
     try {
-      $drive = (Get-Item $VoiceDir).PSDrive
+      $drive = (Get-Item (Split-Path -Parent $Venv)).PSDrive
       if ($drive -and $drive.Free -and $drive.Free -lt 8GB) {
         Write-Warn ('Only {0:N1} GB free on drive {1}:; the GPU install needs ~5 GB plus ~2.5 GB of models.' -f ($drive.Free / 1GB), $drive.Name)
       }
@@ -185,7 +282,7 @@ try {
   # -------------------------------------------------------------------------------------------
   if ($Cpu) {
     Write-Step 'Installing the CPU voice stack'
-    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[cpu]' -f $VoiceDir)
+    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[cpu]' -f $PkgDir)
     $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $VenvPy -m pip show onnxruntime-gpu *> $null
     $hasGpuOrt = ($LASTEXITCODE -eq 0)
@@ -203,7 +300,7 @@ try {
     } else {
       Write-Warn 'nvidia-smi not found: is the NVIDIA driver installed? (R570+ for RTX 50-series, R580+ for GPU text-to-speech)'
     }
-    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[gpu]' -f $VoiceDir)
+    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[gpu]' -f $PkgDir)
     if ($py.Version -ne '3.10') {
       # kokoro-onnx and faster-whisper depend on the CPU 'onnxruntime' wheel, which shares the
       # 'onnxruntime' folder with onnxruntime-gpu. Remove both, then reinstall the GPU wheel.
@@ -218,7 +315,7 @@ try {
 
   if ($Misaki) {
     Write-Step 'Installing misaki (English G2P)'
-    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[misaki]' -f $VoiceDir)
+    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[misaki]' -f $PkgDir)
   }
 
   if ($TorchTts) {
@@ -226,7 +323,7 @@ try {
     if ($Cpu) { $idx = $TorchIndexCpu }
     Write-Step ('Installing PyTorch from {0} and the kokoro package (optional backend)' -f $idx)
     Invoke-Checked $VenvPy -m pip install --disable-pip-version-check torch --index-url $idx
-    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[torch]' -f $VoiceDir)
+    Invoke-Checked $VenvPy -m pip install --disable-pip-version-check -e ('{0}[torch]' -f $PkgDir)
   }
 
   # -------------------------------------------------------------------------------------------
@@ -253,7 +350,7 @@ try {
   $smoke = $null
   if (-not $NoModels -and -not $SkipSmoke -and $modelsOk) {
     Write-Step 'Smoke test: loading both engines and running one request each (first GPU run compiles kernels; can take a minute)'
-    $smokeArgs = @('-m', 'lawnmower_voice.doctor', '--smoke', '--device', $device, '--human') + $modelArgs
+    $smokeArgs = @('-m', 'lawnmower_voice.doctor', '--smoke', '--device', $device, '--human', '--stt-model', $SttModel) + $modelArgs
     $smokeOut = & $VenvPy @smokeArgs
     if ($LASTEXITCODE -ne 0) { Write-Warn 'Smoke test failed to run.' } else { $smoke = Get-LastJson $smokeOut }
   }

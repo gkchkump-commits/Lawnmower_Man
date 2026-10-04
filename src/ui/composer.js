@@ -106,13 +106,19 @@ export class Composer {
     this._updateSend();
   }
 
-  /** @param {boolean} ok @param {string} reason tooltip when unavailable */
+  /**
+   * @param {boolean} ok
+   * @param {string} reason tooltip when unavailable; when available, an optional note (e.g.
+   *   speech recognition is still loading)
+   */
   setMicAvailable(ok, reason) {
     this.micAvailable = !!ok;
     const mic = this.dom.mic;
     mic.setAttribute('aria-disabled', String(!ok));
     mic.classList.toggle('unavailable', !ok);
-    mic.title = ok ? 'Talk — click, or hold to talk (Space)' : reason;
+    mic.classList.toggle('loading', !!ok && !!reason);
+    const talk = 'Talk — click, or hold to talk (Space)';
+    mic.title = ok ? (reason ? `${talk}. ${reason}` : talk) : reason;
   }
 
   /** @param {string} text */

@@ -35,6 +35,7 @@ function subscribe(channel, cb) {
 const api = {
   claude: {
     send: (text) => invoke('lm:claude:send', text),
+    cancel: (turnId) => invoke('lm:claude:cancel', turnId),
     interrupt: () => invoke('lm:claude:interrupt'),
     reset: () => invoke('lm:claude:reset'),
     respondPermission: (requestId, decision) => invoke('lm:claude:respond-permission', requestId, decision),
@@ -60,6 +61,8 @@ const api = {
     quit: () => send('lm:window:quit'),
   },
   onHotkey: (cb) => subscribe('lm:hotkey', cb),
+  // Global cursor position {x, y} in CSS px relative to the window's top-left (may be outside).
+  onCursor: (cb) => subscribe('lm:cursor', cb),
   app: {
     info: () => invoke('lm:app:info'),
   },

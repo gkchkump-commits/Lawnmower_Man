@@ -136,8 +136,8 @@ def test_private_network_preflight(client):
 def test_cors_headers_on_actual_and_error_responses(client, auth):
     ok = client.get("/voices", headers={**auth, "Origin": "http://127.0.0.1:5173"})
     assert ok.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
-    denied = client.get("/voices", headers={"Origin": "null"})
-    assert denied.status_code == 401 and denied.headers["access-control-allow-origin"] == "null"
+    denied = client.get("/voices", headers={"Origin": "app://lawnmower"})
+    assert denied.status_code == 401 and denied.headers["access-control-allow-origin"] == "app://lawnmower"
     evil = client.get("/health", headers={"Origin": "https://evil.example"})
     assert evil.status_code == 403
 

@@ -3,7 +3,17 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { VoiceSidecar, describeHealth, locatePython, parseArgString } from '../../../electron/voice-sidecar.js';
+import {
+  VoiceSidecar,
+  describeHealth,
+  healthSettling,
+  locatePython,
+  packagedVoiceHome,
+  parseArgString,
+  sttLanguageArg,
+  voiceServerEnv,
+  voiceVenvDirs,
+} from '../../../electron/voice-sidecar.js';
 
 const FAKE = path.resolve('tests/fixtures/fake-voice.mjs');
 const live = [];
@@ -123,7 +133,9 @@ describe('VoiceSidecar', () => {
     expect(h.statuses.map((x) => x.status)).toEqual(['starting', 'starting', 'ready']); // 2nd: server's own status line
 
     const [run] = h.runs();
-    expect(run.argv).toEqual(expect.arrayContaining(['--host', '127.0.0.1', '--port', info.url.split(':').pop(), '--device', 'cuda', '--stt-model', 'large-v3-turbo', '--tts-voice', 'af_heart']));
+    expect(run.argv).toEqual(expect.arrayContaining(['--host', '127.0.0.1', '--port', info.url.split(':').pop(), '--device', 'cuda', '--stt-model', 'large-v3-turbo', '--stt-language', 'en', '--tts-voice', 'af_heart']));
+    // models load right after 'ready', not inside the user's first /stt (F3 / WIN-3)
+    expect(run.argv.filter((a) => a === '--preload')).toHaveLength(1);
     expect(run.argv).not.toContain('--token'); // token travels in the environment
     expect(run.env).toEqual({ LAWNMOWER_VOICE_TOKEN: 'set', PYTHONUNBUFFERED: '1' });
     expect(fs.realpathSync(run.cwd)).toBe(fs.realpathSync(h.dir));
@@ -166,13 +178,26 @@ describe('VoiceSidecar', () => {
   it('restarts only for process-relevant settings and stops cleanly', async () => {
     const h = harness();
     await h.sidecar.start();
-    h.s.sttLanguage = 'de'; // per-request setting: no restart
+    // The voice is sent with every /tts request: picking another one must not kill the server
+    // and its loaded models (F5).
+    h.s.ttsVoice = 'bf_emma';
+    await h.sidecar.applySettings();
+    h.s.ttsSpeed = 1.3;
+    h.s.sttLanguage = 'en-GB'; // still English: per request only
     await h.sidecar.applySettings();
     expect(h.runs()).toHaveLength(1);
-    h.s.device = 'cpu';
+    // English → German changes the server's CPU-fallback model (base.en → base): restart (F8)
+    h.s.sttLanguage = 'de';
     await h.sidecar.applySettings();
     await h.waitFor((x) => x.status === 'ready' && h.runs().length === 2);
-    expect(h.runs()[1].argv).toEqual(expect.arrayContaining(['--device', 'cpu']));
+    expect(h.runs()[1].argv).toEqual(expect.arrayContaining(['--stt-language', 'de', '--tts-voice', 'bf_emma']));
+    h.s.sttLanguage = 'fr'; // another non-English language: per request only
+    await h.sidecar.applySettings();
+    expect(h.runs()).toHaveLength(2);
+    h.s.device = 'cpu';
+    await h.sidecar.applySettings();
+    await h.waitFor((x) => x.status === 'ready' && h.runs().length === 3);
+    expect(h.runs()[2].argv).toEqual(expect.arrayContaining(['--device', 'cpu']));
     const url = h.sidecar.info().url;
     await h.sidecar.stop();
     expect(h.sidecar.info().status).toBe('stopped');
@@ -194,5 +219,53 @@ describe('VoiceSidecar', () => {
     expect(sc.info().status).toBe('ready');
     const run = JSON.parse(fs.readFileSync(logFile, 'utf8').trim());
     expect(run.argv).toContain('--fake');
+  });
+});
+
+describe('packaged layout, language, environment, loading', () => {
+  it('packaged builds keep the venv in a per-user folder, not in the (wiped) install directory (WIN-1)', () => {
+    expect(packagedVoiceHome({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\Ada\\AppData\\Local' }, homedir: 'C:\\Users\\Ada' }))
+      .toBe('C:\\Users\\Ada\\AppData\\Local\\LawnmowerMan\\voice');
+    expect(packagedVoiceHome({ platform: 'win32', env: {}, homedir: 'C:\\Users\\Ada' })).toBe('C:\\Users\\Ada\\AppData\\Local\\LawnmowerMan\\voice');
+    expect(packagedVoiceHome({ platform: 'linux', env: {}, homedir: '/home/ada' })).toBe('/home/ada/.local/share/lawnmower-man/voice');
+    expect(packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: '/data' }, homedir: '/home/ada' })).toBe('/data/lawnmower-man/voice');
+    const res = 'C:\\Program Files\\Lawnmower Man\\resources\\voice';
+    expect(voiceVenvDirs({ packaged: true, voiceDir: res, platform: 'win32', env: { LOCALAPPDATA: 'C:\\L' } }))
+      .toEqual(['C:\\L\\LawnmowerMan\\voice\\.venv', `${res}\\.venv`]);
+    expect(voiceVenvDirs({ packaged: false, voiceDir: '/repo/voice', platform: 'linux' })).toEqual(['/repo/voice/.venv']);
+  });
+
+  it('maps settings.voice.sttLanguage to --stt-language', () => {
+    expect(sttLanguageArg('en')).toBe('en');
+    expect(sttLanguageArg('DE')).toBe('de');
+    expect(sttLanguageArg('')).toBe('auto');
+    expect(sttLanguageArg('auto')).toBe('auto');
+    expect(sttLanguageArg('pt-BR')).toBe('pt-br');
+    expect(sttLanguageArg('--evil')).toBe('en');
+    expect(sttLanguageArg(undefined)).toBe('en');
+  });
+
+  it('sets KMP_DUPLICATE_LIB_OK for the server on Windows only (WIN-4)', () => {
+    expect(voiceServerEnv({ platform: 'win32', env: {}, token: 't' })).toMatchObject({ KMP_DUPLICATE_LIB_OK: 'TRUE', LAWNMOWER_VOICE_TOKEN: 't', PYTHONUTF8: '1' });
+    expect(voiceServerEnv({ platform: 'win32', env: { KMP_DUPLICATE_LIB_OK: 'FALSE' }, token: 't' }).KMP_DUPLICATE_LIB_OK).toBeUndefined();
+    expect(voiceServerEnv({ platform: 'linux', env: {}, token: 't' }).KMP_DUPLICATE_LIB_OK).toBeUndefined();
+  });
+
+  it('healthSettling: loading engines, or not-yet-loaded ones after --preload', () => {
+    expect(healthSettling({ stt: { loaded: false, loading: true }, tts: { loaded: true } }, false)).toBe(true);
+    expect(healthSettling({ stt: { loaded: false }, tts: { loaded: true } }, true)).toBe(true);
+    expect(healthSettling({ stt: { loaded: false }, tts: { loaded: true } }, false)).toBe(false);
+    expect(healthSettling({ stt: { loaded: false, error: 'x' }, tts: { loaded: true } }, true)).toBe(false);
+    expect(healthSettling(null, true)).toBe(false);
+    expect(describeHealth({ device: { cuda: false }, stt: { loading: true }, tts: { loaded: true } })).toBe('CPU mode · speech recognition loading… · voice loaded');
+  });
+
+  it('polls /health quickly while the models load, then reports them loaded', async () => {
+    const h = harness({ fakeArgs: ['--fake-loading-ms', '400'], opts: { healthIntervalMs: 60000, loadingPollMs: 80 } });
+    await h.sidecar.start();
+    expect(h.sidecar.info().health.stt).toMatchObject({ loading: true });
+    const loaded = await h.waitFor((x) => x.status === 'ready' && x.health?.stt?.loaded === true, 4000);
+    expect(loaded.health.tts.loaded).toBe(true);
+    expect(loaded.detail).toMatch(/speech recognition loaded/);
   });
 });

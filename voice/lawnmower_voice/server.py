@@ -139,14 +139,28 @@ class CorsAndHostMiddleware:
             await self._plain(send, 403, {"error": "origin not allowed", "code": "cors"}, vary)
             return
 
+        started = False
+
         async def send_with_cors(message) -> None:
+            nonlocal started
             if message["type"] == "http.response.start":
+                started = True
                 h = MutableHeaders(scope=message)
                 h["Access-Control-Allow-Origin"] = origin
                 h.add_vary_header("Origin")
             await send(message)
 
-        await self.app(scope, receive, send_with_cors)
+        try:
+            await self.app(scope, receive, send_with_cors)
+        except Exception as exc:
+            # Starlette sends unhandled-exception 500s from ServerErrorMiddleware, OUTSIDE this
+            # middleware, i.e. without the CORS header - the browser then hides the response and
+            # the app can only say "unreachable". Answer here instead, with the header.
+            if started:
+                raise
+            log.exception("unhandled error")
+            body = {"error": f"internal error: {type(exc).__name__}: {exc}", "code": "internal"}
+            await self._plain(send_with_cors, 500, body)
 
 
 # --------------------------------------------------------------------------------------------

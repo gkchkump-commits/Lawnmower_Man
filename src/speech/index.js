@@ -87,10 +87,23 @@ export function createSpeechServices(deps) {
       return VOICE_SETUP_HINT;
     },
     /**
+     * A note while voice input works but its model is not loaded yet (the first request then
+     * waits for the load; the client allows for that). '' otherwise.
+     */
+    statusNote() {
+      const s = voiceClient.health?.stt;
+      if (!serverOk('stt') || !s || typeof s !== 'object' || s.error) return '';
+      if (s.loading) return 'Speech recognition is still loading (the first start can take a minute).';
+      if (!s.loaded) return 'Speech recognition loads on first use (this can take a minute the first time).';
+      return '';
+    },
+    /**
      * @param {ArrayBuffer} wav @param {{ signal?: AbortSignal }} [o]
      */
     async transcribe(wav, o = {}) {
-      const lang = voiceSettings().sttLanguage || 'en';
+      // settings.voice.sttLanguage: 'en', 'de', … ; '' or 'auto' = detect the language
+      const raw = voiceSettings().sttLanguage;
+      const lang = typeof raw === 'string' ? raw.trim() || 'auto' : 'en';
       return voiceClient.transcribe(wav, { language: lang, signal: o.signal });
     },
   };

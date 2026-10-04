@@ -7,15 +7,16 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: Origins allowed by CORS (contract section 6) - the Vite dev server, `vite preview`,
-#: the packaged app's custom protocol and opaque ("null") origins.
+#: Origins allowed by CORS (contract section 6) - the Vite dev server, `vite preview` and the
+#: packaged app's custom protocol. NOT the opaque "null" origin: any web page can produce it
+#: (sandboxed iframes, data: URLs), which would let it read /health and pass Private Network
+#: Access preflights. ``--cors-origin null`` re-enables it for debugging.
 DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
     "http://127.0.0.1:4173",
     "http://localhost:4173",
     "app://lawnmower",
-    "null",
 )
 
 #: Whisper models that are too slow for interactive use on a CPU. When the STT engine
@@ -46,10 +47,47 @@ DEFAULT_KOKORO_VOICES = "voices-v1.0.bin"
 ENV_TOKEN = "LAWNMOWER_VOICE_TOKEN"
 ENV_MODELS = "LAWNMOWER_VOICE_MODELS"
 
+#: Written by the setup scripts into the venv (``sys.prefix``): the models folder they
+#: downloaded into (``-ModelsDir`` / ``--models-dir``, or the per-user folder of a packaged app).
+MODELS_POINTER_FILE = "lawnmower-models-dir.txt"
+
 
 def package_root() -> Path:
     """The ``voice/`` directory that contains the ``lawnmower_voice`` package."""
     return Path(__file__).resolve().parent.parent
+
+
+def prepare_process_env(platform: str | None = None, env: dict | None = None) -> None:
+    """Process-wide environment fixes; call before any engine library is imported.
+
+    Windows: CTranslate2 and torch (optional backends, or pulled in by misaki's spaCy extras)
+    each ship their own Intel OpenMP runtime (libiomp5md.dll). When the second copy initialises,
+    it aborts the process with "OMP: Error #15" - a native abort, so no Python fallback runs.
+    ``KMP_DUPLICATE_LIB_OK=TRUE`` lets both coexist (the user's own value wins).
+    """
+    platform = platform or sys.platform
+    env = os.environ if env is None else env
+    if platform == "win32":
+        env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+
+def is_packaged_layout(root: Path | None = None) -> bool:
+    """True when running from an installed app's ``resources/voice`` (next to ``app.asar``).
+
+    The installer wipes that folder on every update/uninstall, so nothing large may live there.
+    """
+    root = package_root() if root is None else root
+    return (root.parent / "app.asar").exists()
+
+
+def models_dir_from_pointer(prefix: Path | None = None) -> Path | None:
+    """The models folder recorded by the setup script in the venv, if any."""
+    pointer = Path(sys.prefix if prefix is None else prefix) / MODELS_POINTER_FILE
+    try:
+        text = pointer.read_text(encoding="utf-8-sig").strip().strip('"')  # tolerate a BOM
+    except OSError:
+        return None
+    return Path(text).expanduser() if text else None
 
 
 def _writable_dir(path: Path) -> bool:
@@ -77,28 +115,40 @@ def user_cache_dir() -> Path:
 def default_models_dir() -> Path:
     """Resolve the model cache directory.
 
-    Order: ``$LAWNMOWER_VOICE_MODELS`` > ``voice/models`` (next to the venv, created by the
-    setup scripts) when writable > a per-user cache directory.
+    Order: ``$LAWNMOWER_VOICE_MODELS`` > the folder recorded by the setup script in the venv
+    (``MODELS_POINTER_FILE``) > the per-user cache directory for a packaged app (its install
+    folder is wiped by updates) > ``voice/models`` when writable > the per-user cache directory.
     """
     env = os.environ.get(ENV_MODELS, "").strip()
     if env:
         return Path(env).expanduser()
+    recorded = models_dir_from_pointer()
+    if recorded is not None:
+        return recorded
+    if is_packaged_layout():
+        return user_cache_dir()
     local = package_root() / "models"
     if local.is_dir() or _writable_dir(local):
         return local
     return user_cache_dir()
 
 
+def is_english(language: str | None) -> bool:
+    """'en', 'en-US', 'en_GB' -> True; '', 'auto' (detect) and other languages -> False."""
+    lang = (language or "").strip().lower()
+    return lang == "en" or lang.startswith(("en-", "en_"))
+
+
 def cpu_model_for(model: str, cpu_model: str, language: str | None) -> str:
     """Pick the Whisper model to use on a CPU.
 
     ``cpu_model == "same"`` keeps ``model``. An English-only ``*.en`` CPU model is swapped for
-    its multilingual sibling when the configured language is not English.
+    its multilingual sibling unless the configured language is English ('' / 'auto' mean
+    "detect", which needs the multilingual model too).
     """
     if not cpu_model or cpu_model == "same" or model not in LARGE_STT_MODELS:
         return model
-    lang = (language or "").lower()
-    if cpu_model.endswith(".en") and lang not in ("en", ""):
+    if cpu_model.endswith(".en") and not is_english(language):
         return cpu_model[: -len(".en")]
     return cpu_model
 

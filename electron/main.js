@@ -34,7 +34,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SettingsStore } from './settings.js';
 import { ClaudeSession, resolveWorkdir } from './claude-session.js';
-import { VoiceSidecar } from './voice-sidecar.js';
+import { VoiceSidecar, voiceVenvDirs } from './voice-sidecar.js';
+import { CursorTracker } from './cursor-tracker.js';
 import { windowLayout, placeWindow, resizeAnchored, reclamp } from './window-manager.js';
 import {
   APP_HOST,
@@ -53,6 +54,7 @@ import {
   validatePermissionResponse,
   validateSettingsPatch,
   validateSizePreset,
+  validateTurnId,
   validateTurnText,
 } from './ipc-validate.js';
 import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
@@ -78,6 +80,8 @@ const state = {
   /** @type {ClaudeSession|null} */ claude: null,
   /** @type {VoiceSidecar|null} */ voice: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
+  /** @type {CursorTracker|null} */ cursor: null,
+  followCursor: true, // settings.avatar.followCursor, cached (read ~30 times a second)
   /** @type {ReturnType<typeof createLogger>} */ log: createLogger({ dir: null }),
   /** @type {boolean|null} */ ignoreMouse: null,
   quitting: false,
@@ -156,6 +160,7 @@ async function init() {
   const settings = new SettingsStore({ dir: userData, log });
   settings.load();
   state.settings = settings;
+  state.followCursor = settings.get().avatar.followCursor !== false;
 
   setupSessionSecurity(session.defaultSession);
   protocol.handle(APP_SCHEME, createAppProtocolHandler({ root: distDir, host: APP_HOST, csp, log }));
@@ -182,11 +187,13 @@ async function init() {
   state.claude = claude;
 
   // --- Voice ---
+  // Packaged: the code ships in resources/voice, but the venv (and models) live in a per-user
+  // folder (packagedVoiceHome) — the installer wipes the install directory on every update.
   const voiceDir = app.isPackaged ? path.join(process.resourcesPath, 'voice') : path.join(appRoot, 'voice');
   const voice = new VoiceSidecar({
     getSettings: () => settings.get().voice,
     voiceDir,
-    venvDirs: [path.join(voiceDir, '.venv'), path.join(userData, 'voice-venv')],
+    venvDirs: voiceVenvDirs({ packaged: app.isPackaged, voiceDir }),
     log,
   });
   voice.on('status', (info) => {
@@ -194,6 +201,19 @@ async function init() {
     rebuildTray();
   });
   state.voice = voice;
+
+  // --- Global cursor follow (the eyes follow the mouse anywhere on the desktop) ---
+  state.cursor = new CursorTracker({
+    getPoint: () => screen.getCursorScreenPoint(),
+    getOrigin: () => {
+      const w = state.win;
+      if (!w || w.isDestroyed()) return null;
+      const b = w.getContentBounds();
+      return { x: b.x, y: b.y };
+    },
+    isActive: () => cursorTrackingWanted(),
+    send: (p) => sendToRenderer('lm:cursor', p),
+  });
 
   registerIpc();
   createWindow();
@@ -222,6 +242,7 @@ async function init() {
 
 /** Stop child processes and release OS resources (bounded so quitting never hangs). */
 async function shutdown() {
+  state.cursor?.stop();
   try {
     globalShortcut.unregisterAll();
   } catch { /* ignore */ }
@@ -328,23 +349,37 @@ function createWindow() {
   win.once('ready-to-show', () => {
     win.show();
     applyMouseIgnore(false);
+    syncCursorTracking();
   });
   let moveTimer = /** @type {NodeJS.Timeout|null} */ (null);
   win.on('move', () => {
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = setTimeout(savePosition, 400);
   });
-  win.on('show', rebuildTray);
-  win.on('hide', rebuildTray);
+  const onVisibility = () => {
+    rebuildTray();
+    syncCursorTracking();
+  };
+  win.on('show', onVisibility);
+  win.on('hide', onVisibility);
+  win.on('minimize', syncCursorTracking);
+  win.on('restore', syncCursorTracking);
   win.on('closed', () => {
     if (state.win === win) state.win = null;
+    syncCursorTracking();
   });
 
   win.webContents.on('render-process-gone', (_e, details) => {
     state.log('error', `[main] renderer gone: ${details.reason} (exit ${details.exitCode})`);
+    // Fail safe: a click-through window with no live renderer could never turn interactive again.
+    applyMouseIgnore(false);
     if (state.quitting || details.reason === 'clean-exit') return;
     if (++state.rendererCrashes <= 3) setTimeout(() => loadRenderer(win), 1000);
   });
+  // Any (re)load — crash recovery, F5 in development — starts interactive; the new page turns
+  // click-through on again once it has booted.
+  win.webContents.on('did-start-loading', () => applyMouseIgnore(false));
+  win.webContents.on('did-finish-load', () => state.cursor?.reset());
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     state.log('error', `[main] failed to load ${url}: ${desc} (${code})`);
   });
@@ -411,6 +446,19 @@ function applyMouseIgnore(wantIgnore) {
   win.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
 }
 
+/** Poll the global cursor only while someone can see the eyes follow it. */
+function cursorTrackingWanted() {
+  const win = state.win;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return false;
+  return state.followCursor;
+}
+
+function syncCursorTracking() {
+  if (!state.cursor) return;
+  if (cursorTrackingWanted()) state.cursor.start();
+  else state.cursor.stop();
+}
+
 function savePosition() {
   const win = state.win;
   if (!win || win.isDestroyed()) return;
@@ -454,6 +502,10 @@ function onSettingsChanged(next, prev) {
   if (changed('voice')) state.voice?.applySettings();
   if (changed('hotkeys')) {
     state.hotkeys?.apply(next.hotkeys);
+  }
+  if (next.avatar.followCursor !== prev.avatar.followCursor) {
+    state.followCursor = next.avatar.followCursor !== false;
+    syncCursorTracking();
   }
   const win = state.win;
   if (win && !win.isDestroyed() && changed('window')) {
@@ -587,6 +639,7 @@ function registerIpc() {
   const settings = /** @type {SettingsStore} */ (state.settings);
 
   handle('lm:claude:send', (text) => claude.send(validateTurnText(text)));
+  handle('lm:claude:cancel', (turnId) => claude.cancel(validateTurnId(turnId)));
   handle('lm:claude:interrupt', () => claude.interrupt());
   handle('lm:claude:reset', () => claude.reset());
   handle('lm:claude:respond-permission', (requestId, decision) => {
@@ -653,4 +706,4 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions };
+export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking };

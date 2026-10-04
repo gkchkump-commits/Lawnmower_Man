@@ -8,6 +8,10 @@
 # CUDA wheels that support Blackwell (CTranslate2 >= 4.7 + cuBLAS 12.9 wheels, onnxruntime-gpu
 # >= 1.27 built for CUDA 13), verifies CUDA, downloads the models and runs a smoke test.
 # Safe to re-run; needs no root. See docs/VOICE.md.
+#
+# Installed app (resources/app.asar next to resources/voice, e.g. an AppImage): the install
+# folder is read-only or replaced on update, so the venv, the models and a writable copy of the
+# package go to ${XDG_DATA_HOME:-~/.local/share}/lawnmower-man/voice instead (the app looks there).
 set -euo pipefail
 
 usage() {
@@ -16,12 +20,13 @@ Usage: scripts/setup-voice.sh [options]
 
   --cpu              CPU-only install (no CUDA/cuDNN wheels)
   --no-models        do not download models (they download on first use instead)
-  --torch-tts        also install the optional PyTorch Kokoro backend (torch cu128, ~3 GB)
+  --torch-tts        also install the optional PyTorch Kokoro backend (torch from PyPI, CUDA 13; ~3 GB)
   --misaki           also install misaki (Kokoro's English G2P; pulls spaCy)
   --python PATH      Python interpreter to build the venv with (default: python3.12, then 3.11)
-  --recreate         delete and rebuild voice/.venv
-  --stt-model NAME   Whisper model to pre-download (default: large-v3-turbo)
-  --models-dir DIR   model cache (default: voice/models, or $LAWNMOWER_VOICE_MODELS)
+  --recreate         delete and rebuild the venv
+  --stt-model NAME   Whisper model to pre-download and smoke-test (default: large-v3-turbo)
+  --models-dir DIR   model cache (default: voice/models, or $LAWNMOWER_VOICE_MODELS); recorded in
+                     the venv so the app and later runs use it too
   --skip-smoke       skip the final load-and-run smoke test
   -h, --help         show this help
 EOF
@@ -49,10 +54,23 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 VOICE_DIR="$ROOT/voice"
-VENV="$VOICE_DIR/.venv"
+# Must match electron/voice-sidecar.js packagedVoiceHome().
+PACKAGED=0; [ -e "$ROOT/app.asar" ] && PACKAGED=1
+if [ "$PACKAGED" = 1 ]; then
+  VOICE_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/lawnmower-man/voice"
+  VENV="$VOICE_HOME/.venv"
+  PKG_DIR="$VOICE_HOME/src"
+else
+  VOICE_HOME="$VOICE_DIR"
+  VENV="$VOICE_DIR/.venv"
+  PKG_DIR="$VOICE_DIR"
+fi
 VPY="$VENV/bin/python"
+# The models folder the app should use is recorded here (read by lawnmower_voice.config).
+POINTER="$VENV/lawnmower-models-dir.txt"
 ORT_GPU_SPEC='onnxruntime-gpu[cuda,cudnn]>=1.27,<2'
-TORCH_INDEX_GPU="https://download.pytorch.org/whl/cu128"
+# Linux: torch from PyPI is the CUDA 13 build (nvidia-cudnn-cu13, like onnxruntime-gpu). The
+# cu128 index would pull nvidia-cudnn-cu12, which overwrites the same nvidia/cudnn files.
 TORCH_INDEX_CPU="https://download.pytorch.org/whl/cpu"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -61,6 +79,17 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -f "$VOICE_DIR/pyproject.toml" ] || die "voice/pyproject.toml not found next to this script ($VOICE_DIR)."
 [ "$(uname -s)" = "Linux" ] || warn "This script targets Linux; on Windows use scripts\\setup-voice.ps1."
+[ "$PACKAGED" = 1 ] && echo "Installed app detected: voice files go to $VOICE_HOME"
+
+# Models folder: --models-dir > $LAWNMOWER_VOICE_MODELS > recorded by an earlier run > the
+# per-user folder of an installed app > (empty) voice/models. Trailing slashes are dropped.
+if [ -z "$MODELS_DIR" ] && [ -s "$POINTER" ]; then MODELS_DIR="$(head -n 1 "$POINTER")"; fi
+if [ -z "$MODELS_DIR" ] && [ "$PACKAGED" = 1 ]; then MODELS_DIR="$VOICE_HOME/models"; fi
+if [ -n "$MODELS_DIR" ]; then
+  MODELS_DIR="${MODELS_DIR%\"}"; MODELS_DIR="${MODELS_DIR#\"}"
+  while [ "${#MODELS_DIR}" -gt 1 ] && [ "${MODELS_DIR%/}" != "$MODELS_DIR" ]; do MODELS_DIR="${MODELS_DIR%/}"; done
+  case "$MODELS_DIR" in /*) ;; ~*) MODELS_DIR="${HOME}${MODELS_DIR#\~}" ;; *) MODELS_DIR="$PWD/$MODELS_DIR" ;; esac
+fi
 
 # ---------------------------------------------------------------------------------------------
 say "Looking for Python 3.12"
@@ -112,22 +141,34 @@ if [ -d "$VENV" ]; then
   fi
 fi
 if [ ! -x "$VPY" ]; then
+  mkdir -p "$(dirname "$VENV")"
   if ! "$PY" -m venv "$VENV"; then
     rm -rf "$VENV"
     die "Could not create the venv. On Debian/Ubuntu install the venv module: sudo apt install python${PYV}-venv"
   fi
 fi
+if [ -n "$MODELS_DIR" ]; then
+  printf '%s\n' "$MODELS_DIR" > "$POINTER"
+  echo "Models folder: $MODELS_DIR"
+fi
 "$VPY" -m pip install --upgrade --disable-pip-version-check pip setuptools wheel
 
-free_kb="$(df -Pk "$VOICE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+if [ "$PACKAGED" = 1 ]; then
+  # pip writes build metadata next to the package: install from a writable copy
+  rm -rf "$PKG_DIR"
+  mkdir -p "$PKG_DIR"
+  cp -R "$VOICE_DIR"/. "$PKG_DIR"/
+fi
+
+free_kb="$(df -Pk "$(dirname "$VENV")" 2>/dev/null | awk 'NR==2 {print $4}')"
 if [ -n "${free_kb:-}" ] && [ "$free_kb" -lt $((8 * 1024 * 1024)) ]; then
-  warn "Only $((free_kb / 1024 / 1024)) GB free on the drive holding $VOICE_DIR; the GPU install needs ~5 GB plus ~2.5 GB of models."
+  warn "Only $((free_kb / 1024 / 1024)) GB free on the drive holding $VENV; the GPU install needs ~5 GB plus ~2.5 GB of models."
 fi
 
 # ---------------------------------------------------------------------------------------------
 if [ "$CPU" = 1 ]; then
   say "Installing the CPU voice stack"
-  "$VPY" -m pip install --disable-pip-version-check -e "${VOICE_DIR}[cpu]"
+  "$VPY" -m pip install --disable-pip-version-check -e "${PKG_DIR}[cpu]"
   # A previous GPU install leaves onnxruntime-gpu behind; make the CPU wheel the only one.
   if "$VPY" -m pip show onnxruntime-gpu >/dev/null 2>&1; then
     "$VPY" -m pip uninstall -y onnxruntime-gpu onnxruntime
@@ -140,7 +181,7 @@ else
   else
     warn "nvidia-smi not found: is the NVIDIA driver installed? (R570+ for RTX 50-series, R580+ for GPU text-to-speech)"
   fi
-  "$VPY" -m pip install --disable-pip-version-check -e "${VOICE_DIR}[gpu]"
+  "$VPY" -m pip install --disable-pip-version-check -e "${PKG_DIR}[gpu]"
   if [ "$PYV" != "3.10" ]; then
     # kokoro-onnx and faster-whisper depend on the CPU 'onnxruntime' wheel, which shares the
     # 'onnxruntime' folder with onnxruntime-gpu. Remove both, then reinstall the GPU wheel.
@@ -153,14 +194,21 @@ fi
 
 if [ "$MISAKI" = 1 ]; then
   say "Installing misaki (English G2P)"
-  "$VPY" -m pip install --disable-pip-version-check -e "${VOICE_DIR}[misaki]"
+  "$VPY" -m pip install --disable-pip-version-check -e "${PKG_DIR}[misaki]"
 fi
 
 if [ "$TORCH_TTS" = 1 ]; then
-  if [ "$CPU" = 1 ]; then idx="$TORCH_INDEX_CPU"; else idx="$TORCH_INDEX_GPU"; fi
-  say "Installing PyTorch from $idx and the 'kokoro' package (optional backend)"
-  "$VPY" -m pip install --disable-pip-version-check torch --index-url "$idx"
-  "$VPY" -m pip install --disable-pip-version-check -e "${VOICE_DIR}[torch]"
+  if [ "$CPU" = 1 ]; then
+    say "Installing PyTorch (CPU build) and the 'kokoro' package (optional backend)"
+    "$VPY" -m pip install --disable-pip-version-check torch --index-url "$TORCH_INDEX_CPU"
+  else
+    say "Installing PyTorch (PyPI CUDA 13 build) and the 'kokoro' package (optional backend)"
+    "$VPY" -m pip install --disable-pip-version-check torch
+  fi
+  "$VPY" -m pip install --disable-pip-version-check -e "${PKG_DIR}[torch]"
+  if "$VPY" -m pip show nvidia-cudnn-cu12 >/dev/null 2>&1 && "$VPY" -m pip show nvidia-cudnn-cu13 >/dev/null 2>&1; then
+    warn "nvidia-cudnn-cu12 and nvidia-cudnn-cu13 are both installed and share the nvidia/cudnn folder; GPU text-to-speech may fall back to the CPU. Re-run with --recreate."
+  fi
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -184,30 +232,44 @@ SMOKE=""
 if [ "$NO_MODELS" = 0 ] && [ "$SKIP_SMOKE" = 0 ] && [ "$MODELS_OK" = 1 ]; then
   say "Smoke test: loading both engines and running one request each (first GPU run compiles kernels; can take a minute)"
   SMOKE="$VENV/smoke.json"
-  "$VPY" -m lawnmower_voice.doctor --smoke --device "$DEVICE_ARG" --human ${MODELS_ARGS[@]+"${MODELS_ARGS[@]}"} > "$SMOKE" || warn "Smoke test failed to run."
+  # A crash inside a native library leaves no (or partial) JSON: the summary must not die on it.
+  "$VPY" -m lawnmower_voice.doctor --smoke --device "$DEVICE_ARG" --human --stt-model "$STT_MODEL" ${MODELS_ARGS[@]+"${MODELS_ARGS[@]}"} > "$SMOKE" \
+    || { warn "Smoke test failed to run (see the messages above)."; SMOKE=""; }
 fi
 
 # ---------------------------------------------------------------------------------------------
 say "Summary"
 "$VPY" - "$REPORT" "$SMOKE" "$CPU" <<'PYEOF'
 import json, sys
-rep = json.load(open(sys.argv[1]))
-smoke = json.load(open(sys.argv[2])) if sys.argv[2] else None
+
+def load(path):
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as exc:
+        print(f"  (could not read {path}: {exc})")
+        return None
+
+rep = load(sys.argv[1]) or {}
+smoke = load(sys.argv[2])
 cpu = sys.argv[3] == "1"
-s = rep["summary"]
-print(f"  Python:         {rep['python']} ({rep['executable']})")
-print(f"  GPU:            {s['gpu'] or 'none detected'}")
+s = rep.get("summary") or {}
+print(f"  Python:         {rep.get('python', '?')} ({rep.get('executable', '?')})")
+print(f"  GPU:            {s.get('gpu') or 'none detected'}")
 if not cpu:
-    print(f"  STT on GPU:     {'ready' if s['sttGpuReady'] else 'NOT available (CPU fallback)'}  [CTranslate2]")
-    print(f"  TTS on GPU:     {'ready' if s['ttsGpuReady'] else 'NOT available (CPU fallback)'}  [onnxruntime CUDA]")
+    print(f"  STT on GPU:     {'ready' if s.get('sttGpuReady') else 'NOT available (CPU fallback)'}  [CTranslate2]")
+    print(f"  TTS on GPU:     {'ready' if s.get('ttsGpuReady') else 'NOT available (CPU fallback)'}  [onnxruntime CUDA]")
 if smoke:
     for k in ("stt", "tts"):
-        r = smoke["smoke"][k]; st = r.get("status", {})
+        r = (smoke.get("smoke") or {}).get(k) or {}
+        st = r.get("status") or {}
         if r.get("ok"):
             print(f"  {k.upper()} smoke test: OK on {st.get('device')} {st.get('computeType', '')}  (load {r.get('loadMs')} ms, run {r.get('runMs')} ms)")
         else:
-            print(f"  {k.upper()} smoke test: FAILED - {r.get('error')}")
-for w in s["warnings"]:
+            print(f"  {k.upper()} smoke test: FAILED - {r.get('error', 'no result')}")
+for w in s.get("warnings") or []:
     print(f"  WARNING: {w}")
 PYEOF
 cat <<EOF

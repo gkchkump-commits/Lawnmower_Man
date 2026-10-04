@@ -54,13 +54,18 @@ export class Transcript {
     return id;
   }
 
-  /** @param {number} id @param {'failed'} status @param {string} [detail] */
+  /**
+   * failed: could not be sent / was dropped by an error; cancelled: skipped because the user
+   * stopped or sent something newer before it started.
+   * @param {number} id @param {'failed'|'cancelled'} status @param {string} [detail]
+   */
   markUser(id, status, detail) {
     const msg = this._users.get(id);
-    if (!msg || status !== 'failed') return;
-    msg.classList.add('failed');
+    if (!msg || (status !== 'failed' && status !== 'cancelled')) return;
+    msg.classList.add(status);
     msg.querySelector('.msg-note')?.remove();
-    msg.appendChild(h('div', { class: 'msg-note' }, `Not sent${detail ? ` — ${detail}` : ''}`));
+    const note = status === 'cancelled' ? 'Not sent — stopped' : `Not sent${detail ? ` — ${detail}` : ''}`;
+    msg.appendChild(h('div', { class: 'msg-note' }, note));
     this._scroll();
   }
 

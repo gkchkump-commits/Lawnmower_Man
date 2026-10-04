@@ -116,6 +116,17 @@ export class Controller extends Emitter {
 
     this._offs = /** @type {Array<() => void>} */ ([]);
     this._userMsgByTurn = new Map();
+    // Pre-emption of messages that have not started yet (queued in main while the CLI starts,
+    // restarts, backs off after a crash, or finishes an interrupted turn):
+    /** Generation of the latest sendText(); sends with gen <= _staleGen were pre-empted. */
+    this._sendGen = 0;
+    this._staleGen = 0;
+    /** @type {Set<string>} turn ids sent to main that have not started (or been dropped) yet */
+    this._queuedTurns = new Set();
+    /** @type {Set<string>} pre-empted turn ids: cancelled in main, or interrupted as soon as they start */
+    this._staleTurns = new Set();
+    /** @type {Set<string>} turn ids main reported as cancelled */
+    this._cancelledTurns = new Set();
     this._errorFlash = false;
     this._errorTimer = null;
     this._resumeTimer = null;
@@ -159,11 +170,39 @@ export class Controller extends Emitter {
         this.view.setClaudeStatus?.(this.claudeStatus);
         if (st.status === 'error') this._toast(st.detail || 'The Claude CLI is not available.', 'error');
         if (st.sessionId) this._noteResumed(st.sessionId);
+        this._recover(st);
       }
     } catch (err) {
       console.warn('[controller] claude.status() failed', err);
     }
     this.voiceChanged();
+  }
+
+  /**
+   * This window was reloaded (renderer crash recovery, F5) while main still runs a turn: pick
+   * up the running turn (so Stop/Esc work and its reply shows), the messages still queued, and
+   * any approval card the CLI is waiting on — without saying the prompt again.
+   * @param {Record<string, any>} st ClaudeStatus
+   */
+  _recover(st) {
+    const active = typeof st.activeTurnId === 'string' && st.activeTurnId ? st.activeTurnId : null;
+    if (active && !this.turns.has(active)) {
+      const t = this._turn(active);
+      t.started = true;
+      t.recovered = true;
+      this.view.assistantStart?.(active);
+      this.activeTurnId = active;
+      this._setState('thinking');
+    }
+    const queued = Array.isArray(st.queuedTurnIds) ? st.queuedTurnIds.filter((id) => typeof id === 'string' && id && !this.turns.has(id)) : [];
+    for (const id of queued) {
+      this._queuedTurns.add(id);
+      this.pendingSends++;
+    }
+    if (queued.length && !active) this._setState('thinking');
+    for (const p of Array.isArray(st.pendingPermissions) ? st.pendingPermissions : []) {
+      if (p && typeof p === 'object') this._onPermission({ type: 'permission_request', ...p }, { replay: true });
+    }
   }
 
   dispose() {
@@ -195,7 +234,7 @@ export class Controller extends Emitter {
   /** The voice server status / capabilities changed (after the VoiceClient was reconfigured). */
   voiceChanged() {
     const sttOk = !!this.mic && this.stt.available();
-    this.view.setMicAvailable?.(sttOk, sttOk ? '' : (this.mic ? this.stt.unavailableReason?.() || 'Voice input is unavailable.' : 'No microphone support in this window.'));
+    this.view.setMicAvailable?.(sttOk, sttOk ? this.stt.statusNote?.() || '' : (this.mic ? this.stt.unavailableReason?.() || 'Voice input is unavailable.' : 'No microphone support in this window.'));
     this._syncHandsFree();
   }
 
@@ -218,9 +257,12 @@ export class Controller extends Emitter {
     if (!clean) return false;
     this.noteActivity();
     if (this.listen) this._cancelListening();
-    if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy) this._preempt();
+    // Newer input wins: the running reply is interrupted and older messages that have not
+    // started yet are dropped (they would otherwise be answered — and spoken — first).
+    if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
     const msgId = this.view.addUserMessage?.(clean, { source: o.source || 'text' });
     this.pendingSends++;
+    const gen = ++this._sendGen;
     this._setState('thinking');
     Promise.resolve()
       .then(() => this.bridge.claude.send(clean))
@@ -229,6 +271,9 @@ export class Controller extends Emitter {
         this._userMsgByTurn.set(r.turnId, msgId);
         const t = this.turns.get(r.turnId);
         if (t) t.userMsgId = msgId;
+        if (!t || !t.started) this._queuedTurns.add(r.turnId);
+        // pre-empted (Stop, Esc, a newer message) while send() was still in flight
+        if (gen <= this._staleGen) this._dropTurn(r.turnId);
       }, (err) => {
         this.pendingSends = Math.max(0, this.pendingSends - 1);
         this.view.markUserMessage?.(msgId, 'failed', errMsg(err));
@@ -309,7 +354,7 @@ export class Controller extends Emitter {
   toggleListening() {
     this.noteActivity();
     if (this.listen) return this.stopListening();
-    const busy = this.speech.busy || !!this.activeTurnId;
+    const busy = this.speech.busy || !!this.activeTurnId || this.pendingSends > 0;
     if (!this.mic || !this.stt.available()) {
       // no voice input: the hotkey still stops a reply; otherwise explain how to enable it
       if (busy) this.interrupt();
@@ -348,10 +393,13 @@ export class Controller extends Emitter {
     return true;
   }
 
-  /** Stop the current reply entirely (speech and the Claude turn). @returns {boolean} */
+  /**
+   * Stop the current reply entirely (speech and the Claude turn) and drop messages that have
+   * not started yet. @returns {boolean} whether anything was running or waiting
+   */
   interrupt() {
     this.noteActivity();
-    const busy = !!this.activeTurnId || this.speech.busy;
+    const busy = !!this.activeTurnId || this.speech.busy || this.pendingSends > 0 || !!this.claudeStatus.busy;
     this._preempt();
     this._maybeIdle();
     return busy;
@@ -459,13 +507,15 @@ export class Controller extends Emitter {
         return undefined;
       }
       case 'turn_end': return this._onTurnEnd(ev);
+      case 'turn_cancelled': return this._onTurnCancelled(ev);
       case 'error': return this._onError(ev);
       default: return undefined; // unknown event types are ignored
     }
   }
 
   _onStatus(ev) {
-    this.claudeStatus = { ...this.claudeStatus, status: ev.status, detail: ev.detail || '' };
+    // main is 'busy' exactly while a turn runs (also one this window never saw start)
+    this.claudeStatus = { ...this.claudeStatus, status: ev.status, detail: ev.detail || '', busy: ev.status === 'busy' };
     this.view.setClaudeStatus?.(this.claudeStatus);
     if (ev.status === 'restarting' || ev.status === 'exited' || ev.status === 'error') this._dropAllPermissions();
     if (ev.status === 'error') {
@@ -481,6 +531,10 @@ export class Controller extends Emitter {
       this.speech.clear();
       this.turns.clear();
       this._userMsgByTurn.clear();
+      this._queuedTurns.clear();
+      this._staleTurns.clear();
+      this._cancelledTurns.clear();
+      this._staleGen = this._sendGen;
       this.activeTurnId = null;
       this.pendingSends = 0;
       this._dropAllPermissions();
@@ -508,6 +562,7 @@ export class Controller extends Emitter {
 
   _onTurnStart(ev) {
     const t = this._turn(ev.turnId);
+    this._queuedTurns.delete(t.id);
     if (!t.started) {
       t.started = true;
       this.pendingSends = Math.max(0, this.pendingSends - 1);
@@ -515,7 +570,28 @@ export class Controller extends Emitter {
     }
     if (t.userMsgId === undefined) t.userMsgId = this._userMsgByTurn.get(ev.turnId);
     this.activeTurnId = ev.turnId;
+    if (this._staleTurns.has(t.id)) {
+      // pre-empted before it started, but main started it anyway (cancel lost the race, or an
+      // older main without cancel): keep it silent and stop it right away
+      t.silenced = true;
+      this._interruptRunning();
+    }
     if (this.state !== 'speaking' && !this.listen && this.state !== 'transcribing') this._setState('thinking');
+  }
+
+  /** main dropped a message before it started (our cancel). */
+  _onTurnCancelled(ev) {
+    const id = typeof ev.turnId === 'string' ? ev.turnId : '';
+    if (!id || this._cancelledTurns.has(id)) return;
+    const t = this.turns.get(id);
+    if (t && t.started) return; // too late: it is running and gets interrupted instead
+    this._cancelledTurns.add(id);
+    this._queuedTurns.delete(id);
+    this.pendingSends = Math.max(0, this.pendingSends - 1);
+    const msgId = this._userMsgByTurn.get(id);
+    if (msgId !== undefined) this.view.markUserMessage?.(msgId, 'cancelled');
+    this.turns.delete(id);
+    this._maybeIdle();
   }
 
   _onTextDelta(ev) {
@@ -542,6 +618,9 @@ export class Controller extends Emitter {
     const name = String(ev.name || '');
     const input = ev.input && typeof ev.input === 'object' ? ev.input : {};
     this.view.toolUse?.(ev.turnId, { id: String(ev.id || ''), name, input, label: toolChipLabel(name, input) });
+    // The CLI sends tool_use before the message_end that would flush what Claude said just
+    // before the tool ("Let me read that file."): speak that first — then no cue is needed.
+    if (this._speaks(t)) this._enqueue(t, t.chunker.flush());
     this._busyThinking();
     // a short spoken cue when Claude goes straight to a tool without saying anything
     if (this._speaks(t) && !t.cueSaid && !t.spoke && !this.speech.busy) {
@@ -550,22 +629,34 @@ export class Controller extends Emitter {
     }
   }
 
-  _onPermission(ev) {
+  /**
+   * @param {any} ev permission_request
+   * @param {{ replay?: boolean }} [o] replay: a card restored after a reload (no spoken prompt)
+   */
+  _onPermission(ev, o = {}) {
     if (typeof ev.requestId !== 'string' || !ev.requestId) return;
+    if (this.permissions.has(ev.requestId)) return;
     const input = ev.input && typeof ev.input === 'object' ? ev.input : {};
     const toolName = String(ev.toolName || 'tool');
     const turnId = typeof ev.turnId === 'string' ? ev.turnId : null;
     this.permissions.set(ev.requestId, { requestId: ev.requestId, turnId, toolName, input });
+    const summary = summarizeToolInput(toolName, input);
     this.view.showPermission?.({
       requestId: ev.requestId,
       turnId,
       toolName,
       input,
       description: typeof ev.description === 'string' ? ev.description : '',
-      summary: summarizeToolInput(toolName, input),
+      summary,
+      // the complete request, for the card's "Show all" (Allow stays disabled until then)
+      fullSummary: summary.truncated ? summarizeToolInput(toolName, input, { full: true }) : undefined,
     });
     this.view.setAttention?.(true);
     this.noteActivity();
+    if (o.replay) {
+      this._busyThinking();
+      return;
+    }
     this.avatar?.blink?.();
     const t = turnId ? this._turn(turnId) : null;
     if (this.settings.voice.speakReplies && this.tts.available() && !(t && t.silenced)) {
@@ -592,9 +683,12 @@ export class Controller extends Emitter {
       if (this._speaks(t)) this._enqueue(t, t.chunker.push(result));
     }
     if (this._speaks(t)) this._enqueue(t, t.chunker.flush());
+    const interrupted = !!ev.interrupted || !!t.silenced;
     this.view.assistantEnd?.(ev.turnId, {
-      isError: !!ev.isError,
-      interrupted: !!ev.interrupted || t.silenced,
+      // The CLI reports an interrupted turn as is_error (error_during_execution); a reply the
+      // user stopped is "stopped", not failed, so it must not get the error look.
+      isError: !!ev.isError && !interrupted,
+      interrupted,
       result,
       empty: !t.gotText,
       durationMs: ev.durationMs,
@@ -616,6 +710,7 @@ export class Controller extends Emitter {
       const t = this.turns.get(ev.turnId);
       if (!t || !t.started) {
         // a queued message that was dropped before it started
+        this._queuedTurns.delete(ev.turnId);
         this.pendingSends = Math.max(0, this.pendingSends - 1);
         const msgId = this._userMsgByTurn.get(ev.turnId);
         if (msgId !== undefined) this.view.markUserMessage?.(msgId, 'failed', msg);
@@ -671,15 +766,46 @@ export class Controller extends Emitter {
     for (const t of this.turns.values()) t.silenced = true;
   }
 
-  /** New input while busy: silence everything and interrupt the running turn. */
+  /**
+   * New input / Stop: silence everything, interrupt the running turn, and drop every message
+   * that has not started yet — the ones main has queued and the ones whose send() is still in
+   * flight (dropped as soon as their turn id is known).
+   */
   _preempt() {
     this._silenceTurns();
     this.speech.clear();
-    if (this.activeTurnId) {
-      Promise.resolve()
-        .then(() => this.bridge.claude.interrupt())
-        .catch((err) => console.warn('[controller] interrupt failed', err));
+    this._staleGen = this._sendGen;
+    for (const id of [...this._queuedTurns]) this._dropTurn(id);
+    if (this.activeTurnId || this.claudeStatus.busy) this._interruptRunning();
+  }
+
+  /** Ask main to stop the running turn (also one this window does not know, e.g. after a reload). */
+  _interruptRunning() {
+    Promise.resolve()
+      .then(() => this.bridge.claude.interrupt())
+      .catch((err) => console.warn('[controller] interrupt failed', err));
+  }
+
+  /**
+   * A pre-empted message: cancel it in main if it has not started (it never reaches the CLI);
+   * if it has, keep it silent and interrupt it.
+   * @param {string} turnId
+   */
+  _dropTurn(turnId) {
+    if (this._staleTurns.has(turnId)) return;
+    this._staleTurns.add(turnId);
+    const t = this.turns.get(turnId);
+    if (t && t.started) {
+      t.silenced = true;
+      this._queuedTurns.delete(turnId);
+      if (!t.ended && this.activeTurnId === turnId) this._interruptRunning();
+      return;
     }
+    const claude = this.bridge.claude;
+    if (typeof claude.cancel !== 'function') return; // older main: _onTurnStart interrupts it
+    Promise.resolve()
+      .then(() => claude.cancel(turnId))
+      .catch((err) => console.warn('[controller] cancel failed', err));
   }
 
   // ------------------------------------------------------------------------------------------
@@ -894,6 +1020,13 @@ export class Controller extends Emitter {
   }
 
   _pruneTurns() {
+    // pre-emption bookkeeping only matters for recent turns
+    for (const set of [this._staleTurns, this._cancelledTurns]) {
+      for (const id of set) {
+        if (set.size <= 100) break;
+        set.delete(id);
+      }
+    }
     if (this.turns.size <= 40) return;
     for (const [id, t] of this.turns) {
       if (this.turns.size <= 20) break;

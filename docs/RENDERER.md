@@ -13,11 +13,14 @@ src/app/                 controller.js      conversation state machine (contract
                          speech-queue.js    ordered TTS with limited parallel prefetch
                          permission.js      tool-call summaries, spoken prompts and cues
                          click-through.js   setIgnoreMouse decisions with hysteresis
+                         gaze.js            cursor position (desktop-wide in Electron) → avatar.lookAt
+                         settings-defaults.js renderer copy of the §4 defaults, getPath/patchFor
+                         emitter.js         tiny event emitter
 src/audio/               player.js (Web Audio queue + analyser), lipsync.js, mic.js (+ mic-worklet.js),
                          vad.js, dsp.js (resampler), wav.js
 src/speech/              voice-client.js (voice server §6), web-speech.js (browser voice), index.js (tts/stt routing)
 src/ui/                  app-view.js, transcript.js, markdown.js, composer.js, permission-cards.js,
-                         toasts.js, status.js, settings-drawer.js, accelerator.js, avatar-host.js, layout.js
+                         toasts.js, status.js, settings-drawer.js, accelerator.js, avatar-host.js, layout.js, dom.js
 src/styles/app.css       the glass UI
 ```
 

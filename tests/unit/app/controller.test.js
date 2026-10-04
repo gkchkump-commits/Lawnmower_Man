@@ -404,3 +404,149 @@ describe('Controller: voice input', () => {
     expect(stt.calls).toBe(1);
   });
 });
+
+describe('Controller: messages that have not started yet (F2)', () => {
+  it('Stop while the only message is still queued in main cancels it: nothing is spoken', async () => {
+    const { c, bridge, tts, view } = setup();
+    await c.start();
+    c.sendText('tell me a story'); // the CLI is still starting: queued in main, no turn_start
+    await tick();
+    expect(c.interrupt()).toBe(true);
+    await tick();
+    expect(bridge.calls).toContainEqual(['cancel', 't1']);
+    expect(c.state).toBe('idle');
+    expect(view.of('markUserMessage')).toContainEqual([1, 'cancelled']);
+    // even if main had started it anyway, it would be stopped and kept silent
+    bridge.emit(ev.start('t1'));
+    bridge.emit(ev.delta('t1', 'Once upon a time there was a lighthouse. '));
+    bridge.emit(ev.msgEnd('t1'));
+    await tick(20);
+    expect(tts.texts).toEqual([]);
+    expect(bridge.calls.filter((x) => x[0] === 'interrupt').length).toBeGreaterThan(0);
+  });
+
+  it('a newer message drops older queued ones; only the newest is answered aloud', async () => {
+    const { c, bridge, tts, view } = setup({ clipMs: 5 });
+    await c.start();
+    c.sendText('A');
+    await tick();
+    bridge.emit(ev.start('t1'));
+    bridge.emit(ev.delta('t1', 'Reply to A. '));
+    c.sendText('B'); // pre-empts t1 (interrupt); t2 queued in main behind the stopping t1
+    await tick();
+    c.sendText('C'); // t1 still stopping: t2 must not be answered
+    await tick();
+    expect(bridge.calls).toContainEqual(['cancel', 't2']);
+    expect(bridge.calls.some((x) => x[0] === 'cancel' && x[1] === 't3')).toBe(false);
+    expect(view.of('markUserMessage')).toContainEqual([2, 'cancelled']);
+    bridge.emit(ev.msgEnd('t1'));
+    bridge.emit(ev.end('t1', { isError: true, interrupted: true }));
+    bridge.emit(ev.start('t3', 'C'));
+    bridge.emit(ev.delta('t3', 'Reply to C. '));
+    bridge.emit(ev.msgEnd('t3'));
+    bridge.emit(ev.end('t3'));
+    await waitFor(() => c.state === 'idle');
+    expect(tts.texts).not.toContain('Full reply to B.');
+    expect(tts.texts.at(-1)).toBe('Reply to C.');
+  });
+
+  it('a message whose send() was still in flight is cancelled once its turn id is known', async () => {
+    const { c, bridge } = setup();
+    await c.start();
+    let release;
+    bridge.sendImpl = () => new Promise((r) => { release = () => r({ turnId: 'slow-1' }); });
+    c.sendText('first');
+    await tick();
+    c.interrupt(); // send() has not resolved yet
+    bridge.sendImpl = null;
+    release();
+    await tick();
+    expect(bridge.calls).toContainEqual(['cancel', 'slow-1']);
+    expect(c.pendingSends).toBe(0);
+    expect(c.state).toBe('idle');
+  });
+
+  it('without bridge.cancel (older main) a pre-empted turn is interrupted as soon as it starts', async () => {
+    const { c, bridge, tts } = setup();
+    delete bridge.claude.cancel;
+    await c.start();
+    c.sendText('old');
+    await tick();
+    c.sendText('new');
+    await tick();
+    bridge.emit(ev.start('t1', 'old'));
+    await tick();
+    expect(bridge.calls.filter((x) => x[0] === 'interrupt')).toHaveLength(1);
+    bridge.emit(ev.delta('t1', 'Answer to the old question. '));
+    bridge.emit(ev.end('t1', { isError: true, interrupted: true }));
+    bridge.emit(ev.start('t2', 'new'));
+    bridge.emit(ev.delta('t2', 'Answer to the new one. '));
+    bridge.emit(ev.end('t2'));
+    await waitFor(() => c.state === 'idle');
+    expect(tts.texts).toEqual(['Answer to the new one.']);
+  });
+
+  it('Stop interrupts a turn main reports busy even when this window never saw it start', async () => {
+    const { c, bridge } = setup();
+    await c.start();
+    bridge.emit({ type: 'status', status: 'busy' });
+    expect(c.interrupt()).toBe(true);
+    await tick();
+    expect(bridge.calls).toContainEqual(['interrupt']);
+  });
+});
+
+describe('Controller: picking up after a renderer reload (F1)', () => {
+  const reloadedStatus = {
+    status: 'busy', busy: true, queue: 1, activeTurnId: 'turn-7', queuedTurnIds: ['turn-8'],
+    pendingPermissions: [{ requestId: 'perm-1', turnId: 'turn-7', toolName: 'Bash', input: { command: 'echo hi', description: 'Say hi' }, description: 'Say hi' }],
+  };
+
+  it('restores the running turn and its approval card without saying the prompt again', async () => {
+    const { c, bridge, view, tts } = setup();
+    bridge.claude.status = async () => reloadedStatus;
+    await c.start();
+    expect(c.activeTurnId).toBe('turn-7');
+    expect(c.state).toBe('thinking');
+    expect(view.of('assistantStart')).toEqual([['turn-7']]);
+    expect(c.permissions.size).toBe(1);
+    expect(view.of('showPermission')[0][0]).toMatchObject({ requestId: 'perm-1', toolName: 'Bash', summary: { target: 'echo hi' } });
+    await tick(10);
+    expect(tts.texts).toEqual([]); // no spoken prompt on replay
+    // the card works
+    expect(await c.respondPermission('perm-1', true)).toBe(true);
+    expect(bridge.calls).toContainEqual(['respondPermission', 'perm-1', { behavior: 'allow', updatedInput: { command: 'echo hi', description: 'Say hi' } }]);
+  });
+
+  it('Stop/Esc work for the restored turn and drop the restored queue', async () => {
+    const { c, bridge } = setup({ tts: false });
+    bridge.claude.status = async () => reloadedStatus;
+    await c.start();
+    expect(c.interrupt()).toBe(true);
+    await tick();
+    expect(bridge.calls).toContainEqual(['interrupt']);
+    expect(bridge.calls).toContainEqual(['cancel', 'turn-8']);
+    bridge.emit(ev.end('turn-7', { isError: true, interrupted: true }));
+    expect(c.state).toBe('idle');
+    expect(c.permissions.size).toBe(0);
+  });
+});
+
+describe('Controller: tool cue order (F6)', () => {
+  it('what Claude said before a tool is spoken before (and instead of) the cue', async () => {
+    const { c, bridge, tts } = setup({ clipMs: 5 });
+    await c.start();
+    c.sendText('read notes.txt');
+    bridge.emit(ev.start('t1'));
+    // live CLI order: text without trailing space, tool_use, tool_result, then message_end
+    for (const d of ['Let', ' me find', ' that', ' secret number for you.']) bridge.emit(ev.delta('t1', d));
+    bridge.emit({ type: 'tool_use', turnId: 't1', id: 'toolu_1', name: 'Read', input: { file_path: '/x/notes.txt' } });
+    bridge.emit({ type: 'tool_result', turnId: 't1', id: 'toolu_1', isError: false, summary: 'ok' });
+    bridge.emit(ev.msgEnd('t1'));
+    bridge.emit(ev.delta('t1', 'The number is seven.'));
+    bridge.emit(ev.msgEnd('t1'));
+    bridge.emit(ev.end('t1', { result: 'The number is seven.' }));
+    await waitFor(() => c.state === 'idle');
+    expect(tts.texts).toEqual(['Let me find that secret number for you.', 'The number is seven.']);
+  });
+});

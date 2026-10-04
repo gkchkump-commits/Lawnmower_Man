@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MOCK_REPLIES, createMockBridge, pickScript } from '../../../src/bridge/mock.js';
+import { MOCK_REPLIES, createMockBridge, mockHotkeyConflicts, pickScript } from '../../../src/bridge/mock.js';
 import { createFakeVoiceFetch, fakeSynthesize } from '../../../src/bridge/mock-voice.js';
 import { getBridge } from '../../../src/bridge/index.js';
 import { decodeWav, base64ToBytes, encodeWav } from '../../../src/audio/wav.js';
@@ -200,5 +200,42 @@ describe('fake voice server', () => {
     expect((await vc.getHealth()).device.cuda).toBe(true);
     vc.configure({ status: 'ready', url: 'http://127.0.0.1:59999', token: 'wrong' });
     await expect(vc.voices()).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+  });
+});
+
+describe('mock bridge: cancel, reload status, hotkey conflicts', () => {
+  it('cancel() drops a queued turn (turn_cancelled) and interrupts a running one', async () => {
+    const b = createMockBridge({ ...FAST, wordDelayMs: 5 });
+    const events = collect(b);
+    const first = (await b.claude.send('tell me a long story')).turnId;
+    const second = (await b.claude.send('hello')).turnId;
+    await waitFor(() => events.some((e) => e.type === 'text_delta' && e.turnId === first));
+    const st = await b.claude.status();
+    expect(st).toMatchObject({ activeTurnId: first, queuedTurnIds: [second], pendingPermissions: [] });
+    expect(await b.claude.cancel(second)).toEqual({ cancelled: true, interrupted: false });
+    await waitFor(() => events.some((e) => e.type === 'turn_cancelled'));
+    expect(events.find((e) => e.type === 'turn_cancelled')).toEqual({ type: 'turn_cancelled', turnId: second });
+    expect(await b.claude.cancel(first)).toEqual({ cancelled: false, interrupted: true });
+    await waitFor(() => events.some((e) => e.type === 'turn_end' && e.turnId === first));
+    expect(events.some((e) => e.type === 'turn_start' && e.turnId === second)).toBe(false);
+  });
+
+  it('status() lists an open permission request so a reloaded page can restore its card', async () => {
+    const b = createMockBridge(FAST);
+    const events = collect(b);
+    const { turnId } = await b.claude.send('please run the tests');
+    await waitFor(() => events.some((e) => e.type === 'permission_request'));
+    const st = await b.claude.status();
+    expect(st.pendingPermissions).toEqual([expect.objectContaining({ turnId, toolName: 'Bash', input: expect.objectContaining({ command: 'npm test -- --reporter=dot' }) })]);
+  });
+
+  it('app.info() reports duplicate shortcuts as conflicts (like main)', async () => {
+    expect(mockHotkeyConflicts({ toggleListen: 'Ctrl+Alt+Space', toggleChat: 'Alt+Ctrl+Space', stopSpeaking: '' }))
+      .toEqual([{ name: 'toggleChat', accelerator: 'Alt+Ctrl+Space', reason: 'same as toggleListen' }]);
+    const b = createMockBridge(FAST);
+    expect((await b.app.info()).hotkeyConflicts).toEqual([]);
+    const s = await b.settings.get();
+    await b.settings.set({ hotkeys: { toggleChat: s.hotkeys.toggleListen } });
+    expect((await b.app.info()).hotkeyConflicts).toEqual([{ name: 'toggleChat', accelerator: s.hotkeys.toggleListen, reason: 'same as toggleListen' }]);
   });
 });

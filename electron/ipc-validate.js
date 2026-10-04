@@ -31,6 +31,12 @@ export function validateTurnText(text) {
   return text;
 }
 
+/** @param {unknown} turnId a turn id returned by claude.send() */
+export function validateTurnId(turnId) {
+  if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(turnId)) throw new Error('Invalid turn id');
+  return turnId;
+}
+
 /**
  * @param {unknown} requestId @param {unknown} decision
  * @returns {{ requestId: string, decision: { behavior: 'allow'|'deny', message?: string, updatedInput?: Record<string, any> } }}

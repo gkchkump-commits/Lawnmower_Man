@@ -4,16 +4,26 @@
 
 /**
  * @typedef {object} PermissionSummary
- * @property {string} title    e.g. "Run a command"
+ * @property {string} title    fixed wording from the tool name, e.g. "Run a command" — never
+ *                             text the model wrote (that goes in `explanation`)
+ * @property {string} [explanation] the model's own description of the call (Bash/PowerShell);
+ *                             shown as "Claude says: …", never as the title
  * @property {string} target   the main subject (command, file path, URL, query) — may be ''
- * @property {string} [detail] a longer preview (file content, edit diff, prompt), clipped
+ * @property {string} [detail] a longer preview (file content, edit diff, prompt)
  * @property {'danger'|'write'|'read'|'web'|'other'} risk
- * @property {Array<{ label: string, value: string }>} fields  other input fields, clipped
+ * @property {Array<{ label: string, value: string }>} fields  other input fields
+ * @property {boolean} truncated  something approved by Allow is not shown in full (target,
+ *                             detail or a field was shortened, or fields were left out). The
+ *                             card then keeps Allow disabled until the user opens "Show all".
+ * @property {number} hiddenChars  how many characters are not shown (0 when not truncated)
  */
 
-const MAX_TARGET = 400;
-const MAX_DETAIL = 1200;
-const MAX_FIELD = 160;
+// Generous preview sizes: typical commands, paths and edits fit completely. Anything longer is
+// marked `truncated` — never silently cut (Allow approves the full input).
+const MAX_TARGET = 2000;
+const MAX_DETAIL = 4000;
+const MAX_FIELD = 400;
+const MAX_FIELDS = 12;
 
 /** @param {unknown} v @param {number} max */
 export function clip(v, max) {
@@ -29,81 +39,119 @@ export function clip(v, max) {
 /** @param {string} p */
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || String(p || '');
 
+/** @param {unknown} v */
+function asText(v) {
+  if (typeof v === 'string') return v;
+  if (v === undefined || v === null) return '';
+  try { return JSON.stringify(v) ?? String(v); } catch { return String(v); }
+}
+
 /**
+ * Summarise a tool call for the approval card.
  * @param {string} toolName
  * @param {Record<string, any>} input
+ * @param {{ full?: boolean }} [o]  full: nothing is shortened (the card's "Show all" view)
  * @returns {PermissionSummary}
  */
-export function summarizeToolInput(toolName, input) {
+export function summarizeToolInput(toolName, input, o = {}) {
   const name = String(toolName || 'tool');
   const inp = input && typeof input === 'object' ? input : {};
-  const rest = (/** @type {string[]} */ used) => Object.entries(inp)
-    .filter(([k, v]) => !used.includes(k) && v !== undefined && v !== null && v !== '')
-    .slice(0, 6)
-    .map(([k, v]) => ({ label: k, value: clip(v, MAX_FIELD) }));
+  const full = !!o.full;
+  let hidden = 0;
+  let truncated = false;
+  /** Preview of an approved value: shortened only when not `full`, and then flagged. */
+  const show = (/** @type {unknown} */ v, /** @type {number} */ max) => {
+    const s = asText(v);
+    if (full || s.length <= max) return s;
+    truncated = true;
+    hidden += s.length - (max - 1);
+    return `${s.slice(0, max - 1)}…`;
+  };
+  const rest = (/** @type {string[]} */ used) => {
+    const entries = Object.entries(inp).filter(([k, v]) => !used.includes(k) && v !== undefined && v !== null && v !== '');
+    const shown = full ? entries : entries.slice(0, MAX_FIELDS);
+    for (const [k, v] of entries.slice(shown.length)) {
+      truncated = true;
+      hidden += k.length + asText(v).length;
+    }
+    return shown.map(([k, v]) => ({ label: k, value: show(v, MAX_FIELD) }));
+  };
+  const diff = (/** @type {unknown} */ a, /** @type {unknown} */ b) => [
+    ...asText(a).split('\n').map((l) => `- ${l}`),
+    ...asText(b).split('\n').map((l) => `+ ${l}`),
+  ].join('\n');
 
+  /** @type {Omit<PermissionSummary, 'truncated'|'hiddenChars'>} */
+  let s;
   switch (name) {
     case 'Bash':
     case 'PowerShell':
-      return {
-        title: inp.description ? clip(inp.description, 120) : 'Run a command',
-        target: clip(inp.command, MAX_TARGET),
+      // The title is fixed: `description` is written by the model and could claim anything
+      // ("List files (read-only)") — it is shown separately, labelled as Claude's words.
+      s = {
+        title: 'Run a command',
+        explanation: inp.description ? clip(inp.description, 300) : '',
+        target: show(inp.command, MAX_TARGET),
         risk: 'danger',
         fields: rest(['command', 'description']),
       };
+      break;
     case 'Write':
-      return {
+      s = {
         title: `Write ${baseName(inp.file_path)}`,
-        target: clip(inp.file_path, MAX_TARGET),
-        detail: clip(inp.content, MAX_DETAIL),
+        target: show(inp.file_path, MAX_TARGET),
+        detail: show(inp.content, MAX_DETAIL),
         risk: 'write',
         fields: rest(['file_path', 'content']),
       };
+      break;
     case 'Edit':
-      return {
+      s = {
         title: `Edit ${baseName(inp.file_path)}`,
-        target: clip(inp.file_path, MAX_TARGET),
-        detail: diffPreview(inp.old_string, inp.new_string),
+        target: show(inp.file_path, MAX_TARGET),
+        detail: show(diff(inp.old_string, inp.new_string), MAX_DETAIL),
         risk: 'write',
         fields: rest(['file_path', 'old_string', 'new_string']),
       };
+      break;
     case 'MultiEdit':
-      return {
+      s = {
         title: `Edit ${baseName(inp.file_path)} (${Array.isArray(inp.edits) ? inp.edits.length : 0} changes)`,
-        target: clip(inp.file_path, MAX_TARGET),
-        detail: Array.isArray(inp.edits) ? clip(inp.edits.map((e) => diffPreview(e?.old_string, e?.new_string)).join('\n…\n'), MAX_DETAIL) : '',
+        target: show(inp.file_path, MAX_TARGET),
+        detail: Array.isArray(inp.edits) ? show(inp.edits.map((e) => diff(e?.old_string, e?.new_string)).join('\n…\n'), MAX_DETAIL) : '',
         risk: 'write',
         fields: rest(['file_path', 'edits']),
       };
+      break;
     case 'NotebookEdit':
-      return { title: `Edit notebook ${baseName(inp.notebook_path)}`, target: clip(inp.notebook_path, MAX_TARGET), detail: clip(inp.new_source, MAX_DETAIL), risk: 'write', fields: rest(['notebook_path', 'new_source']) };
+      s = { title: `Edit notebook ${baseName(inp.notebook_path)}`, target: show(inp.notebook_path, MAX_TARGET), detail: show(inp.new_source, MAX_DETAIL), risk: 'write', fields: rest(['notebook_path', 'new_source']) };
+      break;
     case 'Read':
-      return { title: `Read ${baseName(inp.file_path)}`, target: clip(inp.file_path, MAX_TARGET), risk: 'read', fields: rest(['file_path']) };
+      s = { title: `Read ${baseName(inp.file_path)}`, target: show(inp.file_path, MAX_TARGET), risk: 'read', fields: rest(['file_path']) };
+      break;
     case 'Glob':
-      return { title: 'Find files', target: clip(inp.pattern, MAX_TARGET), risk: 'read', fields: rest(['pattern']) };
+      s = { title: 'Find files', target: show(inp.pattern, MAX_TARGET), risk: 'read', fields: rest(['pattern']) };
+      break;
     case 'Grep':
-      return { title: 'Search in files', target: clip(inp.pattern, MAX_TARGET), risk: 'read', fields: rest(['pattern']) };
+      s = { title: 'Search in files', target: show(inp.pattern, MAX_TARGET), risk: 'read', fields: rest(['pattern']) };
+      break;
     case 'WebFetch':
-      return { title: 'Fetch a web page', target: clip(inp.url, MAX_TARGET), detail: clip(inp.prompt, MAX_DETAIL), risk: 'web', fields: rest(['url', 'prompt']) };
+      s = { title: 'Fetch a web page', target: show(inp.url, MAX_TARGET), detail: show(inp.prompt, MAX_DETAIL), risk: 'web', fields: rest(['url', 'prompt']) };
+      break;
     case 'WebSearch':
-      return { title: 'Search the web', target: clip(inp.query, MAX_TARGET), risk: 'web', fields: rest(['query']) };
+      s = { title: 'Search the web', target: show(inp.query, MAX_TARGET), risk: 'web', fields: rest(['query']) };
+      break;
     case 'Task':
     case 'Agent':
-      return { title: inp.description ? `Start a sub-agent: ${clip(inp.description, 80)}` : 'Start a sub-agent', target: '', detail: clip(inp.prompt, MAX_DETAIL), risk: 'other', fields: rest(['description', 'prompt']) };
+      s = { title: 'Start a sub-agent', explanation: inp.description ? clip(inp.description, 300) : '', target: '', detail: show(inp.prompt, MAX_DETAIL), risk: 'other', fields: rest(['description', 'prompt']) };
+      break;
     default: {
       const mcp = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
       const title = mcp ? `Use ${mcp[2].replace(/_/g, ' ')} (${mcp[1]})` : `Use ${name}`;
-      return { title, target: '', risk: 'other', fields: rest([]) };
+      s = { title, target: '', risk: 'other', fields: rest([]) };
     }
   }
-}
-
-/** @param {unknown} a @param {unknown} b */
-function diffPreview(a, b) {
-  const lines = [];
-  for (const l of String(a ?? '').split('\n').slice(0, 12)) lines.push(`- ${l}`);
-  for (const l of String(b ?? '').split('\n').slice(0, 12)) lines.push(`+ ${l}`);
-  return clip(lines.join('\n'), MAX_DETAIL);
+  return { ...s, truncated, hiddenChars: truncated ? hidden : 0 };
 }
 
 /**

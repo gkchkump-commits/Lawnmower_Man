@@ -150,7 +150,51 @@ def run_smoke(device: str = "auto", models_dir: str | None = None, stt_model: st
     return {"tts": tts_res, "stt": stt_res}
 
 
-def collect(smoke: bool = False, device: str = "auto", models_dir: str | None = None) -> dict:
+def espeak_data_check() -> dict:
+    """Can espeak-ng (Kokoro's phonemizer) open its data folder? A non-ASCII (Windows) or very
+    long venv path makes espeak-ng exit the whole process; the server then uses a short/ASCII
+    path or a copy (tts.safe_espeak_data_path)."""
+    try:
+        import espeakng_loader  # noqa: PLC0415
+
+        path = espeakng_loader.get_data_path()
+    except Exception as exc:
+        return {"ok": False, "skipped": True, "error": f"espeakng-loader unavailable: {type(exc).__name__}: {exc}"}
+    from .tts import espeak_path_ok  # noqa: PLC0415
+
+    ok = espeak_path_ok(path)
+    out: dict = {"ok": ok, "path": path}
+    if not ok:
+        out["error"] = (
+            "espeak-ng cannot open its data folder at this path (non-ASCII characters on Windows, or too long); "
+            "the voice server works around it with a short path or a one-time copy"
+        )
+    return out
+
+
+def cudnn_clash() -> str | None:
+    """Both the CUDA 12 and CUDA 13 cuDNN wheels install into the same nvidia/cudnn folder with
+    the same file names: the last one installed wins and onnxruntime's CUDA 13 provider may load
+    a CUDA 12 cuDNN (typically after installing a cu12/cu128 torch build)."""
+    from importlib import metadata  # noqa: PLC0415
+
+    def has(dist: str) -> bool:
+        try:
+            metadata.version(dist)
+            return True
+        except metadata.PackageNotFoundError:
+            return False
+
+    if has("nvidia-cudnn-cu12") and has("nvidia-cudnn-cu13"):
+        return (
+            "nvidia-cudnn-cu12 and nvidia-cudnn-cu13 are both installed and overwrite each other's libraries "
+            "(GPU text-to-speech may fall back to the CPU). Re-run the setup script with --recreate, "
+            "or remove the torch backend's cu12 wheels."
+        )
+    return None
+
+
+def collect(smoke: bool = False, device: str = "auto", models_dir: str | None = None, stt_model: str | None = None) -> dict:
     from . import cuda_libs
     from .__main__ import detect
     from .config import VoiceConfig
@@ -184,14 +228,23 @@ def collect(smoke: bool = False, device: str = "auto", models_dir: str | None = 
             "computeTypes": ct2.get("cudaComputeTypes", []),
             **({"error": ct2["error"]} if ct2.get("error") else {"error": "no CUDA device visible to CTranslate2"} if not ct2.get("cudaDevices") else {}),
         }
+    warnings = list(report.warnings)
+    esp = espeak_data_check()
+    if not esp.get("skipped"):
+        out["espeakData"] = esp  # informational: the server works around a bad path
+        if not esp["ok"]:
+            warnings.append(f"{esp['error']} ({esp['path']})")
+    clash = cudnn_clash()
+    if clash:
+        warnings.append(clash)
     if smoke:
-        out["smoke"] = run_smoke(device=device, models_dir=models_dir)
+        out["smoke"] = run_smoke(device=device, models_dir=models_dir, stt_model=stt_model)
     out["summary"] = {
         "gpu": report.primary.name if report.primary else None,
         "cuda": report.cuda,
         "sttGpuReady": bool(ct2.get("cudaDevices")),
         "ttsGpuReady": bool(out["checks"].get("onnxruntimeCuda", {}).get("ok")),
-        "warnings": report.warnings,
+        "warnings": warnings,
     }
     if smoke:
         s = out["smoke"]
@@ -233,8 +286,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--smoke", action="store_true", help="load the engines (models must be downloaded) and time one request each")
     ap.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     ap.add_argument("--models-dir", default=None)
+    ap.add_argument("--stt-model", default=None, help="Whisper model for the smoke test (default large-v3-turbo; use the one you downloaded)")
     ap.add_argument("--human", action="store_true", help="also print a readable summary to stderr")
     args = ap.parse_args(argv)
+    from .config import prepare_process_env
+
+    prepare_process_env()  # before any engine library is imported (Windows OpenMP clash)
     import logging
 
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
@@ -245,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as exc:
         print(json.dumps({"ok": False, "error": f"core dependency missing: {exc}"}))
         return 2
-    rep = collect(smoke=args.smoke, device=args.device, models_dir=args.models_dir)
+    rep = collect(smoke=args.smoke, device=args.device, models_dir=args.models_dir, stt_model=args.stt_model)
     if args.human:
         sys.stderr.write(_human(rep) + "\n")
     print(json.dumps(rep, default=str))

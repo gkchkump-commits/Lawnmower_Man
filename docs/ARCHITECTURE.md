@@ -90,6 +90,9 @@ The mock is also selected when the URL has `?mock=1`.
 lawnmower = {
   claude: {
     send(text: string): Promise<{ turnId: string }>,   // queue a user turn
+    cancel(turnId: string): Promise<{ cancelled: boolean, interrupted: boolean }>,
+                                                         // drop a turn that has not started (→ turn_cancelled);
+                                                         // a running one is interrupted instead
     interrupt(): Promise<void>,                          // stop the current turn
     reset(): Promise<void>,                              // start a fresh conversation
     respondPermission(requestId: string, decision: { behavior: 'allow'|'deny', message?: string, updatedInput?: object }): Promise<void>,
@@ -113,9 +116,17 @@ lawnmower = {
     minimize(): void, hide(): void, quit(): void,
   },
   onHotkey(cb: (name: 'toggleListen'|'stopSpeaking'|'toggleChat') => void): () => void,
+  onCursor(cb: (p: { x: number, y: number }) => void): () => void,
+                          // global cursor position in CSS px relative to the window's top-left
+                          // (may be outside the window); ~30 Hz, only while the window is visible,
+                          // avatar.followCursor is on and the cursor moved. Absent in the mock bridge.
   app: { info(): Promise<{ version: string, platform: string, electron: string, chrome: string }> },
 }
 ```
+
+Renderer use of `onCursor`: the eyes follow the cursor anywhere on the desktop (`src/app/gaze.js`:
+inside the avatar stage exactly like pointer tracking, outside it the gaze keeps the direction but
+eases off with distance); without `onCursor` (browser preview) pointer events over the page are used.
 
 ### 3.1 `ClaudeEvent` (main → renderer, in order of occurrence)
 
@@ -129,11 +140,20 @@ lawnmower = {
 { type: 'tool_result', turnId: string, id: string, isError: boolean, summary: string }
 { type: 'permission_request', turnId: string|null, requestId: string, toolName: string, input: object, description?: string }
 { type: 'message_end', turnId: string }                   // an assistant message finished (there may be several per turn when tools run)
-{ type: 'turn_end', turnId: string, result: string, isError: boolean, durationMs?: number, costUsd?: number, sessionId?: string }
+{ type: 'turn_end', turnId: string, result: string, isError: boolean, interrupted?: true, durationMs?: number, costUsd?: number, sessionId?: string }
+                                                          // interrupted: interrupt(), or reset()/stop() during the turn
+{ type: 'turn_cancelled', turnId: string }                // cancel() dropped a queued turn (no turn_start, never sent to the CLI)
 { type: 'error', message: string, turnId?: string }
 ```
 
-`ClaudeStatus = { status, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string }`
+`ClaudeStatus = { status, sessionId?: string, model?: string, busy: boolean, queue: number, cliPath?: string, cliVersion?: string,
+  activeTurnId?: string, queuedTurnIds: string[], pendingPermissions: [{ requestId, turnId, toolName, input, description? }] }`
+
+Events are not replayed: a renderer that (re)loads (start-up, crash recovery, F5 in development) calls
+`status()` and picks up the running turn, the queued turns and the open approval cards from it.
+Main also makes the window interactive again on every (re)load (click-through is re-enabled by the new page).
+Stop/Esc and newer input cancel messages that have not started yet (`cancel`), so a message waiting
+behind a stopping turn, a CLI start-up or a restart is never answered after the user moved on.
 
 ### 3.2 Claude CLI protocol (verified against Claude Code 2.1.x)
 
@@ -143,11 +163,16 @@ Spawn once and keep alive (one process = one conversation):
 claude -p --input-format stream-json --output-format stream-json --verbose
        --include-partial-messages --permission-prompt-tool stdio
        [--model <m>] [--effort <e>] [--resume <sessionId>]
-       (chat mode)  --tools "" --system-prompt-file <persona.txt>
-       (assistant)  --tools "Read,Glob,Grep,WebSearch,WebFetch" --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --append-system-prompt-file <persona.txt>
+       --setting-sources user
+       (chat mode)  --tools "" --system-prompt-file <persona.txt> --strict-mcp-config
+       (assistant)  --tools "Read,Glob,Grep,WebSearch,WebFetch" --allowedTools "WebSearch" --append-system-prompt-file <persona.txt>
        (agent)      --append-system-prompt-file <persona.txt> [--permission-mode acceptEdits]
 ```
-cwd = `settings.claude.workdir`. stdin lines (JSON, newline-terminated):
+cwd = `settings.claude.workdir`. `--setting-sources user`: `-p` shows no workspace-trust prompt, so the
+working folder's `.claude/settings*.json` (hooks!) are never loaded. Assistant mode pre-approves only
+WebSearch: a bare `Read`/`WebFetch` rule would allow reads anywhere on disk and fetches to any URL;
+without one the CLI allows reads inside the working folder and asks (an approval card) for the rest.
+stdin lines (JSON, newline-terminated):
 
 * `{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — send first; reply arrives as `control_response`.
 * `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}` — one turn.
@@ -210,13 +235,16 @@ command line — user text only ever travels over stdin; long prompts go in file
     position: null,              // {x,y} remembered
     showChat: true,
   },
-  hotkeys: {
+  hotkeys: {                     // Linux/macOS defaults
     toggleListen: 'CommandOrControl+Alt+Space',
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
-  },
+  },                             // Windows: Control+Shift+Space / Control+Shift+F9 / Control+Shift+F10
 }
 ```
+Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key> global shortcut would swallow AltGr characters
+(Polish ć/ź, Hungarian/Czech & and #, …). settings.json carries a top-level `"version"`; loading a v1
+file on Windows moves hotkeys that still hold the old Ctrl+Alt defaults to the new ones (once).
 
 ## 5. Avatar module (renderer)
 
@@ -266,11 +294,15 @@ energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weigh
 
 ## 6. Voice server — `voice/` (Python 3.12, FastAPI + uvicorn)
 
-Launch: `python -m lawnmower_voice --host 127.0.0.1 --port <p> --token <t> [--device auto|cuda|cpu] [--stt-model large-v3-turbo] [--tts-voice af_heart]`
-(token can also come from env `LAWNMOWER_VOICE_TOKEN`). Prints one JSON line
+Launch: `python -m lawnmower_voice --host 127.0.0.1 --port <p> --token <t> [--device auto|cuda|cpu] [--stt-model large-v3-turbo] [--stt-language en|de|…|auto] [--tts-voice af_heart] [--preload]`
+(token can also come from env `LAWNMOWER_VOICE_TOKEN`; the app passes it only there, plus `--preload`
+so both models load right after start-up, and `--stt-language` from settings, which also picks the
+CPU-fallback Whisper model). Prints one JSON line
 `{"event":"ready","port":p}` to stdout once listening. All endpoints except `/health`
 require `Authorization: Bearer <token>`. CORS: allow `http://127.0.0.1:5173`, `http://localhost:5173`,
-`http://127.0.0.1:4173`, `app://lawnmower` and `null` origins; headers Authorization, Content-Type.
+`http://127.0.0.1:4173`, `http://localhost:4173` and `app://lawnmower` (not `null`: any web page can send
+it; `--cors-origin null` opts in for debugging); headers Authorization, Content-Type, X-Sample-Rate.
+Errors, including unexpected 500s, are JSON `{error, code}` and carry the CORS header.
 
 | Method & path | Request | Response |
 |---|---|---|
@@ -300,5 +332,10 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   the mock bridge: app boots, avatar renders non-black, typed message round-trips through
   the mock, states change.
 * `npm run test:voice` — pytest with model backends mocked (no downloads).
-* Visual check: `/dev/avatar.html?fixedTime=1&compare=1` renders the avatar next to
-  the reference frame (copy reference frames the harness needs into `public/` or import them).
+* Visual check: `/dev/avatar.html?fixedTime=1&compare=1` renders the avatar next to the
+  pack's reference frame (`assets/avatars/<pack>/preview/{neutral,blink,teeth,open}.jpg`);
+  `tools/visual/` has the screenshot and compare tools (URL parameters in its README).
+* Real app: `ELECTRON_PATH=<electron binary> xvfb-run -a node scripts/electron-e2e.mjs [--live]`
+  launches `electron/main.js` with Playwright's Electron driver (fake or real Claude CLI) and checks
+  app://, CSP, the bridge, settings IPC, a streamed turn, voice status and a clean boot without
+  console errors.

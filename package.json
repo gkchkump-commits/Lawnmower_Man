@@ -1,0 +1,151 @@
+{
+  "name": "lawnmower-man",
+  "productName": "Lawnmower Man",
+  "version": "0.1.0",
+  "description": "Holographic desktop avatar for Claude, powered by the Claude CLI and local GPU speech.",
+  "author": {
+    "name": "gkchkump-commits",
+    "url": "https://github.com/gkchkump-commits"
+  },
+  "homepage": "https://github.com/gkchkump-commits/Lawnmower_Man",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gkchkump-commits/Lawnmower_Man.git"
+  },
+  "type": "module",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"vite\" \"wait-on tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:voice": "cd voice && python -m pytest -q",
+    "lint": "eslint .",
+    "dist": "vite build && electron-builder --publish never",
+    "test:live-claude": "cross-env LIVE_CLAUDE=1 vitest run tests/unit/systems/claude-live.test.js",
+    "check:electron": "node scripts/check-electron.mjs",
+    "dist:win": "vite build && electron-builder --win --publish never",
+    "dist:linux-dir": "vite build && electron-builder --linux dir --publish never",
+    "test:packaged": "node scripts/electron-e2e.mjs --packaged"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.12.0",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3",
+    "wait-on": "^9.5.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "build": {
+    "appId": "com.lawnmower.avatar",
+    "productName": "Lawnmower Man",
+    "copyright": "Copyright (c) 2026 gkchkump-commits and the Lawnmower Man contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/assets"
+    },
+    "files": [
+      "dist/**",
+      "!dist/dev/**",
+      "!dist/assets/avatars/*/preview/**",
+      "electron/**",
+      "!electron/assets/*.ico",
+      "!electron/assets/*.nsh",
+      "package.json",
+      "!**/node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "voice",
+        "to": "voice",
+        "filter": [
+          "**/*",
+          "!.venv/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!tests/**",
+          "!.pytest_cache/**",
+          "!**/*.egg-info/**",
+          "!models/**",
+          "!build/**"
+        ]
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "setup-voice.ps1",
+          "setup-voice.cmd",
+          "setup-voice.sh"
+        ]
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      }
+    ],
+    "asar": true,
+    "publish": null,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "selectPerMachineByDefault": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lawnmower Man",
+      "uninstallDisplayName": "Lawnmower Man",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "electron/assets/icon.ico",
+      "uninstallerIcon": "electron/assets/icon.ico",
+      "installerHeaderIcon": "electron/assets/icon.ico",
+      "include": "electron/assets/installer.nsh",
+      "artifactName": "Lawnmower-Man-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Lawnmower-Man-${version}-portable.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "electron/assets/icon.png",
+      "artifactName": "Lawnmower-Man-${version}.${ext}",
+      "synopsis": "Holographic desktop avatar for Claude"
+    }
+  }
+}

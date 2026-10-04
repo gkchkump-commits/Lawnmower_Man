@@ -1,0 +1,9 @@
+# Line endings. The repository stores LF; Windows scripts are checked out with CRLF everywhere
+# (cmd.exe misparses LF-only batch files (labels, multi-line blocks) and Windows PowerShell
+# tooling expects CRLF), and shell scripts always keep LF (bash rejects CRLF: $'\r': command not found).
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.psd1  text eol=crlf
+*.sh    text eol=lf

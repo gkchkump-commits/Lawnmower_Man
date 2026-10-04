@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>Lawnmower Man</title>
+    <link rel="stylesheet" href="./styles/app.css" />
+  </head>
+  <body data-state="idle" data-chat="full" data-panel="shown" data-boot="loading">
+    <div id="app">
+      <!-- Avatar area: the hologram canvas, a drag zone over the head, window toolbar,
+           toasts and permission cards. Transparent everywhere the head isn't. -->
+      <section id="stage" class="stage" aria-label="Claude">
+        <canvas id="avatar" class="avatar-canvas"></canvas>
+        <div class="avatar-fallback" aria-hidden="true">
+          <div class="orb"><span class="eye l"></span><span class="eye r"></span><span class="mouth"></span></div>
+        </div>
+        <div class="drag-zone" aria-hidden="true">
+          <i class="dz dz-top"></i><i class="dz dz-mid"></i><i class="dz dz-low"></i>
+        </div>
+        <nav class="toolbar no-drag" aria-label="Window controls">
+          <button id="btn-new" type="button" class="icon-btn" aria-label="New conversation" title="New conversation">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button id="btn-chat" type="button" class="icon-btn" aria-label="Show or hide the chat" title="Chat panel">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
+          </button>
+          <button id="btn-settings" type="button" class="icon-btn" aria-label="Settings" title="Settings" aria-controls="drawer">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.4z" /></svg>
+          </button>
+          <button id="btn-min" type="button" class="icon-btn" aria-label="Minimize" title="Minimize">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" /></svg>
+          </button>
+          <button id="btn-hide" type="button" class="icon-btn" aria-label="Hide to tray" title="Hide (the tray icon brings it back)">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </nav>
+        <div id="toasts" class="toasts no-drag"></div>
+        <div id="cards" class="cards no-drag" aria-live="assertive"></div>
+      </section>
+
+      <!-- Chat panel: below the avatar (full mode) or floating over it (minimal mode). -->
+      <section id="panel" class="panel no-drag" aria-label="Conversation">
+        <div id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
+        <form id="composer" class="composer" autocomplete="off">
+          <button id="mic" type="button" class="mic-btn" aria-label="Talk">
+            <span class="mic-ring" aria-hidden="true"></span>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3M8.5 21h7" /></svg>
+          </button>
+          <textarea id="input" rows="1" placeholder="Message Claude…" aria-label="Message Claude" spellcheck="true"></textarea>
+          <button id="send" type="submit" class="send-btn" aria-label="Send" title="Send (Enter)">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-3-7-7-1z" /></svg>
+          </button>
+        </form>
+        <div id="status" class="statusbar"></div>
+      </section>
+
+      <aside id="drawer" class="drawer no-drag" hidden role="dialog" aria-modal="true" aria-label="Settings"></aside>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

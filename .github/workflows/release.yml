@@ -217,8 +217,12 @@ jobs:
         shell: powershell
         run: |
           $script = Join-Path $env:INSTALL_DIR 'resources\scripts\setup-voice.ps1'
-          $status = Join-Path $env:RUNNER_TEMP 'voice-setup-status.json'
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -NoModels -SkipSmoke -Yes -StatusFile $status
+          $status = Join-Path $env:GITHUB_WORKSPACE 'voice-setup-out\status.json'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $status) | Out-Null
+          # No -Yes and no console input: the runner has no NVIDIA driver, and the script's
+          # "install the CPU version instead?" question then defaults to no, so the GPU wheels
+          # (the [gpu] extra a tester's RTX laptop gets) are really installed.
+          '' | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -NoModels -SkipSmoke -StatusFile $status
           $code = $LASTEXITCODE
           Write-Host "setup exit code: $code"
           if (Test-Path -LiteralPath $status) { Get-Content -LiteralPath $status }
@@ -230,14 +234,17 @@ jobs:
           if (-not (Test-Path -LiteralPath $py)) { throw "no venv python at $py" }
           & $py -c "import uvicorn, fastapi, faster_whisper, ctranslate2, kokoro_onnx, onnxruntime, lawnmower_voice; print('providers:', onnxruntime.get_available_providers()); print('ctranslate2', ctranslate2.__version__)"
           if ($LASTEXITCODE -ne 0) { throw 'imports failed' }
+          # the GPU stack really is the one installed (onnxruntime-gpu + the NVIDIA libraries)
+          & $py -m pip show onnxruntime-gpu nvidia-cublas-cu12
+          if ($LASTEXITCODE -ne 0) { throw 'the GPU packages are not installed (the CPU stack was installed instead)' }
+          $log = Join-Path $env:LOCALAPPDATA 'LawnmowerMan\voice'
+          Get-ChildItem -LiteralPath $log -Filter 'setup*.log' -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:GITHUB_WORKSPACE 'voice-setup-out')
       - name: Upload the setup log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: voice-setup-windows
-          path: |
-            ${{ runner.temp }}/voice-setup-status.json
-            ~/AppData/Local/LawnmowerMan/voice/setup*.log
+          path: voice-setup-out/
           if-no-files-found: ignore
           retention-days: 14
 

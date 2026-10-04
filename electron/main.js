@@ -525,6 +525,13 @@ function applyWindowLayout() {
   win.setResizable(false);
 }
 
+/** Work area of the display the window is on (primary before it exists). */
+function currentWorkArea() {
+  const win = state.win;
+  const display = win && !win.isDestroyed() ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay();
+  return display.workArea;
+}
+
 function reclampWindow() {
   const win = state.win;
   if (!win || win.isDestroyed()) return;
@@ -718,7 +725,7 @@ function registerIpc() {
       electron: process.versions.electron,
       chrome: process.versions.chrome,
       // Extensions beyond the contract (renderer may ignore):
-      layout: windowLayout(s.window.sizePreset, s.window.showChat),
+      layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea()),
       clickThroughSupported: CLICK_THROUGH_SUPPORTED,
       hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
       gpu: state.gpu,

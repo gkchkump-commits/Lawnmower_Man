@@ -36,6 +36,23 @@ describe('windowLayout', () => {
     expect(l.chat.height).toBe(160);
     const tiny = windowLayout('large', true, { x: 0, y: 0, width: 1280, height: 700 });
     expect(tiny.chat.height).toBe(MIN_CHAT_PANEL_HEIGHT);
+    expect(tiny.height).toBeLessThanOrEqual(700);
+  });
+  it('shrinks the avatar area (exact 2:3) when even the minimum chat strip does not fit', () => {
+    // CI runner (1024x768, taskbar) and a 1080p laptop at 150% scaling (~1280x672 work area)
+    for (const h of [720, 672, 600]) {
+      const l = windowLayout('medium', true, { x: 0, y: 0, width: 1280, height: h });
+      expect(l.height, `work area ${h}`).toBeLessThanOrEqual(h);
+      expect(l.chat.height).toBe(MIN_CHAT_PANEL_HEIGHT);
+      expect(l.avatar.width * 3).toBe(l.avatar.height * 2); // the renderer derives the strip from width * 1.5
+      expect(l.width).toBe(l.avatar.width);
+      expect(l.height).toBe(l.avatar.height + l.chat.height);
+    }
+    expect(windowLayout('medium', true, { x: 0, y: 0, width: 1280, height: 672 }).avatar).toEqual({ width: 354, height: 531 });
+    // without the chat strip the avatar alone must fit too (large preset on a short screen)
+    expect(windowLayout('large', false, { x: 0, y: 0, width: 1280, height: 720 })).toMatchObject({ width: 480, height: 720, chat: null });
+    // roomy screens are unchanged
+    expect(windowLayout('medium', true, { x: 0, y: 0, width: 1920, height: 1032 })).toMatchObject({ width: 400, height: 840 });
   });
 });
 
@@ -63,8 +80,8 @@ describe('placement', () => {
     expect(pickDisplay({ x: -5000, y: 0, width: 10, height: 10 }, [primary, second]).id).toBe(1);
     expect(pickDisplay({ x: 0, y: 0, width: 1, height: 1 }, [])).toBeNull();
   });
-  it('clampToWorkArea keeps the top-left visible for oversize windows', () => {
-    expect(clampToWorkArea({ x: 100, y: 100, width: 3000, height: 3000 }, primary.workArea)).toEqual({ x: 0, y: 0, width: 3000, height: 3000 });
+  it('clampToWorkArea keeps oversize windows inside the work area (never under the taskbar)', () => {
+    expect(clampToWorkArea({ x: 100, y: 100, width: 3000, height: 3000 }, primary.workArea)).toEqual({ x: 0, y: 0, width: primary.workArea.width, height: primary.workArea.height });
   });
 });
 

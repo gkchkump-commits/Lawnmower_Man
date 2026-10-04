@@ -20,6 +20,8 @@ export const SIZE_PRESETS = Object.freeze({
 /** Chat panel height per preset (added below the avatar area). */
 export const CHAT_PANEL_HEIGHT = Object.freeze({ small: 200, medium: 240, large: 280 });
 export const MIN_CHAT_PANEL_HEIGHT = 140;
+/** The avatar area never shrinks below this when fitting a short screen (2:3 → 200 × 300). */
+export const MIN_AVATAR_HEIGHT = 300;
 /** Gap kept from the work-area edge for the default position. */
 export const EDGE_MARGIN = 24;
 /** At least this much of the window must stay on a display when restoring a position. */
@@ -37,10 +39,20 @@ export function normalizePreset(p) {
  */
 export function windowLayout(preset, showChat, workArea) {
   const p = normalizePreset(preset);
-  const avatar = { ...SIZE_PRESETS[p] };
+  let avatar = { ...SIZE_PRESETS[p] };
   let chatHeight = showChat ? CHAT_PANEL_HEIGHT[p] : 0;
-  if (showChat && workArea && avatar.height + chatHeight > workArea.height) {
-    chatHeight = Math.max(MIN_CHAT_PANEL_HEIGHT, workArea.height - avatar.height);
+  if (workArea) {
+    if (showChat && avatar.height + chatHeight > workArea.height) {
+      chatHeight = Math.max(MIN_CHAT_PANEL_HEIGHT, workArea.height - avatar.height);
+    }
+    // Still too tall (short screens, high display scaling: a 1080p laptop at 150% has ~670 px):
+    // shrink the avatar area too, keeping 2:3 exactly (height a multiple of 3), so the whole
+    // window — and the message box at its bottom — stays above the taskbar.
+    const room = workArea.height - chatHeight;
+    if (avatar.height > room) {
+      const h = Math.max(MIN_AVATAR_HEIGHT, Math.floor(room / 3) * 3);
+      avatar = { width: (h / 3) * 2, height: h };
+    }
   }
   return {
     preset: p,
@@ -96,8 +108,9 @@ export function pickDisplay(rect, displays) {
  * @param {Rect} b @param {Rect} wa @returns {Rect}
  */
 export function clampToWorkArea(b, wa) {
-  const width = Math.round(b.width);
-  const height = Math.round(b.height);
+  // never larger than the work area (a window taller than it would hide under the taskbar)
+  const width = Math.min(Math.round(b.width), Math.round(wa.width));
+  const height = Math.min(Math.round(b.height), Math.round(wa.height));
   let x = Math.round(b.x);
   let y = Math.round(b.y);
   x = Math.min(x, wa.x + wa.width - width);

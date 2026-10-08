@@ -117,3 +117,27 @@ export function voiceManualModel(setup) {
     retry: false,
   };
 }
+
+/** Lines of a failed setup step's output the drawer keeps (it shows about 12 at a time, scrollable). */
+export const SETUP_TAIL_MAX_LINES = 20;
+
+/**
+ * What the settings drawer shows about the last local-voice setup run: the output tail of the
+ * step that failed (pip prints its "ERROR: …" there), the setup log, and a text to copy for a
+ * bug report.
+ * @param {any} info  VoiceInfo (window.lawnmower.voice.info / onStatus)
+ * @param {{ canOpenLog?: boolean }} [o]  canOpenLog: the bridge has voice.openSetupLog()
+ * @returns {{ tail: string[], logPath: string, showOpenLog: boolean, copyText: string }}
+ */
+export function voiceSetupDiagnostics(info, o = {}) {
+  const setup = info && typeof info === 'object' ? info.setup : null;
+  const failed = !!setup && setup.state === 'failed';
+  const raw = failed && Array.isArray(setup.errorTail) ? setup.errorTail : [];
+  const tail = raw.filter((l) => typeof l === 'string' && l.trim()).map((l) => (l.length > 500 ? `${l.slice(0, 499)}…` : l)).slice(-SETUP_TAIL_MAX_LINES);
+  const logPath = info && typeof info.setupLog === 'string' ? info.setupLog : '';
+  const copy = [];
+  if (failed && typeof setup.detail === 'string' && setup.detail) copy.push(setup.detail);
+  if (tail.length) copy.push('', ...tail);
+  if (logPath) copy.push('', `Setup log: ${logPath}`);
+  return { tail, logPath, showOpenLog: !!logPath && o.canOpenLog !== false, copyText: copy.join('\n').trim() };
+}

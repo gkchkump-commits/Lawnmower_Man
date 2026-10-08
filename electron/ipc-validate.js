@@ -91,3 +91,11 @@ export function validateSetupOptions(v) {
   if (v.cpu !== undefined) out.cpu = validateBoolean(v.cpu, 'cpu');
   return out;
 }
+
+/**
+ * Calls that take no arguments from the renderer (e.g. voice.openSetupLog(): main decides what
+ * to open). @param {unknown[]} args
+ */
+export function validateNoArgs(args) {
+  if (Array.isArray(args) && args.length > 0) throw new Error('This call takes no arguments');
+}

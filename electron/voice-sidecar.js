@@ -13,6 +13,15 @@
 // /health is polled every couple of seconds until loading settles, so the UI sees it finish.
 // Crashes restart with exponential backoff (bounded); stop() kills the process tree.
 //
+// Not restarted:
+//  * a half-installed venv: the server exits with EXIT_NOT_INSTALLED (2) after reporting the
+//    missing packages (stdout {"event":"not-installed","missing":[…]}, and on stderr). Restarting
+//    cannot help, so the status becomes 'disabled' ("not fully installed") until something
+//    changes: a process-relevant setting, restart() ("Restart voice"), or a setup run that ends;
+//  * while held (hold('setup')): a setup run is installing into the venv, which a running server
+//    would lock (Windows). Nothing starts the server — not start(), restart(), a settings change
+//    or the crash backoff — until release('setup'), which then starts it afresh.
+//
 // Status values (window.lawnmower.voice.info): 'disabled'|'starting'|'ready'|'error'|'stopped'.
 // Events: 'status' (info).
 
@@ -30,6 +39,47 @@ import { expandUserPath } from './claude-path.js';
 export const SETUP_HINT_WIN = 'scripts\\setup-voice.ps1';
 export const SETUP_HINT_POSIX = 'scripts/setup-voice.sh';
 
+/** Exit code of `python -m lawnmower_voice` when its Python packages are missing (voice/lawnmower_voice/__main__.py). */
+export const EXIT_NOT_INSTALLED = 2;
+
+/** Status detail while a setup run holds the server. */
+export const HELD_DETAIL = 'The local voice setup is running; the voice server starts again when it has finished.';
+
+/**
+ * Which packages a server that exited with EXIT_NOT_INSTALLED reported missing, or null when the
+ * exit was something else (argparse also exits with 2, so the code alone is not enough).
+ * @param {number|null} code
+ * @param {string[]|null|undefined} reported  from the {"event":"not-installed"} line
+ * @param {string} stderr                      the end of the server's stderr
+ * @returns {string[]|null}
+ */
+export function notInstalledPackages(code, reported, stderr) {
+  if (code !== EXIT_NOT_INSTALLED) return null;
+  const clean = (/** @type {unknown[]} */ xs) => [...new Set(xs.map((x) => String(x).trim()).filter((x) => /^[A-Za-z0-9_.-]{1,64}$/.test(x)))].slice(0, 8);
+  if (Array.isArray(reported) && reported.length) {
+    const r = clean(reported);
+    if (r.length) return r;
+  }
+  const text = String(stderr || '');
+  // "Local voice is not fully installed (missing: uvicorn, fastapi)" (this version of the server)
+  const m = /not fully installed \(missing: ([^)]*)\)/.exec(text);
+  if (m) {
+    const r = clean(m[1].split(','));
+    if (r.length) return r;
+  }
+  // "uvicorn is not installed (No module named 'uvicorn')" (the server of the 0.1.0 release). Only
+  // that message: the engines log "kokoro-onnx is not installed (No module named …)" while the
+  // server keeps running, which says nothing about a later exit.
+  const old = /\buvicorn is not installed \(No module named '([A-Za-z0-9_.-]+)'\)/.exec(text);
+  return old ? clean([old[1].split('.')[0]]) : null;
+}
+
+/** "…the setup script" + ". Restarting…" without doubling a final full stop. @param {string} s */
+export function sentence(s) {
+  const t = String(s).trimEnd();
+  return /[.!?…]$/.test(t) ? t : `${t}.`;
+}
+
 /**
  * @typedef {object} VoiceSettings  settings.voice (contract §4)
  * @property {boolean} enabled
@@ -45,6 +95,7 @@ export const SETUP_HINT_POSIX = 'scripts/setup-voice.sh';
  * @typedef {object} VoiceInfo
  * @property {'disabled'|'starting'|'ready'|'error'|'stopped'} status
  * @property {boolean} [installed]  is there a voice venv (Python) to start? (unknown until checked)
+ * @property {string[]} [missing]   the venv lacks these Python packages (a setup that failed halfway)
  * @property {string} [url]
  * @property {string} [token]
  * @property {string} [detail]
@@ -249,16 +300,54 @@ export class VoiceSidecar extends EventEmitter {
     this._spawnKey = '';
     /** @type {Promise<void>|null} */
     this._op = null;
+    /** @type {Set<string>} reasons the server must not run (a setup run installing into the venv) */
+    this._holds = new Set();
   }
 
-  /** stop() was called (app quit, or a setup run that replaces the venv) and no start since. */
+  /** stop() was called (app quit) and no start since. */
   get stopped() {
     return this._stopped;
   }
 
+  /** A hold() is in effect: nothing starts the server. */
+  get held() {
+    return this._holds.size > 0;
+  }
+
+  /**
+   * Stop the server and keep it stopped — no start(), restart(), settings change or crash backoff
+   * starts it — until release(reason). For a setup run: the running server locks venv files.
+   * Resolves once the process is gone.
+   * @param {string} [reason]
+   */
+  hold(reason = 'setup') {
+    this._holds.add(reason);
+    const killing = this._stopProc();
+    return this._serialize(async () => {
+      await killing;
+      await this._stopProc();
+      if (this.held) this._set({ status: 'stopped', detail: HELD_DETAIL });
+    });
+  }
+
+  /**
+   * End a hold(). When it was the last one (and the app is not quitting), the server is started
+   * afresh — with the crash counter reset — so a new install is picked up at once.
+   * @param {string} [reason]
+   * @returns {boolean} whether there was such a hold
+   */
+  release(reason = 'setup') {
+    if (!this._holds.delete(reason)) return false;
+    if (!this.held && !this._stopped) this.restart();
+    else if (!this.held) this._set({ status: 'stopped' });
+    return true;
+  }
+
   /** @returns {VoiceInfo} */
   info() {
-    return { ...this._info, health: this._info.health ? { ...this._info.health } : undefined };
+    const i = { ...this._info, health: this._info.health ? { ...this._info.health } : undefined };
+    if (i.missing) i.missing = [...i.missing];
+    return i;
   }
 
   /** Start (or report disabled). Resolves once ready, disabled, or failed. */
@@ -271,6 +360,11 @@ export class VoiceSidecar extends EventEmitter {
   restart() {
     this._stopped = false;
     this._failures = 0;
+    if (this.held) {
+      this._log('info', '[voice] restart deferred: a voice setup is running');
+      this._set({ status: 'stopped', detail: HELD_DETAIL });
+      return Promise.resolve();
+    }
     // Kill right away (a start still waiting for "ready" then finishes), then start afresh.
     const killing = this._stopProc();
     return this._serialize(async () => {
@@ -291,11 +385,11 @@ export class VoiceSidecar extends EventEmitter {
     });
   }
 
-  /** Restart when a setting that affects the server process changed. */
+  /** Restart when a setting that affects the server process changed (not while held: release() starts it). */
   applySettings() {
     const key = this._keyFor(this._safeSettings());
     if (key === this._spawnKey) return Promise.resolve();
-    if (this._stopped) return Promise.resolve();
+    if (this._stopped || this.held) return Promise.resolve();
     return this.restart();
   }
 
@@ -347,6 +441,10 @@ export class VoiceSidecar extends EventEmitter {
       clearTimeout(this._restartTimer);
       this._restartTimer = null;
     }
+    if (this.held) {
+      this._set({ status: 'stopped', detail: HELD_DETAIL });
+      return;
+    }
     if (this._proc) return; // already running
     const s = this._safeSettings();
     this._spawnKey = this._keyFor(s);
@@ -387,7 +485,7 @@ export class VoiceSidecar extends EventEmitter {
     }
 
     const port = await findFreePort();
-    if (this._stopped || this._proc) return;
+    if (this._stopped || this._proc || this.held) return;
     const token = randomBytes(24).toString('hex');
     args.push(
       '--host', '127.0.0.1', '--port', String(port), '--device', s.device,
@@ -423,6 +521,8 @@ export class VoiceSidecar extends EventEmitter {
       exited: false,
       expected: false,
       stderr: new TextRingBuffer(16 * 1024),
+      /** @type {string[]|null} packages the server reported missing ({"event":"not-installed"}) */
+      notInstalled: null,
       /** @type {NodeJS.Timeout|null} */
       readyTimer: null,
       /** @type {() => void} */
@@ -468,6 +568,8 @@ export class VoiceSidecar extends EventEmitter {
       this._afterReadyLine(proc).catch((err) => this._log('warn', `[voice] ${err.message}`));
     } else if (m.event === 'status' && typeof m.detail === 'string' && !proc.ready) {
       this._set({ status: 'starting', detail: m.detail.slice(0, 300) });
+    } else if (m.event === 'not-installed') {
+      proc.notInstalled = Array.isArray(m.missing) ? m.missing.slice(0, 16) : [];
     }
   }
 
@@ -573,19 +675,33 @@ export class VoiceSidecar extends EventEmitter {
 
     const how = code !== null && code !== undefined ? `code ${code}` : signal ? `signal ${signal}` : 'spawn failure';
     const tail = proc.stderr.tail(6);
-    if (proc.readyAt && Date.now() - proc.readyAt > this._restartCfg.stableMs) this._failures = 0;
-    this._failures++;
     const base = `Voice server exited (${how})${tail ? `: ${tail}` : ''}`;
     this._log('warn', `[voice] ${base}`);
+
+    // The venv's Python runs, but the packages are not (all) there: a setup that failed halfway.
+    // Restarting cannot fix that — wait for a new setup run, "Restart voice" or a settings change.
+    const missing = notInstalledPackages(code, proc.notInstalled, proc.stderr.tail(40));
+    if (missing) {
+      this._failures = 0;
+      this._set({
+        status: 'disabled',
+        missing,
+        detail: `Local voice is not fully installed (missing: ${missing.join(', ')}). Choose "Set up local voice again…" in the tray menu or in Settings › Voice.`,
+      });
+      return;
+    }
+
+    if (proc.readyAt && Date.now() - proc.readyAt > this._restartCfg.stableMs) this._failures = 0;
+    this._failures++;
     if (this._failures > this._restartCfg.maxAttempts) {
-      this._set({ status: 'error', detail: `${base}. Gave up after ${this._restartCfg.maxAttempts} restarts; use "Restart voice" in the tray menu to try again.` });
+      this._set({ status: 'error', detail: `${sentence(base)} Gave up after ${this._restartCfg.maxAttempts} restarts; use "Restart voice" in the tray menu to try again.` });
       return;
     }
     const delay = backoffDelay(this._failures, this._restartCfg.baseDelayMs, this._restartCfg.maxDelayMs);
-    this._set({ status: 'error', detail: `${base}. Restarting in ${Math.ceil(delay / 1000)}s (attempt ${this._failures}/${this._restartCfg.maxAttempts}).` });
+    this._set({ status: 'error', detail: `${sentence(base)} Restarting in ${Math.ceil(delay / 1000)}s (attempt ${this._failures}/${this._restartCfg.maxAttempts}).` });
     this._restartTimer = setTimeout(() => {
       this._restartTimer = null;
-      if (!this._stopped) this._serialize(() => this._start());
+      if (!this._stopped && !this.held) this._serialize(() => this._start());
     }, delay);
   }
 
@@ -612,6 +728,7 @@ export class VoiceSidecar extends EventEmitter {
     /** @type {VoiceInfo} */
     const next = { status: info.status };
     if (typeof this._installed === 'boolean') next.installed = this._installed;
+    if (info.missing && info.missing.length) next.missing = [...info.missing];
     if (info.url) next.url = info.url;
     if (info.token) next.token = info.token;
     if (info.detail) next.detail = info.detail;

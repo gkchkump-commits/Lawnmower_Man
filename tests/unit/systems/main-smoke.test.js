@@ -2,6 +2,7 @@
 // not needed). Drives a real ClaudeSession against the fake CLI through the IPC handlers.
 /* global Request */
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -194,7 +195,7 @@ describe('electron/main.js wiring', () => {
     expect([...used].sort()).toEqual([...registered].sort());
     expect([...m.handlers.keys()].sort()).toEqual([
       'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:retry', 'lm:claude:send', 'lm:claude:status',
-      'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:restart', 'lm:voice:setup',
+      'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:open-setup-log', 'lm:voice:restart', 'lm:voice:setup',
     ]);
   });
 
@@ -373,6 +374,139 @@ describe('electron/main.js wiring', () => {
       await t.state.voice.stop();
     } finally {
       start.mockRestore();
+    }
+  });
+
+  it('"Open setup log": no arguments, only the setup log of the voice home, only when it is a file', async () => {
+    const t = main.__test;
+    const setup = t.state.setup;
+    // unpackaged: the voice home is <repo>/voice (packaged: packagedVoiceHome(), like the script)
+    expect(setup.logFile).toBe(path.resolve('voice', 'setup.log'));
+    const known = setup._o.logFile;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-setuplog-'));
+    setup._o.logFile = path.join(dir, 'setup.log'); // hermetic: never touch a developer's voice/setup.log
+    const openPath = electron.shell.openPath;
+    try {
+      openPath.mockClear();
+      // arguments from the renderer are refused: it cannot choose what is opened
+      await expect(invoke('lm:voice:open-setup-log', 'C:\\Windows\\System32\\calc.exe')).rejects.toThrow(/no arguments/);
+      await expect(invoke('lm:voice:open-setup-log', { path: '/etc/passwd' })).rejects.toThrow(/no arguments/);
+      expect(openPath).not.toHaveBeenCalled();
+      // no log yet
+      expect(await invoke('lm:voice:open-setup-log')).toMatchObject({ ok: false, error: expect.stringMatching(/no setup log yet/) });
+      expect(openPath).not.toHaveBeenCalled();
+      expect((await invoke('lm:voice:info')).setupLog).toBeUndefined();
+      // a folder of that name is not opened either
+      fs.mkdirSync(setup._o.logFile);
+      expect(await invoke('lm:voice:open-setup-log')).toMatchObject({ ok: false });
+      expect(openPath).not.toHaveBeenCalled();
+      fs.rmSync(setup._o.logFile, { recursive: true });
+      // the script wrote it: opened, exactly that path; voice.info() names it
+      fs.writeFileSync(setup._o.logFile, '=== Lawnmower Man - local voice setup ===\n');
+      expect(await invoke('lm:voice:open-setup-log')).toEqual({ ok: true, path: setup._o.logFile });
+      expect(openPath).toHaveBeenCalledTimes(1);
+      expect(openPath).toHaveBeenLastCalledWith(setup._o.logFile);
+      expect((await invoke('lm:voice:info')).setupLog).toBe(setup._o.logFile);
+      // the shell could not open it (no app for .log): reported, not thrown
+      openPath.mockResolvedValueOnce('No application is associated with the specified file');
+      expect(await invoke('lm:voice:open-setup-log')).toMatchObject({ ok: false, error: 'No application is associated with the specified file' });
+    } finally {
+      setup._o.logFile = known;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a failed setup reaches the renderer with its output tail', async () => {
+    const setup = main.__test.state.setup;
+    const tail = ['Collecting example-wheel>=1.0', 'ERROR: No matching distribution found for example-wheel>=1.0'];
+    setup._set({ state: 'failed', mode: 'console', cpu: false, detail: 'The voice setup failed: x — ERROR: No matching distribution found for example-wheel>=1.0', errorTail: tail });
+    const [, sent] = await waitForSent(([ch, p]) => ch === 'lm:voice:status' && p.setup?.state === 'failed');
+    expect(sent.setup).toMatchObject({ state: 'failed', errorTail: tail, mode: 'console' });
+    expect((await invoke('lm:voice:info')).setup.errorTail).toEqual(tail);
+    setup._set({ state: 'idle' });
+  });
+
+  it('the voice server is held while a setup run installs into the venv, and started when it ends', async () => {
+    const t = main.__test;
+    const setup = t.state.setup;
+    const voice = t.state.voice;
+    await invoke('lm:settings:set', { voice: { enabled: false } });
+    await voice.start();
+    // what the runner calls right before the window opens
+    await setup._o.beforeLaunch({ cpu: false, check: false });
+    expect(voice.held).toBe(true);
+    expect(voice.info()).toMatchObject({ status: 'stopped' });
+    // "Restart voice" (tray / renderer) and a settings change do not start it meanwhile
+    const spawned = vi.spyOn(voice, '_start');
+    try {
+      await invoke('lm:voice:restart');
+      await invoke('lm:settings:set', { voice: { device: 'cpu' } });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(voice.info().status).toBe('stopped');
+      expect(spawned).not.toHaveBeenCalled();
+      // a check-only run holds nothing and its end releases nothing
+      setup._set({ state: 'done', check: true });
+      setup.emit('finished', { ok: true, check: true });
+      expect(voice.held).toBe(true);
+      // the run failed: the hold ends and the previous voice comes back (here: disabled)
+      setup._set({ state: 'failed', check: false, detail: 'x' });
+      setup.emit('finished', { ok: false, error: 'Command failed (exit 1): pip' });
+      expect(voice.held).toBe(false);
+      for (let i = 0; i < 50 && voice.info().status !== 'disabled'; i++) await new Promise((r) => setTimeout(r, 20));
+      expect(voice.info().status).toBe('disabled');
+      expect(spawned).toHaveBeenCalled();
+      // a successful run turns local voice on and starts it, once
+      await setup._o.beforeLaunch({ cpu: false, check: false });
+      expect(voice.held).toBe(true);
+      const restart = vi.spyOn(voice, 'restart').mockImplementation(async () => {}); // hermetic: no real voice/.venv server
+      setup._set({ state: 'done', check: false });
+      setup.emit('finished', { ok: true });
+      expect((await invoke('lm:settings:get')).voice.enabled).toBe(true);
+      expect(voice.held).toBe(false);
+      expect(restart).toHaveBeenCalledTimes(1);
+      restart.mockRestore();
+      await setup._o.beforeLaunch({ cpu: false, check: true }); // check-only: no hold
+      expect(voice.held).toBe(false);
+    } finally {
+      spawned.mockRestore();
+      setup._set({ state: 'idle' });
+      await voice.stop();
+      await invoke('lm:settings:set', { voice: { enabled: false, device: 'auto' } });
+    }
+  });
+
+  // The real runner and main's wiring: the user closes the setup window halfway (no status file,
+  // the launcher just exits). The hold must end there, or the voice would stay stopped until the
+  // 6-hour give-up. (An app restart mid-setup starts unheld: holds are in memory only.)
+  it('a setup window closed before it finished ends the hold (real runner, launcher exit)', async () => {
+    const t = main.__test;
+    const setup = t.state.setup;
+    const voice = t.state.voice;
+    await invoke('lm:settings:set', { voice: { enabled: false } });
+    await voice.start();
+    const saved = { spawn: setup._spawn, findTerminal: setup._o.findTerminal };
+    const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), unref: () => {}, pid: 4242 });
+    setup._spawn = vi.fn(() => child);
+    setup._o.findTerminal = () => ({ name: 'fake-terminal', path: process.execPath, args: (cmd) => cmd });
+    try {
+      const st = await setup.start({ cpu: true });
+      expect(st.state).toBe('running');
+      expect(setup._spawn).toHaveBeenCalledTimes(1);
+      expect(voice.held).toBe(true);
+      await invoke('lm:voice:restart'); // deferred while the window runs
+      expect(voice.held).toBe(true);
+      child.emit('exit', process.platform === 'win32' ? 0xc000013a : 1);
+      expect(setup.state).toMatchObject({ state: 'failed' });
+      expect(setup.state.detail).toMatch(/closed before it finished/);
+      expect(voice.held).toBe(false);
+      for (let i = 0; i < 50 && voice.info().status !== 'disabled'; i++) await new Promise((r) => setTimeout(r, 20));
+      expect(voice.info().status).toBe('disabled'); // the previous voice is back (here: turned off)
+      expect((await invoke('lm:voice:info')).setup).toMatchObject({ state: 'failed' });
+    } finally {
+      setup._spawn = saved.spawn;
+      setup._o.findTerminal = saved.findTerminal;
+      setup._set({ state: 'idle' });
+      await voice.stop();
     }
   });
 

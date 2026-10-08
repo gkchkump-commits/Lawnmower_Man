@@ -10,15 +10,19 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   LINUX_TERMINALS,
+  MAX_TAIL_LINES,
   VoiceSetupRunner,
   WINDOWS_LAUNCHER,
   WINDOWS_SETUP_BOOTSTRAP,
+  cleanTailLines,
   describeEarlyExit,
   describeSetupFailure,
   findLinuxTerminal,
   manualSetupCommand,
   quoteWindowsArg,
   readSetupStatus,
+  setupErrorTail,
+  setupLogPath,
   setupScriptArgs,
   setupScriptPath,
   windowsSetupLaunch,
@@ -203,6 +207,70 @@ describe('readSetupStatus', () => {
     fs.writeFileSync(f, '{"ok":"yes"}');
     expect(readSetupStatus(f)).toBeNull();
   });
+
+  it('reads the log path and the failed step\'s output tail (cleaned, bounded)', () => {
+    const d = tmp();
+    const f = path.join(d, 's.json');
+    const tail = ['Collecting example-wheel>=1.0', '', '   ', 42, '\x1b[31mERROR:\x1b[0m No matching distribution found for example-wheel>=1.0\r', 'x'.repeat(2000)];
+    fs.writeFileSync(f, JSON.stringify({ ok: false, error: `Command failed (exit 1): py -m pip install\n${tail.slice(0, 1).join('\n')}`, errorTail: tail, log: 'C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\setup.log' }));
+    const r = readSetupStatus(f);
+    expect(r.log).toBe('C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\setup.log');
+    expect(r.errorTail).toHaveLength(3);
+    expect(r.errorTail[0]).toBe('Collecting example-wheel>=1.0');
+    expect(r.errorTail[1]).toBe('ERROR: No matching distribution found for example-wheel>=1.0'); // no colour codes, no CR
+    expect(r.errorTail[2]).toHaveLength(500);
+    // at most the last MAX_TAIL_LINES lines; a lone string (lenient) is one line
+    fs.writeFileSync(f, JSON.stringify({ ok: false, error: 'x', errorTail: Array.from({ length: 50 }, (_, i) => `line ${i}`) }));
+    expect(readSetupStatus(f).errorTail).toEqual(Array.from({ length: MAX_TAIL_LINES }, (_, i) => `line ${30 + i}`));
+    fs.writeFileSync(f, JSON.stringify({ ok: false, error: 'x', errorTail: 'ERROR: one line' }));
+    expect(readSetupStatus(f).errorTail).toEqual(['ERROR: one line']);
+    // Windows PowerShell 5.1 serializes a PSObject-wrapped array as {"value":[…],"Count":n}
+    fs.writeFileSync(f, JSON.stringify({ ok: false, error: 'x', errorTail: { value: ['a', 'ERROR: b'], Count: 2 } }));
+    expect(readSetupStatus(f).errorTail).toEqual(['a', 'ERROR: b']);
+    fs.writeFileSync(f, JSON.stringify({ ok: false, error: 'x', errorTail: { value: 'nope' } }));
+    expect(readSetupStatus(f).errorTail).toBeUndefined();
+    // an empty tail is left out; a success has none
+    fs.writeFileSync(f, JSON.stringify({ ok: true, error: '', errorTail: [], log: '/home/x/setup.log' }));
+    expect(readSetupStatus(f)).toEqual({ ok: true, error: '', log: '/home/x/setup.log' });
+  });
+
+  it('the output tail of a result: errorTail, or the lines after the first of a multi-line error', () => {
+    expect(setupErrorTail({ ok: false, error: 'Command failed (exit 1): pip\nA\nB', errorTail: ['B'] })).toEqual(['B']);
+    // the console bootstrap writes {ok, error} only (a PowerShell parse error has several lines)
+    expect(setupErrorTail({ ok: false, error: 'At C:\\x.ps1:12 char:8\r\n+ if ($x {\r\nUnexpected token' })).toEqual(['+ if ($x {', 'Unexpected token']);
+    expect(setupErrorTail({ ok: false, error: 'python-missing' })).toEqual([]);
+    expect(setupErrorTail({ ok: true, errorTail: ['x'] })).toEqual([]);
+    expect(cleanTailLines('nope')).toEqual([]);
+  });
+
+  it('describes a failed step with pip\'s reason on one line', () => {
+    const r = {
+      ok: false,
+      error: 'Command failed (exit 1): C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\.venv\\Scripts\\python.exe -m pip install --disable-pip-version-check -e C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\src[gpu]\nCollecting x\nERROR: Could not find a version that satisfies the requirement example-wheel>=1.0\nERROR: No matching distribution found for example-wheel>=1.0',
+      errorTail: ['Collecting x', 'ERROR: Could not find a version that satisfies the requirement example-wheel>=1.0', 'ERROR: No matching distribution found for example-wheel>=1.0'],
+    };
+    const d = describeSetupFailure(r);
+    expect(d).toMatch(/^The voice setup failed: Command failed \(exit 1\): C:\\Users\\gkchk\\.*src\[gpu\] — ERROR: No matching distribution found for example-wheel>=1\.0$/);
+    expect(d).not.toContain('\n');
+    // a very long command line is cut, the reason stays visible
+    const long = describeSetupFailure({ ...r, error: `Command failed (exit 1): ${'p'.repeat(1000)}\nx` });
+    expect(long).toContain('— ERROR: No matching distribution found');
+    expect(long.length).toBeLessThan(560);
+    // no ERROR line: just the step
+    expect(describeSetupFailure({ ok: false, error: 'Command failed (exit 1): py -m venv x\nError: [Errno 13] Permission denied', errorTail: ['Error: [Errno 13] Permission denied'] }))
+      .toBe('The voice setup failed: Command failed (exit 1): py -m venv x');
+  });
+
+  it('the setup log lives in the voice home (as the scripts write it)', () => {
+    expect(setupLogPath({ platform: 'win32', voiceHome: 'C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice' })).toBe('C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\setup.log');
+    expect(setupLogPath({ platform: 'linux', voiceHome: '/home/u/.local/share/lawnmower-man/voice' })).toBe('/home/u/.local/share/lawnmower-man/voice/setup.log');
+    const ps1 = fs.readFileSync(path.join(ROOT, 'scripts/setup-voice.ps1'), 'utf8');
+    expect(ps1).toContain("$SetupLog = Join-Path $VoiceHome 'setup.log'");
+    expect(ps1).toContain("$SetupLogPrev = Join-Path $VoiceHome 'setup.prev.log'");
+    const sh = fs.readFileSync(path.join(ROOT, 'scripts/setup-voice.sh'), 'utf8');
+    expect(sh).toContain('SETUP_LOG="$VOICE_HOME/setup.log"');
+    expect(sh).toContain('SETUP_LOG_PREV="$VOICE_HOME/setup.prev.log"');
+  });
 });
 
 /** A fake child process (EventEmitter with stderr). */
@@ -285,6 +353,46 @@ describe('VoiceSetupRunner', () => {
     await c.finished;
     expect(c.r.state).toMatchObject({ state: 'failed' });
     expect(c.r.state.detail).toMatch(/Python 3\.12 is needed/);
+    expect(c.r.state.errorTail).toBeUndefined();
+  });
+
+  it('a failed step: the state carries the output tail; the next run starts without it', async () => {
+    const h = make();
+    await h.r.start();
+    h.writeStatus({
+      ok: false,
+      error: 'Command failed (exit 1): py -m pip install -e src[gpu]\nCollecting example-wheel\nERROR: No matching distribution found for example-wheel>=1.0',
+      errorTail: ['Collecting example-wheel', 'ERROR: No matching distribution found for example-wheel>=1.0'],
+      log: 'C:\\x\\setup.log',
+    });
+    const r = await h.finished;
+    expect(r).toMatchObject({ ok: false, log: 'C:\\x\\setup.log' });
+    expect(h.r.state).toMatchObject({ state: 'failed', errorTail: ['Collecting example-wheel', 'ERROR: No matching distribution found for example-wheel>=1.0'] });
+    expect(h.r.state.detail).toBe('The voice setup failed: Command failed (exit 1): py -m pip install -e src[gpu] — ERROR: No matching distribution found for example-wheel>=1.0');
+    // the state is a copy: callers cannot change the runner's
+    h.r.state.errorTail.push('x');
+    expect(h.r.state.errorTail).toHaveLength(2);
+    expect((await h.r.start()).errorTail).toBeUndefined();
+  });
+
+  it('existingLog(): the configured log only when it is a regular file', () => {
+    const d = tmp();
+    const logFile = path.join(d, 'voice home', 'setup.log');
+    const r = new VoiceSetupRunner({ script: path.join(d, 's.ps1'), statusFile: path.join(d, 's.json'), logFile });
+    expect(r.logFile).toBe(logFile);
+    expect(r.existingLog()).toBeNull();
+    fs.mkdirSync(logFile, { recursive: true }); // a folder of that name
+    expect(r.existingLog()).toBeNull();
+    fs.rmSync(logFile, { recursive: true });
+    fs.writeFileSync(logFile, 'log');
+    expect(r.existingLog()).toBe(logFile);
+    if (process.platform !== 'win32') {
+      fs.rmSync(logFile);
+      fs.writeFileSync(path.join(d, 'elsewhere.txt'), 'secret');
+      fs.symlinkSync(path.join(d, 'elsewhere.txt'), logFile); // a link is not followed
+      expect(r.existingLog()).toBeNull();
+    }
+    expect(new VoiceSetupRunner({ script: 'x', statusFile: 'y' }).existingLog()).toBeNull();
   });
 
   it('a missing script fails; a launcher that cannot start falls back to the manual command', async () => {
@@ -348,6 +456,149 @@ function packagedLayout(base) {
   return res;
 }
 
+/**
+ * A stand-in Python (POSIX shell script) for a real setup run: answers the version probes, creates
+ * a "venv" (a copy of itself), and fails `pip install -e …[gpu]` / `[cpu]` like pip does when a
+ * wheel is missing — "ERROR: …" on stderr — after some ordinary and non-ASCII output, a progress
+ * line with carriage returns and a colour code. The last ERROR line starts with erase-line / cursor
+ * sequences (ESC[2K ESC[1G ESC[K, as rich draws with FORCE_COLOR): the tail must keep "ERROR: …".
+ * @param {string} dir
+ */
+function fakePython(dir) {
+  const file = path.join(dir, 'fake python');
+  const tool = (t) => findOnPath(t).found || `/bin/${t}`;
+  fs.writeFileSync(file, `#!/bin/sh
+case "$1" in
+  -c) case "$2" in *"|"*) echo "3.12|$0" ;; *) echo "3.12" ;; esac; exit 0 ;;
+  -m)
+    case "$2" in
+      venv) '${tool('mkdir')}' -p "$3/bin" && '${tool('cp')}' "$0" "$3/bin/python" && '${tool('chmod')}' +x "$3/bin/python"; echo "created a venv"; exit 0 ;;
+      pip)
+        shift 2
+        case "$*" in
+          *"[gpu]"*|*"[cpu]"*)
+            # FAKE_PIP_FAIL_ONCE=<marker>: fail the first time only (a dropped download), then succeed
+            if [ -n "$FAKE_PIP_FAIL_ONCE" ] && [ -e "$FAKE_PIP_FAIL_ONCE" ]; then echo "Successfully installed lawnmower-voice-0.1.0"; exit 0; fi
+            [ -z "$FAKE_PIP_FAIL_ONCE" ] || : > "$FAKE_PIP_FAIL_ONCE"
+            echo "Obtaining file:///voice/src"
+            echo "Collecting faster-whisper>=1.2.1 (José 日本)"
+            echo "WARNING: pip writes warnings to stderr" >&2
+            printf 'Downloading example_wheel\\r 50%%\\r100%%\\n'
+            printf '\\033[33mcoloured\\033[0m line\\n'
+            echo "ERROR: Could not find a version that satisfies the requirement example-wheel>=1.0 (from lawnmower-voice) (from versions: none)" >&2
+            printf '\\033[2K\\033[1G\\033[KERROR: No matching distribution found for example-wheel>=1.0\\n' >&2
+            exit 1 ;;
+          *) echo "Requirement already satisfied: pip"; exit 0 ;;
+        esac ;;
+    esac ;;
+esac
+echo "fake python: unexpected $*" >&2
+exit 9
+`, { mode: 0o755 });
+  return file;
+}
+
+/**
+ * What a run with fakePython() must leave behind: the status, the log, the previous log.
+ * PowerShell reads a program's stdout and stderr as two streams, so their relative order may
+ * vary (bash merges them in one pipe): only the order within stderr is relied on there.
+ */
+function expectFailedPipRun({ r, status, home, flag, fake }) {
+  expect(r.status, r.stdout + r.stderr).toBe(1);
+  // the output was shown live in the console window (not only in the log)
+  expect(r.stdout + r.stderr).toContain('Collecting faster-whisper>=1.2.1 (José 日本)');
+  const j = readSetupStatus(status);
+  expect(j).toMatchObject({ ok: false, python: fake });
+  expect(j.error.split('\n')[0]).toMatch(/^Command failed \(exit 1\): .*python -m pip install --disable-pip-version-check -e .*src\[gpu\]$/);
+  expect(j.error).toContain('ERROR: No matching distribution found for example-wheel>=1.0');
+  const errors = j.errorTail.filter((l) => l.startsWith('ERROR:'));
+  expect(errors.at(-1)).toBe('ERROR: No matching distribution found for example-wheel>=1.0');
+  expect(errors).toHaveLength(2);
+  expect(j.errorTail).toContain('Collecting faster-whisper>=1.2.1 (José 日本)'); // UTF-8 all the way
+  expect(j.errorTail).toContain('WARNING: pip writes warnings to stderr');
+  expect(j.errorTail.join('\n')).not.toMatch(/[\x1b\r]/);
+  expect(j.errorTail.length).toBeLessThanOrEqual(20);
+  const log = path.join(home, 'setup.log');
+  expect(j.log).toBe(log);
+  const text = fs.readFileSync(log, 'utf8');
+  expect(text.charCodeAt(0)).not.toBe(0xfeff); // no BOM
+  expect(text).toMatch(/^=== Lawnmower Man - local voice setup ===\r?\nStarted: /);
+  expect(text).toMatch(/Script: .*setup-voice\.(ps1|sh) \(lawnmower-voice 0\.1\.0/);
+  expect(text).toContain(`Python:   ${fake} (Python 3.12)`);
+  expect(text).toContain(flag);
+  expect(text).toContain('==> Installing the NVIDIA GPU voice stack');
+  expect(text).toMatch(/> .*python -m pip install --disable-pip-version-check -e .*src\[gpu\]/);
+  expect(text).toContain('Collecting faster-whisper>=1.2.1 (José 日本)');
+  expect(text).toContain('ERROR: No matching distribution found for example-wheel>=1.0');
+  expect(text).toMatch(/Finished: FAILED \(exit 1\)/);
+  expect(describeSetupFailure(j)).toMatch(/— ERROR: No matching distribution found for example-wheel>=1\.0$/);
+  // the GPU install is tried twice (one retry for a dropped download); a real error fails again
+  expect(text).toContain('The GPU install failed');
+  expect(text.match(/^> .*src\[gpu\]$/gm)).toHaveLength(2);
+  return text;
+}
+
+/** A one-off failure of the GPU install (FAKE_PIP_FAIL_ONCE): the retry gets past it. */
+function expectRetriedGpuInstall({ r, status, home }) {
+  const j = readSetupStatus(status);
+  // the run went on past the GPU install (the stand-in Python cannot do the later steps)
+  expect(j.error || '').not.toMatch(/src\[gpu\]/);
+  const text = fs.readFileSync(path.join(home, 'setup.log'), 'utf8');
+  expect(text).toContain('The GPU install failed');
+  expect(text.match(/^> .*src\[gpu\]$/gm)).toHaveLength(2);
+  expect(text).toContain('Successfully installed lawnmower-voice-0.1.0');
+  expect(text).toContain('==> Making onnxruntime-gpu the only onnxruntime');
+  expect(r.stdout + r.stderr).toContain('trying once more');
+}
+
+/**
+ * A real Python 3.10-3.12 with venv/ensurepip (for a real venv and a real pip), or null.
+ * @returns {string|null}
+ */
+function findRealPython() {
+  const probe = "import sys, ensurepip; print('%d.%d|%s' % (sys.version_info[0], sys.version_info[1], sys.executable))";
+  const tries = [['py', ['-3.12']], ['py', ['-3.11']], ['python3.12', []], ['python3.11', []], ['python3', []], ['python', []]];
+  for (const [name, pre] of tries) {
+    const exe = findOnPath(name).found;
+    if (!exe) continue;
+    const r = spawnSync(exe, [...pre, '-c', probe], { encoding: 'utf8', timeout: 20000 });
+    const m = r.status === 0 ? /^3\.(1[0-2])\|(.+)$/m.exec(r.stdout.trim()) : null;
+    if (m) return m[2].trim();
+  }
+  return null;
+}
+const realPython = findRealPython();
+/** pip with an unreachable package index (fails fast, offline): what a tester's broken network looks like. */
+const OFFLINE_PIP = {
+  PIP_INDEX_URL: 'http://127.0.0.1:9/simple',
+  PIP_RETRIES: '0',
+  PIP_TIMEOUT: '3',
+  PIP_CONFIG_FILE: os.devnull,
+  PIP_NO_INPUT: '1',
+  PIP_FIND_LINKS: '',
+  NO_PROXY: '*',
+  no_proxy: '*',
+};
+
+/**
+ * A real run that fails in pip (real venv, real pip, no package index): the error carries pip's
+ * own "ERROR: ..." lines (written to stderr — under Windows PowerShell 5.1 that is the
+ * NativeCommandError case), and the log has the whole run.
+ */
+function expectRealPipFailure({ r, status, home }) {
+  expect(r.status, r.stdout + r.stderr).toBe(1);
+  const j = readSetupStatus(status);
+  expect(j).toMatchObject({ ok: false, python: expect.any(String) });
+  expect(j.error.split('\n')[0]).toMatch(/^Command failed \(exit 1\): .*python(\.exe)? -m pip install --upgrade --disable-pip-version-check pip setuptools wheel$/);
+  expect(j.errorTail.filter((l) => l.startsWith('ERROR:')).at(-1)).toMatch(/^ERROR: No matching distribution found for (setuptools|wheel)$/);
+  expect(j.errorTail.join('\n')).toMatch(/Requirement already satisfied: pip/); // pip ran and printed (no encoding crash)
+  expect(j.log).toBe(path.join(home, 'setup.log'));
+  const text = fs.readFileSync(j.log, 'utf8');
+  expect(text).toMatch(/> .* -m venv /);
+  expect(text).toMatch(/ERROR: No matching distribution found for (setuptools|wheel)/);
+  expect(text).toMatch(/Finished: FAILED \(exit 1\)/);
+}
+
 const bash = process.platform !== 'win32' ? findOnPath('bash').found : null;
 const powershell = process.platform === 'win32'
   ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -386,7 +637,109 @@ describe.skipIf(!bash)('setup-voice.sh (real script)', () => {
     });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/Python 3\.12 was not found/);
-    expect(readSetupStatus(status)).toMatchObject({ ok: false, error: 'python-missing' });
+    const j = readSetupStatus(status);
+    expect(j).toMatchObject({ ok: false, error: 'python-missing' });
+    // logged too, even without most tools on PATH (no mktemp, sed, sha256sum here)
+    expect(j.log).toBe(path.join(base, 'xdg', 'lawnmower-man', 'voice', 'setup.log'));
+    expect(fs.readFileSync(j.log, 'utf8')).toMatch(/ERROR: Python 3\.12 was not found/);
+    expect(r.stderr).not.toMatch(/command not found/);
+  });
+
+  it('a --python that does not work fails the run after its log has started (check-only: no log)', () => {
+    const base = tmp('lm-vsetup sh badpy ');
+    const res = packagedLayout(base);
+    const xdg = path.join(base, 'xdg');
+    const status = path.join(base, 's.json');
+    const bad = path.join(base, 'no such python');
+    const go = (extra) => spawnSync(bash, [path.join(res, 'scripts', 'setup-voice.sh'), ...extra, '--python', bad, '--status-file', status], {
+      env: { ...process.env, XDG_DATA_HOME: xdg }, encoding: 'utf8', input: '', timeout: 60000,
+    });
+    const home = packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: xdg } });
+    const msg = `'${bad}' is not a working Python interpreter.`;
+    const c = go(['--check-only']);
+    expect(c.status).toBe(1);
+    expect(readSetupStatus(status)).toMatchObject({ ok: false, check: true, error: msg, log: '' });
+    expect(fs.existsSync(home)).toBe(false);
+    const r = go([]);
+    expect(r.status).toBe(1);
+    const j = readSetupStatus(status);
+    expect(j).toMatchObject({ ok: false, error: msg, log: path.join(home, 'setup.log') });
+    const text = fs.readFileSync(j.log, 'utf8');
+    expect(text).toContain(`Python:   not found [--python ${bad}]`);
+    expect(text).toContain(`ERROR: ${msg}`);
+    expect(text).toMatch(/Finished: FAILED \(exit 1\)/);
+  });
+
+  it('a failing pip install: the error has pip\'s last lines, setup.log has everything, the run before is kept', () => {
+    const base = tmp('lm-vsetup sh pip ');
+    const res = packagedLayout(base);
+    const xdg = path.join(base, 'xdg data é');
+    const status = path.join(base, 'status.json');
+    const fake = fakePython(base);
+    const home = packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: xdg } });
+    const tmpDir = path.join(base, 'tmp');
+    fs.mkdirSync(tmpDir);
+    const run = () => spawnSync(bash, [path.join(res, 'scripts', 'setup-voice.sh'), '--python', fake, '--no-models', '--status-file', status], {
+      env: { ...process.env, XDG_DATA_HOME: xdg, TMPDIR: tmpDir }, encoding: 'utf8', input: '', timeout: 60000,
+    });
+    const first = expectFailedPipRun({ r: run(), status, home, flag: '--status-file', fake });
+    expect(readSetupStatus(status).errorTail.at(-1)).toBe('ERROR: No matching distribution found for example-wheel>=1.0'); // one pipe: in order
+    const r2 = run();
+    const second = expectFailedPipRun({ r: r2, status, home, flag: '--status-file', fake });
+    expect(fs.readFileSync(path.join(home, 'setup.prev.log'), 'utf8')).toBe(first);
+    expect(second).toContain('Reusing the existing venv (Python 3.12)');
+    expect(r2.stderr).toMatch(/The full output is in .*setup\.log/);
+    expect(fs.readdirSync(tmpDir)).toEqual([]); // the per-command output file is removed
+  });
+
+  it('a one-off failure of the GPU install is retried once and the run goes on', () => {
+    const base = tmp('lm-vsetup sh retry ');
+    const res = packagedLayout(base);
+    const xdg = path.join(base, 'xdg');
+    const status = path.join(base, 'status.json');
+    const fake = fakePython(base);
+    const home = packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: xdg } });
+    const r = spawnSync(bash, [path.join(res, 'scripts', 'setup-voice.sh'), '--python', fake, '--no-models', '--status-file', status], {
+      env: { ...process.env, XDG_DATA_HOME: xdg, FAKE_PIP_FAIL_ONCE: path.join(base, 'failed-once') }, encoding: 'utf8', input: '', timeout: 60000,
+    });
+    expectRetriedGpuInstall({ r, status, home });
+  });
+
+  it.skipIf(!realPython)('a real venv and a real pip without a package index: pip\'s ERROR lines in the status, the run in setup.log', () => {
+    const base = tmp('lm-vsetup sh realpip ');
+    const res = packagedLayout(base);
+    const xdg = path.join(base, 'xdg data é');
+    const status = path.join(base, 'status.json');
+    const r = spawnSync(bash, [path.join(res, 'scripts', 'setup-voice.sh'), '--python', realPython, '--cpu', '--no-models', '--status-file', status], {
+      env: { ...process.env, ...OFFLINE_PIP, XDG_DATA_HOME: xdg }, encoding: 'utf8', input: '', timeout: 180000,
+    });
+    expectRealPipFailure({ r, status, home: packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: xdg } }) });
+  }, 200000);
+
+  it('VoiceSetupRunner reports a failing pip install with its output tail (real script, stand-in terminal)', async () => {
+    const base = tmp('lm-vsetup run pip ');
+    const res = packagedLayout(base);
+    const xdg = path.join(base, 'xdg');
+    const fake = fakePython(base);
+    // the app passes no --python: the stand-in terminal adds it in front of the script's own args
+    const runner = new VoiceSetupRunner({
+      script: path.join(res, 'scripts', 'setup-voice.sh'),
+      statusFile: path.join(base, 'status.json'),
+      logFile: setupLogPath({ platform: 'linux', voiceHome: packagedVoiceHome({ platform: 'linux', env: { XDG_DATA_HOME: xdg } }) }),
+      platform: 'linux',
+      env: { ...process.env, XDG_DATA_HOME: xdg },
+      findTerminal: () => ({ name: 'env', path: findOnPath('env').found, args: (cmd) => [...cmd.slice(0, 2), '--python', fake, '--no-models', ...cmd.slice(2)] }),
+      pollMs: 50,
+    });
+    const done = new Promise((r) => runner.once('finished', r));
+    expect((await runner.start()).state).toBe('running');
+    const r = await done;
+    expect(r).toMatchObject({ ok: false });
+    const st = runner.state;
+    expect(st.state).toBe('failed');
+    expect(st.errorTail.at(-1)).toBe('ERROR: No matching distribution found for example-wheel>=1.0');
+    expect(st.detail).toMatch(/^The voice setup failed: Command failed \(exit 1\): .* — ERROR: No matching distribution found/);
+    expect(runner.existingLog()).toBe(r.log);
   });
 
   it('VoiceSetupRunner drives the real script end to end (check mode, via a stand-in terminal)', async () => {
@@ -422,11 +775,103 @@ describe.skipIf(!hasPowerShell)('setup-voice.ps1 (real script)', () => {
     const j = readSetupStatus(status);
     // On Windows this is exactly what the sidecar computes; pwsh elsewhere joins with "/".
     const home = process.platform === 'win32' ? packagedVoiceHome({ platform: 'win32', env: { LOCALAPPDATA: local } }) : path.join(local, 'LawnmowerMan', 'voice');
-    expect(j).toMatchObject({ ok: true, check: true, packaged: true, voiceHome: home, venv: path.join(home, '.venv') });
+    expect(j).toMatchObject({ ok: true, check: true, packaged: true, voiceHome: home, venv: path.join(home, '.venv'), log: '' });
+    expect(fs.existsSync(path.join(home, 'setup.log'))).toBe(false); // check-only writes nothing
     if (process.platform === 'win32') {
       expect(j.venv).toBe(voiceVenvDirs({ packaged: true, voiceDir: path.join(res, 'voice'), platform: 'win32', env: { LOCALAPPDATA: local } })[0]);
     }
   });
+
+  it('a -Python that does not work fails the run after its log has started (-CheckOnly: no log)', () => {
+    const base = tmp('lm-vsetup ps badpy ');
+    const res = packagedLayout(base);
+    const local = path.join(base, 'Local AppData José');
+    const status = path.join(base, 's.json');
+    const bad = path.join(base, 'no such python.exe');
+    const home = process.platform === 'win32' ? packagedVoiceHome({ platform: 'win32', env: { LOCALAPPDATA: local } }) : path.join(local, 'LawnmowerMan', 'voice');
+    const msg = `'${bad}' is not a working Python interpreter.`;
+    const c = run([path.join(res, 'scripts', 'setup-voice.ps1'), '-CheckOnly', '-Python', bad, '-StatusFile', status], { LOCALAPPDATA: local });
+    expect(c.status, c.stdout + c.stderr).toBe(1);
+    expect(readSetupStatus(status)).toMatchObject({ ok: false, check: true, error: msg, log: '' });
+    expect(fs.existsSync(path.join(home, 'setup.log'))).toBe(false);
+    const r = run([path.join(res, 'scripts', 'setup-voice.ps1'), '-Python', bad, '-StatusFile', status], { LOCALAPPDATA: local });
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    const j = readSetupStatus(status);
+    expect(j).toMatchObject({ ok: false, error: msg, log: path.join(home, 'setup.log') });
+    const text = fs.readFileSync(j.log, 'utf8');
+    expect(text).toContain(`Python:   not found yet [-Python ${bad}]`);
+    expect(text).toContain(`ERROR: ${msg}`);
+    expect(text).toMatch(/Finished: FAILED \(exit 1\)/);
+  });
+
+  // .\scripts\setup-voice.ps1 typed in the user's own PowerShell window runs in that session: the
+  // UTF-8 / unbuffered settings for the Python children must not stay behind in it.
+  it('gives the calling session its PYTHONUTF8 / PYTHONIOENCODING / PYTHONUNBUFFERED back', () => {
+    const base = tmp('lm-vsetup ps env ');
+    const res = packagedLayout(base);
+    const local = path.join(base, 'Local AppData José');
+    const fake = process.platform === 'win32' ? '' : fakePython(base);
+    const env = { ...process.env, LOCALAPPDATA: local, PYTHONIOENCODING: 'latin-1', LM_T_SCRIPT: path.join(res, 'scripts', 'setup-voice.ps1'), LM_T_STATUS: path.join(base, 's.json'), LM_T_PY: fake };
+    for (const k of Object.keys(env)) if (/^PYTHON(UTF8|UNBUFFERED)$/i.test(k)) delete env[k];
+    const show = "[Console]::Out.WriteLine('ENV ' + (@{ utf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8'); io = [Environment]::GetEnvironmentVariable('PYTHONIOENCODING'); unbuf = [Environment]::GetEnvironmentVariable('PYTHONUNBUFFERED') } | ConvertTo-Json -Compress))";
+    const runs = ['& $env:LM_T_SCRIPT -CheckOnly -StatusFile $env:LM_T_STATUS | Out-Null'];
+    // a real run that fails in pip (POSIX: the stand-in Python is a shell script)
+    if (fake) runs.push('& $env:LM_T_SCRIPT -Python $env:LM_T_PY -NoModels -StatusFile $env:LM_T_STATUS | Out-Null');
+    for (const cmd of runs) {
+      const r = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `${cmd}; ${show}`], { env, encoding: 'utf8', input: '', timeout: 120000 });
+      const line = r.stdout.split(/\r?\n/).find((l) => l.startsWith('ENV '));
+      expect(line, r.stdout + r.stderr).toBeDefined();
+      expect(JSON.parse(line.slice(4))).toEqual({ utf8: null, io: 'latin-1', unbuf: null });
+    }
+    if (fake) expect(readSetupStatus(env.LM_T_STATUS)).toMatchObject({ ok: false, errorTail: expect.any(Array) });
+  });
+
+  // A real run (not -CheckOnly) with a stand-in Python whose pip install fails (POSIX only: the
+  // stand-in is a shell script; Windows needs a python.exe). Runs the same code paths as Windows
+  // PowerShell 5.1 would, except the encoding/ErrorRecord specifics, which ci.yml / release.yml
+  // exercise on windows-latest.
+  it.skipIf(process.platform === 'win32')('a one-off failure of the GPU install is retried once and the run goes on', () => {
+    const base = tmp('lm-vsetup ps retry ');
+    const res = packagedLayout(base);
+    const local = path.join(base, 'Local AppData');
+    const status = path.join(base, 's.json');
+    const fake = fakePython(base);
+    const home = path.join(local, 'LawnmowerMan', 'voice');
+    const r = run([path.join(res, 'scripts', 'setup-voice.ps1'), '-Python', fake, '-NoModels', '-StatusFile', status], { LOCALAPPDATA: local, FAKE_PIP_FAIL_ONCE: path.join(base, 'failed-once') });
+    expectRetriedGpuInstall({ r, status, home });
+  });
+
+  it.skipIf(process.platform === 'win32')('a failing pip install: the error has pip\'s last lines, setup.log has everything, the run before is kept', () => {
+    const base = tmp('lm-vsetup ps pip ');
+    const res = packagedLayout(base);
+    const local = path.join(base, 'Local AppData José');
+    const status = path.join(base, 'status dir', 's.json');
+    const fake = fakePython(base);
+    const home = path.join(local, 'LawnmowerMan', 'voice');
+    const go = () => run([path.join(res, 'scripts', 'setup-voice.ps1'), '-Python', fake, '-NoModels', '-StatusFile', status], { LOCALAPPDATA: local });
+    const first = expectFailedPipRun({ r: go(), status, home, flag: '-StatusFile', fake });
+    expect(first).toContain(`Flags:    -Python ${fake} -NoModels -StatusFile ${status}`);
+    const r2 = go();
+    const second = expectFailedPipRun({ r: r2, status, home, flag: '-StatusFile', fake });
+    expect(fs.readFileSync(path.join(home, 'setup.prev.log'), 'utf8')).toBe(first);
+    expect(second).toContain('Reusing the existing venv (Python 3.12)');
+    expect(r2.stdout).toMatch(/The full output is in .*setup\.log/);
+    expect(readSetupStatus(status).error.split('\n')).toHaveLength(1 + readSetupStatus(status).errorTail.length);
+  });
+
+  // On Windows (ci.yml's Windows job) this is the real Windows PowerShell 5.1 with a real Python:
+  // pip's stderr lines arrive as error records with $ErrorActionPreference = 'Stop' in the script.
+  it.skipIf(!realPython)('a real venv and a real pip without a package index: pip\'s ERROR lines in the status, the run in setup.log', () => {
+    const base = tmp('lm-vsetup ps realpip ');
+    const res = packagedLayout(base);
+    const local = path.join(base, 'Local AppData José');
+    const status = path.join(base, 'status dir', 's.json');
+    const r = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(res, 'scripts', 'setup-voice.ps1'), '-Python', realPython, '-Cpu', '-NoModels', '-StatusFile', status], {
+      env: { ...process.env, ...OFFLINE_PIP, LOCALAPPDATA: local }, encoding: 'utf8', input: '', timeout: 180000,
+    });
+    expectRealPipFailure({ r, status, home: path.join(local, 'LawnmowerMan', 'voice') });
+    expect(r.stdout).not.toMatch(/NativeCommandError/);
+  }, 200000);
 
   // What the visible console runs (WINDOWS_SETUP_BOOTSTRAP). On Windows this is the real Windows
   // PowerShell 5.1 (ci.yml's Windows job), elsewhere PowerShell 7.

@@ -186,6 +186,68 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  voice-setup:
+    # What a tester's "Set up local voice…" does, for real: install the built installer, then run the
+    # BUNDLED setup script under Windows PowerShell 5.1 (the default shell on Windows 11) with the GPU
+    # wheels into the per-user voice folder, and check that the voice server's packages import.
+    # Models are skipped (Hugging Face downloads are large); the runner has no GPU, which is fine for
+    # installing wheels.
+    name: Local voice setup on Windows (bundled script, GPU wheels)
+    needs: windows-installer
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: lawnmower-man-windows
+          path: dist-win
+      - name: Install the app silently
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist-win -Filter 'Lawnmower-Man-Setup-*.exe' | Select-Object -First 1
+          $dest = Join-Path $env:RUNNER_TEMP 'Install Test\Lawnmower Man'
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S', "/D=$dest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
+          "INSTALL_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run the bundled setup-voice.ps1 (Windows PowerShell 5.1, GPU wheels, no models)
+        shell: powershell
+        run: |
+          $script = Join-Path $env:INSTALL_DIR 'resources\scripts\setup-voice.ps1'
+          $status = Join-Path $env:GITHUB_WORKSPACE 'voice-setup-out\status.json'
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $status) | Out-Null
+          # No -Yes and no console input: the runner has no NVIDIA driver, and the script's
+          # "install the CPU version instead?" question then defaults to no, so the GPU wheels
+          # (the [gpu] extra a tester's RTX laptop gets) are really installed.
+          '' | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -NoModels -SkipSmoke -StatusFile $status
+          $code = $LASTEXITCODE
+          Write-Host "setup exit code: $code"
+          if (Test-Path -LiteralPath $status) { Get-Content -LiteralPath $status }
+          if ($code -ne 0) { throw "setup-voice.ps1 failed with exit code $code" }
+      - name: The voice server's packages import from the per-user venv
+        shell: pwsh
+        run: |
+          $py = Join-Path $env:LOCALAPPDATA 'LawnmowerMan\voice\.venv\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $py)) { throw "no venv python at $py" }
+          & $py -c "import uvicorn, fastapi, faster_whisper, ctranslate2, kokoro_onnx, onnxruntime, lawnmower_voice; print('providers:', onnxruntime.get_available_providers()); print('ctranslate2', ctranslate2.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw 'imports failed' }
+          # the GPU stack really is the one installed (onnxruntime-gpu + the NVIDIA libraries)
+          & $py -m pip show onnxruntime-gpu nvidia-cublas-cu12
+          if ($LASTEXITCODE -ne 0) { throw 'the GPU packages are not installed (the CPU stack was installed instead)' }
+          $log = Join-Path $env:LOCALAPPDATA 'LawnmowerMan\voice'
+          Get-ChildItem -LiteralPath $log -Filter 'setup*.log' -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $env:GITHUB_WORKSPACE 'voice-setup-out')
+      - name: Upload the setup log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-setup-windows
+          path: voice-setup-out/
+          if-no-files-found: ignore
+          retention-days: 14
+
   publish:
     name: Publish pre-release
     # v* tag pushes and releases published on GitHub only: pull requests and manual runs never publish

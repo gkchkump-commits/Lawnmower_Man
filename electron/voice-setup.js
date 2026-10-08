@@ -21,6 +21,11 @@
 // ends (and before "Press Enter to close this window"); it is polled every couple of seconds.
 // The launcher's exit (the window was closed) is the fallback. Never runs anything elevated.
 //
+// Diagnosis: every run writes its full output to <voice home>/setup.log (setup.prev.log keeps the
+// run before; `logFile` here). A failed run reports the failed step plus the last lines of its
+// output (where pip prints "ERROR: …") in the status file's `error` / `errorTail`; they end up in
+// the state as `errorTail`, for the settings drawer.
+//
 // Pure Node (no Electron import): spawn, fs and the terminal lookup are injectable for tests.
 
 import { EventEmitter } from 'node:events';
@@ -42,6 +47,17 @@ export function setupScriptPath(o) {
   const name = platform === 'win32' ? 'setup-voice.ps1' : 'setup-voice.sh';
   const base = o.packaged && o.resourcesPath ? P.join(o.resourcesPath, 'scripts') : P.join(o.appRoot, 'scripts');
   return P.join(base, name);
+}
+
+/**
+ * The log the setup script writes for every run (and setup.prev.log next to it for the one
+ * before), in the voice home: the per-user folder of an installed app, voice/ in a checkout.
+ * Must match scripts/setup-voice.ps1 / setup-voice.sh ($SetupLog / SETUP_LOG).
+ * @param {{ platform?: string, voiceHome: string }} o
+ */
+export function setupLogPath(o) {
+  const P = (o.platform || process.platform) === 'win32' ? path.win32 : path.posix;
+  return P.join(o.voiceHome, 'setup.log');
 }
 
 /**
@@ -218,7 +234,11 @@ export function manualSetupCommand(o) {
  * @property {string} [voiceHome]
  * @property {string} [venv]
  * @property {string} [python]
- * @property {string} [error]      'python-missing' or a message
+ * @property {string} [error]      'python-missing' or a message; a failed command: the command
+ *                                 line, then the last lines of its output
+ * @property {string[]} [errorTail] those last output lines (newest last)
+ * @property {string} [log]        the setup log the script wrote (informational: the app opens
+ *                                 only the log of its own voice home)
  */
 
 /**
@@ -229,8 +249,44 @@ export function manualSetupCommand(o) {
  * @property {string} [command]     manual mode: what to run in a terminal
  * @property {boolean} [cpu]
  * @property {boolean} [check]
+ * @property {string[]} [errorTail] failed: the last lines of the failed step's output
  * @property {SetupResult} [result]
  */
+
+/** Lines of a failed step's output kept for the UI. */
+export const MAX_TAIL_LINES = 20;
+const MAX_TAIL_LINE_CHARS = 500;
+
+/**
+ * Clean output lines for the UI: strings only, no control characters (colour codes, carriage
+ * returns), no empty lines, each line bounded, the last MAX_TAIL_LINES.
+ * @param {unknown} lines
+ * @returns {string[]}
+ */
+export function cleanTailLines(lines) {
+  if (!Array.isArray(lines)) return [];
+  const out = [];
+  for (const l of lines) {
+    if (typeof l !== 'string') continue;
+    const s = l.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trimEnd();
+    if (!s.trim()) continue;
+    out.push(s.length > MAX_TAIL_LINE_CHARS ? `${s.slice(0, MAX_TAIL_LINE_CHARS - 1)}…` : s);
+  }
+  return out.slice(-MAX_TAIL_LINES);
+}
+
+/**
+ * The output tail of a failed result: the script's errorTail, or else (a status written by the
+ * console bootstrap, an older script) the lines of a multi-line error after the first.
+ * @param {SetupResult} r
+ * @returns {string[]}
+ */
+export function setupErrorTail(r) {
+  if (!r || r.ok) return [];
+  if (Array.isArray(r.errorTail) && r.errorTail.length) return cleanTailLines(r.errorTail);
+  const lines = String(r.error || '').split(/\r?\n/);
+  return lines.length > 1 ? cleanTailLines(lines.slice(1)) : [];
+}
 
 /** Read and validate a status file; null when missing or not (yet) valid JSON. @param {string} file @param {any} fs */
 export function readSetupStatus(file, fs = nodeFs) {
@@ -246,25 +302,50 @@ export function readSetupStatus(file, fs = nodeFs) {
     /** @type {SetupResult} */
     const r = { ok: j.ok };
     for (const k of ['check', 'cpu', 'packaged']) if (typeof j[k] === 'boolean') /** @type {any} */ (r)[k] = j[k];
-    for (const k of ['voiceHome', 'venv', 'python', 'error']) if (typeof j[k] === 'string') /** @type {any} */ (r)[k] = j[k].slice(0, 2000);
+    // error: the command line plus up to 20 lines of up to 400 characters
+    for (const k of ['voiceHome', 'venv', 'python', 'log']) if (typeof j[k] === 'string') /** @type {any} */ (r)[k] = j[k].slice(0, 2000);
+    if (typeof j.error === 'string') r.error = j.error.slice(0, 12000);
+    // Windows PowerShell 5.1's ConvertTo-Json writes a one-element array as an array, but be lenient:
+    // a lone string, or a PSObject-wrapped array ({"value":[…],"Count":n}, a known 5.1 quirk)
+    const et = j.errorTail;
+    const tail = cleanTailLines(Array.isArray(et) ? et : typeof et === 'string' ? [et] : et && typeof et === 'object' && Array.isArray(et.value) ? et.value : []);
+    if (tail.length) r.errorTail = tail;
     return r;
   } catch {
     return null; // still being written
   }
 }
 
+/** The line of a pip failure that says why ("ERROR: No matching distribution found for …"). @param {string[]} tail */
+function reasonLine(tail) {
+  for (let i = tail.length - 1; i >= 0; i--) if (/^\s*ERROR\b/.test(tail[i])) return tail[i].trim();
+  return '';
+}
+
+/** @param {string} s @param {number} n */
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
 /** One line for the UI from a failed result. @param {SetupResult} r */
 export function describeSetupFailure(r) {
   if (r.error === 'python-missing') return 'Python 3.12 is needed. Install it (the setup window explains how), then run the setup again.';
+  if (Array.isArray(r.errorTail) && r.errorTail.length) {
+    // the failed step (first line of the error) and pip's reason; the tail is shown separately
+    const step = String(r.error || '').split(/\r?\n/)[0].replace(/\s+/g, ' ').trim();
+    const why = reasonLine(r.errorTail).replace(/\s+/g, ' ');
+    const parts = [step && clip(step, why ? 220 : 400), why && !step.includes(why) ? clip(why, 300) : ''].filter(Boolean);
+    return parts.length ? `The voice setup failed: ${parts.join(' — ')}` : 'The voice setup did not finish.';
+  }
   // one line for a toast / the drawer (a PowerShell parse error spans several lines)
   const msg = String(r.error || '').replace(/\s+/g, ' ').trim();
-  return msg ? `The voice setup failed: ${msg.length > 400 ? `${msg.slice(0, 399)}…` : msg}` : 'The voice setup did not finish.';
+  return msg ? `The voice setup failed: ${clip(msg, 400)}` : 'The voice setup did not finish.';
 }
 
 /**
  * @typedef {object} VoiceSetupOptions
  * @property {string} script               setup-voice.ps1 / setup-voice.sh
  * @property {string} statusFile           where the script reports its result
+ * @property {string} [logFile]            the setup log the script writes (<voice home>/setup.log);
+ *                                         see setupLogPath()
  * @property {string} [platform]
  * @property {Record<string, string|undefined>} [env]
  * @property {string} [cwd]                working folder for the console (default: home)
@@ -302,11 +383,33 @@ export class VoiceSetupRunner extends EventEmitter {
 
   /** @returns {SetupState} */
   get state() {
-    return { ...this._state, result: this._state.result ? { ...this._state.result } : undefined };
+    const s = { ...this._state, result: this._state.result ? { ...this._state.result } : undefined };
+    if (s.errorTail) s.errorTail = [...s.errorTail];
+    return s;
   }
 
   get running() {
     return this._state.state === 'running' || this._launching;
+  }
+
+  /** The setup log of the voice home ('' when not configured). */
+  get logFile() {
+    return this._o.logFile || '';
+  }
+
+  /**
+   * The setup log, when there is one: a regular file (not a link or folder) at the known path.
+   * @returns {string|null}
+   */
+  existingLog() {
+    const f = this.logFile;
+    if (!f) return null;
+    try {
+      const st = (this._fs.lstatSync || this._fs.statSync)(f);
+      return st.isFile() ? f : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -474,6 +577,7 @@ export class VoiceSetupRunner extends EventEmitter {
     const cur = this._state;
     const ok = !!r.ok;
     this._log(ok ? 'info' : 'warn', `[voice-setup] finished: ${JSON.stringify(r)}`);
+    const tail = ok ? [] : setupErrorTail(r);
     this._set({
       state: ok ? 'done' : 'failed',
       mode: cur.mode,
@@ -482,7 +586,9 @@ export class VoiceSetupRunner extends EventEmitter {
       command: cur.command,
       result: r,
       detail: ok ? (cur.check ? 'The voice setup check passed.' : 'Local voice installed. Starting it…') : describeSetupFailure(r),
+      ...(tail.length ? { errorTail: tail } : {}),
     });
+    if (!ok && tail.length) this._log('warn', `[voice-setup] last output lines:\n  ${tail.join('\n  ')}`);
     this.emit('finished', { ...r });
   }
 

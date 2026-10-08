@@ -204,3 +204,71 @@ def test_real_engines_without_libraries_start_and_explain(server, tmp_path):
     status, health = request(base + "/health")
     assert status == 200 and health["ok"] is False
     assert health["stt"]["error"] and health["tts"]["error"]
+
+
+def _blocker(tmp_path: Path, *names: str) -> dict:
+    """Environment whose interpreter cannot import ``names`` (a venv where pip failed halfway)."""
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+            BLOCK = {names!r}
+            class _Block:
+                def find_spec(self, name, path=None, target=None):
+                    if name.split(".")[0] in BLOCK:
+                        raise ModuleNotFoundError(f"No module named {{name!r}}", name=name)
+                    return None
+            sys.meta_path.insert(0, _Block())
+            """
+        )
+    )
+    return {"PYTHONPATH": str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+
+
+def test_missing_core_package_reports_and_exits_not_installed(server, tmp_path):
+    """uvicorn missing: one protocol line naming it, a readable log line, exit code 2 (the app
+    then waits for a new setup run instead of restarting the server in a loop)."""
+    from lawnmower_voice.__main__ import EXIT_NOT_INSTALLED
+
+    srv = server("--port", "0", "--models-dir", str(tmp_path / "m"), env=_blocker(tmp_path, "uvicorn"))
+    code = srv.proc.wait(60)
+    srv.stop()
+    assert code == EXIT_NOT_INSTALLED == 2
+    events = [json.loads(line) for line in srv.stdout_lines]  # still only JSON on stdout
+    assert {"event": "not-installed", "missing": ["uvicorn"]} in events
+    assert not any(e.get("event") == "ready" for e in events)
+    err = "".join(srv.stderr_lines)
+    assert "Local voice is not fully installed (missing: uvicorn). Run the setup script again" in err
+    assert ".." not in err  # the app appends its own sentence: no "script.. Restarting"
+    assert "Traceback" not in err
+
+
+def test_missing_dependency_of_the_web_stack_is_reported_too(server, tmp_path):
+    """pydantic (needed by fastapi) missing: found when the app module is imported, same exit."""
+    srv = server("--port", "0", "--models-dir", str(tmp_path / "m"), env=_blocker(tmp_path, "pydantic"))
+    code = srv.proc.wait(60)
+    srv.stop()
+    assert code == 2
+    events = [json.loads(line) for line in srv.stdout_lines]
+    assert {"event": "not-installed", "missing": ["pydantic"]} in [e for e in events if e.get("event") == "not-installed"]
+    assert "missing: pydantic" in "".join(srv.stderr_lines)
+
+
+def test_missing_core_modules_unit(monkeypatch):
+    import importlib.util
+
+    from lawnmower_voice import __main__ as m
+
+    real = importlib.util.find_spec
+
+    def fake(name, *a, **kw):
+        if name == "uvicorn":
+            return None
+        if name == "numpy":
+            raise ValueError("numpy.__spec__ is None")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    assert m.missing_core_modules(("uvicorn", "json", "numpy")) == ["uvicorn", "numpy"]
+    assert m.missing_core_modules(("json",)) == []

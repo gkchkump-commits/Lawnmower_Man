@@ -80,7 +80,8 @@
           "!.pytest_cache/**",
           "!**/*.egg-info/**",
           "!models/**",
-          "!build/**"
+          "!build/**",
+          "!setup*.log"
         ]
       },
       {

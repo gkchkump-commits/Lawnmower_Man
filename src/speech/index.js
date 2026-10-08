@@ -83,6 +83,8 @@ export function createSpeechServices(deps) {
       const sttErr = voiceClient.health?.stt?.error;
       if (info.status === 'ready' && sttErr) return `Speech recognition is unavailable: ${sttErr}`;
       if (info.status === 'error' && info.detail) return `The voice server failed: ${info.detail}`;
+      // a half-installed venv: the detail already names the action ("Set up local voice again…")
+      if (info.status === 'disabled' && info.detail && Array.isArray(info.missing) && info.missing.length) return info.detail;
       if (info.status === 'disabled' && info.detail) return `${info.detail} ${VOICE_SETUP_HINT}`;
       return VOICE_SETUP_HINT;
     },

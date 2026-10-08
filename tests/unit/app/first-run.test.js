@@ -1,9 +1,10 @@
 // First-run renderer logic: setup-card models, the controller's handling of main's `problem`
 // events, the mock bridge's simulations, and the system (Web Speech) voice choice.
 import { describe, expect, it, vi } from 'vitest';
-import { CLAUDE_DOCS, CLAUDE_INSTALL, claudeSetupModel, voiceManualModel } from '../../../src/app/setup-help.js';
+import { CLAUDE_DOCS, CLAUDE_INSTALL, SETUP_TAIL_MAX_LINES, claudeSetupModel, voiceManualModel, voiceSetupDiagnostics } from '../../../src/app/setup-help.js';
 import { DEFAULT_SETTINGS } from '../../../src/app/settings-defaults.js';
-import { MOCK_NOT_FOUND, MOCK_NOT_LOGGED_IN, createMockBridge } from '../../../src/bridge/mock.js';
+import { MOCK_NOT_FOUND, MOCK_NOT_LOGGED_IN, MOCK_SETUP_TAIL, createMockBridge } from '../../../src/bridge/mock.js';
+import { getBridge } from '../../../src/bridge/index.js';
 import { WebSpeechTTS } from '../../../src/speech/web-speech.js';
 import { describeClaude } from '../../../src/ui/status.js';
 import { Controller } from '../../../src/app/controller.js';
@@ -61,6 +62,64 @@ describe('setup card models', () => {
     expect(describeClaude({ status: 'error', problem: { kind: 'cli-missing', detail: 'x' } })).toMatchObject({ text: 'Claude not installed', tone: 'error' });
     expect(describeClaude({ status: 'ready', problem: { kind: 'auth', detail: 'y' } })).toMatchObject({ text: 'Claude: sign in', tone: 'warn', title: 'y' });
     expect(describeClaude({ status: 'ready' }).text).toBe('Claude');
+  });
+});
+
+describe('voice setup diagnostics (settings drawer, Settings › Voice)', () => {
+  const failed = {
+    status: 'disabled',
+    installed: true,
+    missing: ['uvicorn'],
+    setupLog: 'C:\\Users\\gkchk\\AppData\\Local\\LawnmowerMan\\voice\\setup.log',
+    setup: {
+      state: 'failed',
+      detail: 'The voice setup failed: Command failed (exit 1): python.exe -m pip install -e src[gpu] — ERROR: No matching distribution found for example-wheel>=1.0',
+      errorTail: ['Collecting example-wheel>=1.0', '', 'ERROR: No matching distribution found for example-wheel>=1.0'],
+    },
+  };
+
+  it('a failed setup: the output tail, "Open setup log" and a report to copy', () => {
+    const d = voiceSetupDiagnostics(failed);
+    expect(d.tail).toEqual(['Collecting example-wheel>=1.0', 'ERROR: No matching distribution found for example-wheel>=1.0']);
+    expect(d).toMatchObject({ logPath: failed.setupLog, showOpenLog: true });
+    expect(d.copyText).toBe([
+      failed.setup.detail,
+      '',
+      'Collecting example-wheel>=1.0',
+      'ERROR: No matching distribution found for example-wheel>=1.0',
+      '',
+      `Setup log: ${failed.setupLog}`,
+    ].join('\n'));
+  });
+
+  it('no button without the bridge call; no tail unless the run failed; bounded', () => {
+    expect(voiceSetupDiagnostics(failed, { canOpenLog: false })).toMatchObject({ showOpenLog: false, logPath: failed.setupLog });
+    // a successful (or running) setup: the log can still be opened, there is no error tail
+    expect(voiceSetupDiagnostics({ ...failed, setup: { state: 'done', detail: 'ok', errorTail: ['x'] } })).toMatchObject({ tail: [], showOpenLog: true });
+    expect(voiceSetupDiagnostics({ status: 'ready' })).toEqual({ tail: [], logPath: '', showOpenLog: false, copyText: '' });
+    expect(voiceSetupDiagnostics(null)).toMatchObject({ tail: [], showOpenLog: false });
+    const many = voiceSetupDiagnostics({ setup: { state: 'failed', errorTail: [...Array.from({ length: 30 }, (_, i) => `line ${i}`), 42, 'y'.repeat(900)] } });
+    expect(many.tail).toHaveLength(SETUP_TAIL_MAX_LINES);
+    expect(many.tail.at(-1)).toHaveLength(500);
+    expect(many.tail[0]).toBe('line 11');
+  });
+
+  it('the mock bridge (?voiceSetup=failed) starts in the tester\'s state: half-installed venv, failed setup, a log', async () => {
+    const b = createMockBridge({ startupMs: 5, platform: 'win32', voiceSetup: 'failed' });
+    const info = await b.voice.info();
+    expect(info).toMatchObject({ status: 'disabled', installed: true, missing: ['uvicorn'], setupLog: expect.stringMatching(/\\LawnmowerMan\\voice\\setup\.log$/) });
+    expect(info.setup).toMatchObject({ state: 'failed', errorTail: [...MOCK_SETUP_TAIL] });
+    expect(info.detail).toMatch(/not fully installed \(missing: uvicorn\)/);
+    expect(voiceSetupDiagnostics(info).tail.at(-1)).toMatch(/^ERROR: No matching distribution/);
+    expect(await b.voice.openSetupLog()).toMatchObject({ ok: true, path: info.setupLog });
+    expect(b.__mock.calls).toContainEqual(['voice.openSetupLog']);
+    // without a failed setup there is no log to open
+    const plain = createMockBridge({ startupMs: 5 });
+    expect((await plain.voice.info()).setupLog).toBeUndefined();
+    expect(await plain.voice.openSetupLog()).toMatchObject({ ok: false });
+    const fromUrl = getBridge({ win: {}, search: '?mock=1&voiceSetup=failed' }).bridge;
+    expect((await fromUrl.voice.info()).setup.state).toBe('failed');
+    for (const x of [b, plain, fromUrl]) x.__mock.dispose();
   });
 });
 

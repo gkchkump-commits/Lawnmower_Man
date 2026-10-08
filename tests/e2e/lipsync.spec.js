@@ -46,15 +46,19 @@ function fakeVoice(o) {
 
 for (const boundaries of [true, false]) {
   test(`system voice ${boundaries ? 'with' : 'without'} word boundaries: the mouth follows the words`, async ({ page }) => {
+    test.setTimeout(120_000);
     await page.addInitScript(fakeVoice, { gapMs: 230, boundaries });
-    await boot(page, { mockDelay: 8, mockFirst: 50 });
+    // no particles / bloom: more frames per second on software WebGL (CI runners can drop to a few fps)
+    await boot(page, { mockDelay: 8, mockFirst: 50 }, { avatar: { quality: 'low', particles: 0, bloom: 0 } });
     await expect.poll(() => page.evaluate(() => window.__app.controller.tts.mode())).toBe('browser');
     await send(page, 'hello');
     await page.waitForFunction(() => document.body.dataset.state === 'speaking', null, { timeout: 30_000 });
-    // speak for a while: the greeting has "I'm", "hologram", "me" (closures) and "floating" (f)
-    await page.waitForFunction(() => window.__mouth.length > 60 && window.speechSynthesis.spoken.length >= 2, null, { timeout: 30_000 });
-    await page.waitForTimeout(1500);
+    // Let the whole greeting play — it has "I'm", "hologram", "me" (closures) and "floating" (f).
+    // Wait on the voice, not on a frame count: how many frames fit into it depends on the machine.
+    await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 4 && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
+    await waitIdle(page);
     const m = await page.evaluate(() => window.__mouth);
+    expect(m.length).toBeGreaterThan(15); // sampled while speaking, even at a few fps
     const max = (k) => Math.max(...m.map((x) => x[k]));
     expect(max('jaw')).toBeGreaterThan(0.3);                    // it opens...
     expect(max('press')).toBeGreaterThan(0.75);                 // ...closes for m / b / p...
@@ -65,9 +69,15 @@ for (const boundaries of [true, false]) {
     expect(cycles).toBeGreaterThan(4);
     const spoken = await page.evaluate(() => window.speechSynthesis.spoken);
     expect(spoken[0]).toMatch(/^Hello!/);
+    // at rest after the reply
+    await expect.poll(() => page.evaluate(() => window.__app.avatar.animState().jawOpen)).toBeLessThan(0.02);
+
+    // interrupted mid-reply: the mouth closes too
+    await send(page, 'hello');
+    await page.waitForFunction(() => document.body.dataset.state === 'speaking', null, { timeout: 30_000 });
+    await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 6, null, { timeout: 30_000 });
     await page.keyboard.press('Escape');
     await waitIdle(page);
-    // at rest again
     await expect.poll(() => page.evaluate(() => window.__app.avatar.animState().jawOpen)).toBeLessThan(0.02);
   });
 }

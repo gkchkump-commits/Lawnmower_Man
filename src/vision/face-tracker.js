@@ -1,10 +1,12 @@
 // FaceTracker: feeds camera frames to the Face Landmarker and reports one FaceObservation (or
 // null) per processed frame.
 //
-//  * The landmarker runs in a module worker (face-worker.js). Each tick grabs a small frame
-//    (~320 px wide) from the <video> with createImageBitmap — cheap and asynchronous on the main
-//    thread — and transfers it; the next frame is only sent once the worker answered, so detection
-//    never queues up behind a slow machine.
+//  * The landmarker runs in a module worker (face-worker.js). Each tick wraps the <video>'s
+//    current frame in a VideoFrame (a reference, ~0.1 ms: no copy, no wait for the GPU process)
+//    and transfers it; the worker uploads it and closes it. createImageBitmap is only the fallback
+//    without WebCodecs: it waits for the GPU process, which can take 100+ ms while the hologram
+//    renders. The next frame is only sent once the worker answered, so detection never queues up
+//    behind a slow machine.
 //  * If the worker cannot start (no module workers, no OffscreenCanvas WebGL, …) it falls back
 //    to running the landmarker on the main thread, capped at a low rate.
 //  * The rate is set by the caller (setRate): ~12/s while someone is there, a few per second to
@@ -12,27 +14,36 @@
 //
 // Events: 'ready' ({ mode: 'worker'|'main', delegate, ms }), 'observation' ({ obs, t, ms }),
 //         'error' (Error; fatal ones also stop the tracker), 'mode' (the fallback kicked in).
-/* global Worker, createImageBitmap */
+/* global Worker, createImageBitmap, VideoFrame */
 
 import { Emitter } from '../app/emitter.js';
 import { visionAssetUrls } from './assets.js';
+import { DETECT_WIDTH, detectSize } from './frame-size.js';
 
-export { visionAssetUrls };
+export { DETECT_WIDTH, detectSize, visionAssetUrls };
 
-/** Width of the frames sent to the detector (the face detector itself works on 128 px). */
-export const DETECT_WIDTH = 320;
 /** The main-thread fallback never runs faster than this (it shares the thread with rendering). */
 export const MAIN_THREAD_MAX_HZ = 4;
 /** This many failed detections in a row, or no answer for this long, stop the tracker. */
 export const MAX_CONSECUTIVE_ERRORS = 5;
 export const ANSWER_TIMEOUT_MS = 10_000;
 
-/** Detector frame size for a video of w×h (keeps the aspect ratio). @param {number} w @param {number} h */
-export function detectSize(w, h, maxW = DETECT_WIDTH) {
-  if (!(w > 0) || !(h > 0)) return { width: 0, height: 0 };
-  const k = Math.min(1, maxW / w);
-  return { width: Math.max(1, Math.round(w * k)), height: Math.max(1, Math.round(h * k)) };
+/**
+ * The <video>'s current frame as something to transfer to the worker: a VideoFrame (no copy) or,
+ * without WebCodecs, a ~320 px ImageBitmap.
+ * @param {HTMLVideoElement} v
+ * @returns {Promise<{ image: VideoFrame|ImageBitmap, width: number, height: number }>}
+ */
+export async function grabFrame(v) {
+  if (typeof VideoFrame === 'function') {
+    const image = new VideoFrame(v, { timestamp: Math.round(performance.now() * 1000) });
+    return { image, width: image.displayWidth || v.videoWidth, height: image.displayHeight || v.videoHeight };
+  }
+  const { width, height } = detectSize(v.videoWidth, v.videoHeight);
+  const image = await createImageBitmap(v, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' });
+  return { image, width, height };
 }
+
 
 export class FaceTracker extends Emitter {
   /**
@@ -233,46 +244,43 @@ export class FaceTracker extends Emitter {
       return;
     }
     const gen = this._gen;
-    const { width, height } = detectSize(v.videoWidth, v.videoHeight);
     this._inFlight = true;
     this._lastSent = this._now();
-    let bitmap;
+    if (this.mode === 'main' && this._engine) {
+      // same thread: MediaPipe reads the video element directly (capped at a low rate)
+      const t = this._now();
+      let obs = null;
+      try {
+        obs = this._engine.detect(v, v.videoWidth, v.videoHeight, t);
+      } catch (err) {
+        this._onDetectError(/** @type {Error} */ (err));
+        return;
+      }
+      this._onResult(obs, Math.round((this._now() - t) * 10) / 10, false);
+      return;
+    }
+    if (this.mode !== 'worker' || !this._worker) {
+      this._inFlight = false;
+      return;
+    }
+    let frame;
     try {
-      bitmap = await createImageBitmap(v, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' });
+      frame = await grabFrame(v);
     } catch {
       // the video has no frame right now (device switching): try again on the next tick
       this._inFlight = false;
       if (gen === this._gen) this._schedule();
       return;
     }
-    if (gen !== this._gen) {
-      bitmap.close();
+    if (gen !== this._gen || !this._worker) {
+      frame.image.close();
       return;
     }
     const t = this._now();
     const id = ++this._seq;
-    if (this.mode === 'worker' && this._worker) {
-      this._worker.postMessage({ type: 'frame', id, bitmap, width, height, t }, [bitmap]);
-      // a worker that hangs (or died without an error event) must not stall tracking silently
-      this._watchdog = setTimeout(() => this._fail(new Error('the face tracker stopped answering')), ANSWER_TIMEOUT_MS);
-      return;
-    }
-    if (this.mode === 'main' && this._engine) {
-      let obs = null;
-      let failed = null;
-      try {
-        obs = this._engine.detect(bitmap, width, height, t);
-      } catch (err) {
-        failed = err;
-      } finally {
-        bitmap.close();
-      }
-      if (failed) this._onDetectError(/** @type {Error} */ (failed));
-      else this._onResult(obs, Math.round((this._now() - t) * 10) / 10, false);
-      return;
-    }
-    bitmap.close();
-    this._inFlight = false;
+    this._worker.postMessage({ type: 'frame', id, image: frame.image, width: frame.width, height: frame.height, t }, [frame.image]);
+    // a worker that hangs (or died without an error event) must not stall tracking silently
+    this._watchdog = setTimeout(() => this._fail(new Error('the face tracker stopped answering')), ANSWER_TIMEOUT_MS);
   }
 
   /** One detection failed: tolerated now and then, not over and over. @param {Error} err */

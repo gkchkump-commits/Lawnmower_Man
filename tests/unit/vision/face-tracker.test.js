@@ -93,6 +93,36 @@ describe('FaceTracker', () => {
     expect(t.running).toBe(false);
   });
 
+  it('with WebCodecs, frames are VideoFrames (no copy on the main thread), transferred to the worker', async () => {
+    const made = [];
+    globalThis.VideoFrame = class {
+      constructor(src, o) {
+        this.displayWidth = src.videoWidth;
+        this.displayHeight = src.videoHeight;
+        this.timestamp = o.timestamp;
+        this.close = vi.fn();
+        made.push(this);
+      }
+    };
+    try {
+      const { t, workers } = tracker();
+      const started = t.start();
+      workers[0].reply({ type: 'ready' });
+      await started;
+      t.setVideo(/** @type {any} */ (video()));
+      t.setRate(12);
+      await vi.advanceTimersByTimeAsync(5);
+      const f = workers[0].frames()[0];
+      expect(f.image).toBe(made[0]);
+      expect(f).toMatchObject({ width: 640, height: 480 }); // the worker scales it down itself
+      expect(globalThis.createImageBitmap).not.toHaveBeenCalled();
+      // a frame grabbed after stop() is closed, not sent
+      t.stop();
+    } finally {
+      delete globalThis.VideoFrame;
+    }
+  });
+
   it('skips frames while the video has none yet; a skipped answer is not an observation', async () => {
     const { t, workers, obs } = tracker();
     const started = t.start();
@@ -126,8 +156,9 @@ describe('FaceTracker', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(obs.length).toBeGreaterThanOrEqual(MAIN_THREAD_MAX_HZ - 1);
     expect(obs.length).toBeLessThanOrEqual(MAIN_THREAD_MAX_HZ + 1);
-    expect(detect).toHaveBeenCalledWith(expect.anything(), 320, 240, expect.any(Number));
-    expect(bitmaps.every((b) => b.close.mock.calls.length === 1)).toBe(true); // frames are freed
+    // same thread: MediaPipe reads the video element itself, no frame copies
+    expect(detect).toHaveBeenCalledWith(expect.objectContaining({ videoWidth: 640 }), 640, 480, expect.any(Number));
+    expect(bitmaps).toHaveLength(0);
   });
 
   it('neither worker nor main thread: a fatal error, mode "failed"', async () => {

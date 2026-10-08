@@ -84,9 +84,9 @@ detections per second, milliseconds per detection), and whether you are in view 
 
 ```
 CameraCapture ──(<video>, 640×480)──► FaceTracker ──► AttentionTracker ──► behaviours
- getUserMedia      createImageBitmap     module worker:      present/absent    GazeArbiter → avatar.lookAt
- video only        ~320 px, transferred  MediaPipe Face      (hysteresis),      PresenceMachine → sleep / wake
-                   one frame in flight   Landmarker 1.1.0    centre, distance,  smile back → avatar.setExpression
+ getUserMedia      VideoFrame, no copy,  module worker:      present/absent    GazeArbiter → avatar.lookAt
+ video only        transferred; one      ~320 px bitmap →    (hysteresis),      PresenceMachine → sleep / wake
+                   frame in flight       Face Landmarker     centre, distance,  smile back → avatar.setExpression
                                          (CPU, XNNPACK)      yaw/pitch, look,   greeting → hidden prompt
                                                              smile, talking     look-to-talk → listen gate
 snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► claude.send(text, { images })
@@ -96,9 +96,13 @@ snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► 
 * `src/vision/camera.js` opens the camera (video only, about 640×480 at up to 15 fps) and turns
   `getUserMedia` errors into the cards above.
 * `src/vision/face-tracker.js` + `face-worker.js` run the Face Landmarker **off the render loop**
-  in a module worker. The main thread only grabs a small `ImageBitmap` (asynchronous, on the GPU)
-  and transfers it; the next frame is sent when the worker has answered, so a slow PC just gets
-  fewer detections instead of a queue. Rates: 12 per second while someone is in view, 4 while
+  in a module worker. The main thread only wraps the video's current frame in a `VideoFrame` (a
+  reference, about 0.1 ms) and transfers it; the worker scales it to about 320 px and runs the
+  landmarker. (`createImageBitmap` on the main thread waits for the GPU process, which took
+  100+ ms per frame while the hologram rendered; it is only the fallback without WebCodecs.)
+  Measured in the browser preview with software WebGL: the camera's main-thread work is under
+  2 ms per second and adds no long tasks. The next frame is sent when the worker has answered, so
+  a slow PC just gets fewer detections instead of a queue. Rates: 12 per second while someone is in view, 4 while
   looking for someone, 2 while the avatar sleeps, none while the window is hidden. If a worker
   cannot run it, the landmarker runs on the main thread, capped at 4 per second.
 * `src/vision/attention.js` (pure) turns the landmarks and blendshapes into stable signals:

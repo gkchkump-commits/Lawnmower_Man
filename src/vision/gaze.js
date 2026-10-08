@@ -120,6 +120,11 @@ export class GazeArbiter {
     this._scheduleNext(now);
   }
 
+  /** Send the current target again (a new avatar was created: it starts without one). */
+  reapply() {
+    this._apply(this.target ? [this.target[0], this.target[1]] : null);
+  }
+
   dispose() {
     this._clearTimeout(this._timer);
     this._timer = null;

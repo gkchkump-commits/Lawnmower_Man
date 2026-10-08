@@ -142,6 +142,7 @@ async function boot() {
     },
     onCreated: (a) => {
       controller?.setAvatar(a);
+      gaze.reapply(); // the new avatar starts without a gaze target
       app.avatarReady = true;
       body.dataset.avatar = a.renderer || 'none';
     },

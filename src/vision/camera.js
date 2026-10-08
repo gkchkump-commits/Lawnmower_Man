@@ -166,9 +166,11 @@ export function describeCameraError(err, platform = 'win32') {
       intro: 'Another app is probably using the camera right now.',
       steps: [
         win ? 'Close apps that use the camera (Teams, Zoom, Skype, the Camera app, a browser tab with a video call…).' : 'Close apps that use the camera (video calls, a browser tab with a video call…).',
+        // some Windows builds report the privacy switch as "could not start" rather than "denied"
+        win ? 'Check Windows Settings: Privacy & security › Camera › "Let desktop apps access your camera" is on.' : '',
         'If no other app uses it, unplug and reconnect an external camera, or restart the computer.',
         'Then press Try again.',
-      ],
+      ].filter(Boolean),
       detail,
     };
   }

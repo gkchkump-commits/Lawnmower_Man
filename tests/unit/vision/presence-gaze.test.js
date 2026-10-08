@@ -197,6 +197,13 @@ describe('GazeArbiter: cursor priority and eye contact', () => {
     expect(applied.filter((t) => t && t[0] > 0.04)).toHaveLength(1);
   });
 
+  it('reapply sends the current target again (a re-created avatar)', () => {
+    const { a, applied } = arbiter();
+    a.cursor([0.4, 0.2]);
+    a.reapply();
+    expect(applied).toEqual([[0.4, 0.2], [0.4, 0.2]]);
+  });
+
   it('dispose stops its timer', () => {
     const clear = vi.fn();
     const { a } = arbiter({ clearTimeout: clear });

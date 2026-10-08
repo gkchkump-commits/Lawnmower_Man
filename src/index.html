@@ -24,6 +24,9 @@
           <button id="btn-new" type="button" class="icon-btn" aria-label="New conversation" title="New conversation">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
           </button>
+          <button id="btn-camera" type="button" class="icon-btn" aria-label="Camera" aria-pressed="false" title="Camera: off — click to turn it on">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /></svg>
+          </button>
           <button id="btn-chat" type="button" class="icon-btn" aria-label="Show or hide the chat" title="Chat panel">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" /></svg>
           </button>
@@ -37,6 +40,10 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </nav>
+        <!-- shown while the camera is on (the toolbar only appears on hover); click: camera off -->
+        <button id="cam-live" type="button" class="cam-live no-drag" hidden aria-label="The camera is on. Turn it off">
+          <span class="cam-live-dot" aria-hidden="true"></span><span class="cam-live-text">camera</span>
+        </button>
         <div id="toasts" class="toasts no-drag"></div>
         <div id="cards" class="cards no-drag" aria-live="assertive"></div>
       </section>
@@ -50,6 +57,9 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3M8.5 21h7" /></svg>
           </button>
           <textarea id="input" rows="1" placeholder="Message Claude…" aria-label="Message Claude" spellcheck="true"></textarea>
+          <button id="shot" type="button" class="shot-btn" hidden aria-pressed="false" aria-label="Let Claude see you with the next message" title="📷 Let Claude see you with your next message">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /></svg>
+          </button>
           <button id="send" type="submit" class="send-btn" aria-label="Send" title="Send (Enter)">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-3-7-7-1z" /></svg>
           </button>

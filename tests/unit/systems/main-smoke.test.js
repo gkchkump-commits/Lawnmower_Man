@@ -190,7 +190,7 @@ describe('electron/main.js wiring', () => {
   it('exposes exactly the IPC channels the preload uses', () => {
     const preload = fs.readFileSync(path.resolve('electron/preload.cjs'), 'utf8');
     const used = new Set([...preload.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
-    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor'];
+    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor', 'lm:window:visibility'];
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
     expect([...m.handlers.keys()].sort()).toEqual([
@@ -271,8 +271,11 @@ describe('electron/main.js wiring', () => {
     expect(cursorSent().length).toBe(n);
     win.hide();
     expect(tracker.running).toBe(false);
+    expect(win.webContents.sent.filter(([ch]) => ch === 'lm:window:visibility').at(-1)[1]).toEqual({ visible: false }); // the camera pauses
+    expect((await invoke('lm:app:info')).visible).toBe(false);
     win.show();
     expect(tracker.running).toBe(true);
+    expect(win.webContents.sent.filter(([ch]) => ch === 'lm:window:visibility').at(-1)[1]).toEqual({ visible: true });
     await invoke('lm:settings:set', { avatar: { followCursor: false } });
     expect(tracker.running).toBe(false);
     await invoke('lm:settings:set', { avatar: { followCursor: true } });

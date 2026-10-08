@@ -72,6 +72,22 @@ export const SECTIONS = [
     ],
   },
   {
+    // the avatar can see you (docs/CAMERA.md); everything but a snapshot for Claude stays on this PC
+    id: 'camera',
+    title: 'Camera',
+    fields: [
+      { type: 'info', id: 'cameraInfo' },
+      { type: 'toggle', path: 'camera.enabled', label: 'Camera', hint: 'Face tracking runs on this PC only' },
+      { type: 'select', path: 'camera.deviceId', label: 'Device', options: [['', 'Default camera']] },
+      { type: 'toggle', path: 'camera.followFace', label: 'Eye contact', hint: 'Looks at you; a moving cursor still wins' },
+      { type: 'toggle', path: 'camera.presence', label: 'Notice when I leave', hint: 'Dozes off when you are away, wakes up when you are back' },
+      { type: 'toggle', path: 'camera.mirrorExpressions', label: 'Smile back' },
+      { type: 'toggle', path: 'camera.shareWithClaude', label: 'Let Claude see me', hint: 'A snapshot goes with every message you send' },
+      { type: 'toggle', path: 'camera.greet', label: 'Say hello when I sit down', hint: 'After 10+ minutes away, Claude greets you' },
+      { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free mode listens only while you look at the screen' },
+    ],
+  },
+  {
     id: 'window',
     title: 'Window',
     fields: [
@@ -203,6 +219,24 @@ export class SettingsDrawer {
     if (current && !list.some((v) => v.id === current)) sel.append(h('option', { value: current }, `${current} (not installed)`));
     sel.value = current;
     sel.title = list.length ? 'System voice, used while the local voice is not running' : 'No system voices were found on this computer';
+  }
+
+  /**
+   * Cameras for the camera picker ('' = the system default). A saved camera that is not
+   * connected stays listed as such.
+   * @param {Array<{ id: string, label: string }>} cams
+   */
+  setCameraOptions(cams) {
+    const sel = /** @type {HTMLSelectElement|undefined} */ (this.controls.get('camera.deviceId')?.el);
+    if (!sel) return;
+    const current = this.settings ? String(getPath(this.settings, 'camera.deviceId') ?? '') : sel.value;
+    const list = Array.isArray(cams) ? cams : [];
+    clear(sel);
+    sel.append(h('option', { value: '' }, 'Default camera'));
+    for (const c of list) sel.append(h('option', { value: c.id }, c.label));
+    if (current && !list.some((c) => c.id === current)) sel.append(h('option', { value: current }, 'Saved camera (not connected)'));
+    sel.value = current;
+    sel.title = list.length ? '' : 'Cameras are listed once the camera has been turned on';
   }
 
   /**

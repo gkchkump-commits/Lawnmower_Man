@@ -508,9 +508,20 @@ function cursorTrackingWanted() {
 }
 
 function syncCursorTracking() {
+  notifyVisibility();
   if (!state.cursor) return;
   if (cursorTrackingWanted()) state.cursor.start();
   else state.cursor.stop();
+}
+
+/**
+ * Tell the renderer whether the window can be seen: the camera pauses (and is released) while it
+ * cannot. With backgroundThrottling off, document.visibilityState always says "visible".
+ */
+function notifyVisibility() {
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  sendToRenderer('lm:window:visibility', { visible: win.isVisible() && !win.isMinimized() });
 }
 
 function savePosition() {
@@ -743,6 +754,7 @@ function registerIpc() {
       // Extensions beyond the contract (renderer may ignore):
       layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea()),
       clickThroughSupported: CLICK_THROUGH_SUPPORTED,
+      visible: !!state.win && !state.win.isDestroyed() && state.win.isVisible() && !state.win.isMinimized(),
       hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
       gpu: state.gpu,
       logFile: state.log.file,

@@ -66,6 +66,8 @@ const api = {
     minimize: () => send('lm:window:minimize'),
     hide: () => send('lm:window:hide'),
     quit: () => send('lm:window:quit'),
+    // { visible }: the window was shown / hidden / minimized / restored (the camera pauses)
+    onVisibility: (cb) => subscribe('lm:window:visibility', cb),
   },
   onHotkey: (cb) => subscribe('lm:hotkey', cb),
   // Global cursor position {x, y} in CSS px relative to the window's top-left (may be outside).

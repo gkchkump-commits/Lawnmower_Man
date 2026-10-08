@@ -43,8 +43,8 @@ export function fakeBridge() {
     emit: (ev) => em.emit('ev', ev),
     sendImpl: null,
     claude: {
-      send: async (text) => {
-        calls.push(['send', text]);
+      send: async (text, options) => {
+        calls.push(options === undefined ? ['send', text] : ['send', text, options]);
         if (bridge.sendImpl) return bridge.sendImpl(text);
         return { turnId: `t${++n}` };
       },

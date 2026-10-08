@@ -60,6 +60,15 @@ const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watc
  * @property {() => void} [clearTranscript]
  * @property {(text: string) => void} [addNote]
  * @property {(on: boolean) => void} [setSleep]
+ * @property {(id: any, thumbs: string[]) => void} [attachUserImages]  snapshot thumbnails sent with a message
+ */
+
+/**
+ * Pictures that go with a message (the camera, src/vision): `wants` decides synchronously, so
+ * a message without a picture is sent exactly as before; `capture` takes them.
+ * @typedef {object} SnapshotProvider
+ * @property {(o: { source: string, hidden: boolean }) => boolean} wants
+ * @property {(o: { source: string, hidden: boolean }) => Promise<Array<{ mediaType: string, data: string, thumb?: string }>>} capture
  */
 
 /** @param {unknown} err */
@@ -143,6 +152,10 @@ export class Controller extends Emitter {
     this._lastActivity = this._now();
     this.sleeping = false;
     this._started = false;
+    /** @type {SnapshotProvider|null} */
+    this._snapshots = null;
+    /** Hands-free may listen (the camera's look-to-talk closes it while the user looks away). */
+    this._listenGate = true;
   }
 
   // ------------------------------------------------------------------------------------------
@@ -253,23 +266,52 @@ export class Controller extends Emitter {
 
   /**
    * Send a user message (typed, or transcribed speech).
-   * @param {string} text @param {{ source?: 'text'|'voice' }} [o]
+   * hidden: an app-generated prompt (the camera greeting): no user bubble, `note` instead.
+   * @param {string} text @param {{ source?: 'text'|'voice'|'camera', hidden?: boolean, note?: string }} [o]
    * @returns {boolean} false when the text was empty
    */
   sendText(text, o = {}) {
     const clean = String(text ?? '').replace(/\r\n?/g, '\n').trim();
     if (!clean) return false;
-    this.noteActivity();
+    const source = o.source || 'text';
+    const hidden = !!o.hidden;
+    if (!hidden) this.noteActivity();
     if (this.listen) this._cancelListening();
     // Newer input wins: the running reply is interrupted and older messages that have not
     // started yet are dropped (they would otherwise be answered — and spoken — first).
     if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
-    const msgId = this.view.addUserMessage?.(clean, { source: o.source || 'text' });
+    let msgId;
+    if (hidden) {
+      if (o.note) this.view.addNote?.(o.note);
+    } else {
+      msgId = this.view.addUserMessage?.(clean, { source });
+    }
     this.pendingSends++;
     const gen = ++this._sendGen;
     this._setState('thinking');
-    Promise.resolve()
-      .then(() => this.bridge.claude.send(clean))
+    // a picture goes with it (the camera's "Let Claude see me" / 📷): taken now, sent with the text
+    let wantsShot = false;
+    try {
+      wantsShot = !!this._snapshots?.wants({ source, hidden });
+    } catch (err) {
+      console.warn('[controller] snapshot provider failed', err);
+    }
+    const send = wantsShot
+      ? Promise.resolve()
+        .then(() => /** @type {SnapshotProvider} */ (this._snapshots).capture({ source, hidden }))
+        .then((shots) => shots, (err) => {
+          this._toast(`The camera picture could not be taken (${errMsg(err)}); the message was sent without it.`, 'warn');
+          return [];
+        })
+        .then((shots) => {
+          const images = (Array.isArray(shots) ? shots : []).filter((x) => x && typeof x.data === 'string' && x.data);
+          if (!images.length) return this.bridge.claude.send(clean);
+          const thumbs = images.map((x) => x.thumb).filter((u) => typeof u === 'string' && u);
+          if (msgId !== undefined && thumbs.length) this.view.attachUserImages?.(msgId, thumbs);
+          return this.bridge.claude.send(clean, { images: images.map((x) => ({ mediaType: x.mediaType, data: x.data })) });
+        })
+      : Promise.resolve().then(() => this.bridge.claude.send(clean));
+    send
       .then((r) => {
         if (!r || typeof r.turnId !== 'string') return;
         this._userMsgByTurn.set(r.turnId, msgId);
@@ -280,7 +322,7 @@ export class Controller extends Emitter {
         if (gen <= this._staleGen) this._dropTurn(r.turnId);
       }, (err) => {
         this.pendingSends = Math.max(0, this.pendingSends - 1);
-        this.view.markUserMessage?.(msgId, 'failed', errMsg(err));
+        if (msgId !== undefined) this.view.markUserMessage?.(msgId, 'failed', errMsg(err));
         this._toast(this.claudeProblem?.kind === 'cli-missing'
           ? 'Claude Code is not installed yet: follow the steps on the card, then press Retry.'
           : `Could not send the message: ${errMsg(err)}`, 'error');
@@ -453,6 +495,49 @@ export class Controller extends Emitter {
     } catch (err) {
       this._toast(`Could not start a new conversation: ${errMsg(err)}`, 'error');
     }
+  }
+
+  /**
+   * Where pictures for messages come from (the camera, src/vision); null = none.
+   * @param {SnapshotProvider|null} provider
+   */
+  setSnapshotProvider(provider) {
+    this._snapshots = provider || null;
+  }
+
+  /**
+   * Hands-free listening may run (true) or must wait (false): the camera's look-to-talk closes
+   * the gate while the user looks away. An utterance already in progress is not cut off.
+   * @param {boolean} open
+   */
+  setListenGate(open) {
+    const v = !!open;
+    if (v === this._listenGate) return;
+    this._listenGate = v;
+    // only an idle hands-free mic is paused or resumed: speech in progress is never cut off (its
+    // end pauses the mic anyway, and the next idle re-arms it through the gate)
+    if (this.handsFree && this.state === 'idle' && !this.listen) this._armHandsFree();
+  }
+
+  get listenGate() {
+    return this._listenGate;
+  }
+
+  /** Nothing going on: no reply, no queued message, no speech, no listening, no approval card. */
+  isIdle() {
+    return this.state === 'idle' && !this.listen && !this.activeTurnId && this.pendingSends === 0 && !this.speech.busy && !this.permissions.size;
+  }
+
+  /**
+   * Doze off now (the camera saw the user leave) — only when idle. @returns {boolean} asleep
+   */
+  sleep() {
+    if (this.sleeping) return true;
+    if (!this.isIdle()) return false;
+    this.sleeping = true;
+    this.view.setSleep?.(true);
+    if (!this._errorFlash) this.avatar?.setState?.('sleep');
+    return true;
   }
 
   /** Pointer/keyboard activity: wakes the avatar and postpones sleep. */
@@ -926,6 +1011,11 @@ export class Controller extends Emitter {
   _armHandsFree() {
     if (!this.handsFree || !this.mic || this.listen) return;
     if (this.state !== 'idle') {
+      if (this.mic.mode === 'handsfree') this.mic.pause();
+      return;
+    }
+    if (!this._listenGate) {
+      // look-to-talk: wait until the user looks at the screen (the mic is not even opened)
       if (this.mic.mode === 'handsfree') this.mic.pause();
       return;
     }

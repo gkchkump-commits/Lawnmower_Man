@@ -510,6 +510,39 @@ describe('electron/main.js wiring', () => {
     }
   });
 
+  it('camera: video permission follows camera.enabled; images pass claude:send validation; tray item', async () => {
+    const grant = vi.fn();
+    const request = (url, types) => m.sessionHandlers.request(win.webContents, 'media', grant, { requestingUrl: url, mediaTypes: types });
+    const checkVideo = () => m.sessionHandlers.check(win.webContents, 'media', 'app://lawnmower', { mediaType: 'video' });
+    const cameraItem = () => main.__test.state.tray.menu.template.find((i) => i.label === 'Camera');
+    try {
+      request('app://lawnmower/index.html', ['video']);
+      expect(checkVideo()).toBe(false);
+      expect(cameraItem().checked).toBe(false);
+      await invoke('lm:settings:set', { camera: { enabled: true } });
+      request('app://lawnmower/index.html', ['video']);
+      request('app://lawnmower/index.html', ['audio']);
+      request('https://evil.example/', ['video']);
+      expect(checkVideo()).toBe(true);
+      expect(grant.mock.calls.map((c) => c[0])).toEqual([false, true, true, false]);
+      expect(cameraItem().checked).toBe(true);
+      cameraItem().click({ checked: false }); // the tray turns it off again
+      expect((await invoke('lm:settings:get')).camera.enabled).toBe(false);
+      expect(checkVideo()).toBe(false);
+
+      // a snapshot with the turn: validated, then an image block the fake CLI acknowledges
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9, 0]).toString('base64');
+      const { turnId } = await invoke('lm:claude:send', 'look at me', { images: [{ mediaType: 'image/jpeg', data: jpeg }] });
+      const [, ev] = await waitForSent(([ch, p]) => ch === 'lm:claude:event' && p.type === 'turn_end' && p.turnId === turnId);
+      expect(ev.result).toBe('You said: look at me [saw 1 image: image/jpeg 640x480, 24 bytes]');
+      await expect(invoke('lm:claude:send', 'x', { images: [{ mediaType: 'image/jpeg', data: `data:image/jpeg;base64,${jpeg}` }] })).rejects.toThrow(/data: prefix/);
+      await expect(invoke('lm:claude:send', 'x', { images: [{ mediaType: 'image/png', data: jpeg }] })).rejects.toThrow(/not really image\/png/);
+      await expect(invoke('lm:claude:send', 'x', 'images')).rejects.toThrow(/options must be an object/);
+    } finally {
+      await invoke('lm:settings:set', { camera: { enabled: false } });
+    }
+  });
+
   it('shuts down child processes on will-quit, then quits', async () => {
     const claude = main.__test.state.claude;
     expect(claude.status().status).toBe('ready');

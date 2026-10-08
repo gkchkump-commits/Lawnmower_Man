@@ -34,7 +34,8 @@ function subscribe(channel, cb) {
 
 const api = {
   claude: {
-    send: (text) => invoke('lm:claude:send', text),
+    // options: { images?: [{ mediaType, data }] } (webcam snapshots, validated in main)
+    send: (text, options) => invoke('lm:claude:send', text, options),
     cancel: (turnId) => invoke('lm:claude:cancel', turnId),
     interrupt: () => invoke('lm:claude:interrupt'),
     reset: () => invoke('lm:claude:reset'),

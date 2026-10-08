@@ -53,6 +53,18 @@ export const DEFAULT_SETTINGS = Object.freeze({
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },
+  // The avatar can see you through the PC camera (docs/CAMERA.md). Off by default; face tracking
+  // runs locally, and Claude only gets a picture when shareWithClaude is on or for one message.
+  camera: {
+    enabled: false,
+    deviceId: '', // '' = the system's default camera
+    followFace: true, // eye contact
+    presence: true, // doze off when you are away, wake up when you are back
+    mirrorExpressions: true, // smile back
+    shareWithClaude: false, // a snapshot with every message you send
+    greet: false, // say hello when you sit down after 10+ minutes away (a hidden prompt)
+    lookToTalk: false, // hands-free mode: only listen while you look at the screen
+  },
 });
 
 /**
@@ -244,6 +256,17 @@ const SCHEMA = {
     toggleListen: accelerator(),
     toggleChat: accelerator(),
     stopSpeaking: accelerator(),
+  },
+  camera: {
+    enabled: bool(),
+    // MediaDeviceInfo.deviceId: an opaque token (Chromium: a hex hash); never reaches a command line
+    deviceId: str({ max: 256, pattern: /^[A-Za-z0-9._:=+/-]*$/ }),
+    followFace: bool(),
+    presence: bool(),
+    mirrorExpressions: bool(),
+    shareWithClaude: bool(),
+    greet: bool(),
+    lookToTalk: bool(),
   },
 };
 

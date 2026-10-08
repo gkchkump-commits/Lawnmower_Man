@@ -50,6 +50,16 @@ export const DEFAULT_SETTINGS = Object.freeze({
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },
+  camera: {
+    enabled: false,
+    deviceId: '',
+    followFace: true,
+    presence: true,
+    mirrorExpressions: true,
+    shareWithClaude: false,
+    greet: false,
+    lookToTalk: false,
+  },
 });
 
 /** @param {unknown} v @returns {v is Record<string, any>} */

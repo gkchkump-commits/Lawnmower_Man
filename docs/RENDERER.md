@@ -77,6 +77,10 @@ blinks at phrase boundaries rather than mid-word, and a micro-smile after a frie
 of it is pure and unit-tested (`tests/unit/app/{g2p,articulation,lipsync}.test.js`,
 `tests/unit/avatar/{director-speech,mouth-rig}.test.js`).
 
+![The fourteen visemes on the relief and the procedural head](screenshots/mouth_visemes.jpg)
+
+![Film strip of the system-voice lip-sync saying "Hello! I'm Claude. How are you feeling today?"](screenshots/mouth_speech.jpg)
+
 Rendering: the relief head closes pressed lips over a slightly open jaw and thins them (the lip
 texture is compressed toward the seam and the rest gap skipped), brings a tucked lower lip up under
 the incisors (which fill the small opening), raises the upper lip for teeth (the incisors follow),

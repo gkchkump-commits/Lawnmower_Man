@@ -283,14 +283,23 @@ const avatar = await createAvatar(canvas, {
   transparent: true,       // premultiplied black→alpha output for the desktop overlay
 });
 avatar.setState(s)               // 'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'
-avatar.setMouth({ jaw, wide, round })   // 0..1 each; lip-sync target, director smooths
+avatar.setMouth({ jaw, wide, round, press, tuck, teeth, tongue })
+                                 // 0..1 each, missing fields = 0; lip-sync target, director smooths.
+                                 // press: lips pressed / rolled in (m b p); tuck: lower lip under the
+                                 // upper teeth (f v); teeth: upper lip raised, teeth show (s z ee);
+                                 // tongue: tongue tip at the teeth (th l)
 avatar.setSpeechLevel(level)     // 0..1 loudness envelope (drives glow/energy)
+avatar.setProsody(cue | cue[])   // speech prosody from the lip-sync: { type: 'accent'|'emphasis'|
+                                 // 'phrase-start'|'phrase-end', strength?, punct?, friendly? } →
+                                 // small nods, brow raises (emphasis, questions), phrase-end blinks,
+                                 // micro-smiles after friendly sentences
 avatar.setExpression({ smile, browUp }) // 0..1
 avatar.blink()
 avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow); lookAt(null) releases
 avatar.setOptions(partial)       // quality/particles/bloom/colors at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)
+avatar.advance(dt, { render })   // tests / harness: step a scripted clock with live dynamics
 avatar.dispose()
 ```
 `createAvatar` falls back renderer: relief → procedural → placeholder if loading fails, and
@@ -311,7 +320,8 @@ export default class Head {
 }
 ```
 `AnimState` (produced by `src/avatar/director.js`, all numbers, smoothed):
-`jawOpen, mouthWide, mouthRound, smile, blinkL, blinkR (0 open → 1 closed), gazeX, gazeY (-1..1),
+`jawOpen, mouthWide, mouthRound, mouthPress, mouthTuck, mouthTeeth, mouthTongue, mouthAsym (-1..1, lips a
+little lopsided while talking), smile, blinkL, blinkR (0 open → 1 closed), gazeX, gazeY (-1..1),
 browUp, headYaw, headPitch, headRoll (radians, small), breath (0..1 cycle), speech (0..1 loudness),
 energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights)`.
 
@@ -344,7 +354,10 @@ Viseme ids (shared with the renderer's lip-sync): `sil, PP (m b p), FF (f v), TH
 
 `idle → listening (mic, VAD) → transcribing (/stt) → thinking (claude turn, no text yet) →
 speaking (text streams → sentence chunker → /tts per sentence → ordered playback queue →
-lip-sync) → idle`. Barge-in: hotkey/click while speaking stops playback, interrupts the
+lip-sync) → idle`. Lip-sync (`src/audio/lipsync.js`): the voice server's viseme timeline, or for the
+system voice the utterance's own words (`g2p.js` → an `articulation.js` plan, anchored by the voice's
+word-boundary events), blended by a coarticulation model into the `setMouth` channels, plus
+prosody cues for `setProsody`. Barge-in: hotkey/click while speaking stops playback, interrupts the
 Claude turn and starts listening. Text typed in the chat panel enters at `thinking`.
 Markdown and code are stripped for speech (`src/app/speech-text.js`); code blocks are shown
 in the chat panel and replaced in speech by a short phrase. Permission requests (agent

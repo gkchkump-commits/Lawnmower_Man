@@ -348,6 +348,78 @@ describe('LipSync driver', () => {
   });
 });
 
+describe('sync with a voice at its own tempo', () => {
+  /** Speak `text` with a scripted voice (word onsets at `tempo` × the plan, ±jitter per word) and
+   * return |plan position the mouth shows − where the voice is| per frame (s, plan time). */
+  function speak(ls, text, tempo, bounds, seed) {
+    const plan = planSpeech(text);
+    const w = plan.words;
+    const on = [];
+    let tv = 0;
+    w.forEach((x, k) => {
+      on.push(tv);
+      const span = (k + 1 < w.length ? w[k + 1].t0 : x.t1) - x.t0;
+      tv += span * tempo * (1 + 0.15 * Math.sin(k * 2.3 + seed));
+    });
+    const voiceAt = (x) => {
+      for (let k = w.length - 1; k >= 0; k--) {
+        if (x >= on[k]) {
+          const nOn = k + 1 < w.length ? on[k + 1] : tv;
+          const nP = k + 1 < w.length ? w[k + 1].t0 : w[k].t1;
+          return w[k].t0 + ((x - on[k]) / (nOn - on[k])) * (nP - w[k].t0);
+        }
+      }
+      return null;
+    };
+    const p = ls.player;
+    const clip = { kind: 'speech', text, rate: 1 };
+    const t0 = ls._t;
+    p.current = { kind: 'speech', clip, time: 0 };
+    p.emit('start', clip);
+    p.emit('speechstart', clip);
+    const errs = [];
+    let k = 0;
+    for (let t = 0; t < tv; t += 1 / 60) {
+      ls._t = t0 + t;
+      while (bounds && k < w.length && on[k] <= t) { p.emit('boundary', { word: w[k].text, charIndex: w[k].start, clip }); k++; }
+      ls.update(1 / 60, ls._t);
+      if (t > 0.1) errs.push(Math.abs(ls.track.p - 0.035 - voiceAt(t)));
+    }
+    p.current = null;
+    p.emit('end', clip, { stopped: false });
+    ls._t += 0.5;
+    errs.sort((a, b) => a - b);
+    return { median: errs[errs.length >> 1], p90: errs[Math.floor(errs.length * 0.9)] };
+  }
+  const make = () => {
+    const player = Object.assign(new Emitter(), { current: null, level: () => 0, spectrum: () => false, sampleRate: 48000 });
+    const ls = new LipSync({ player, now: () => ls._t });
+    ls._t = 0;
+    return ls;
+  };
+  const TEXT = 'I can help you write code, answer questions about your files, or just talk about your day.';
+
+  for (const tempo of [0.8, 1.25]) {
+    it(`with word boundaries: within a few tens of ms (voice at ${tempo}x the plan's length)`, () => {
+      const ls = make();
+      speak(ls, SENTENCE, tempo, true, 1);           // the first utterance teaches the tempo
+      const r = speak(ls, TEXT, tempo, true, 2);
+      expect(r.median).toBeLessThan(0.04);
+      expect(r.p90).toBeLessThan(0.09);
+      expect(Math.abs(Math.log(ls.speedFactor(1) * tempo))).toBeLessThan(0.1); // learned within 10 %
+    });
+  }
+
+  it('without boundaries: the learned tempo brings later utterances into step', () => {
+    const ls = make();
+    const first = speak(ls, TEXT, 1.25, false, 3);
+    speak(ls, TEXT, 1.25, false, 4);
+    speak(ls, TEXT, 1.25, false, 5);
+    const later = speak(ls, TEXT, 1.25, false, 6);
+    expect(later.median).toBeLessThan(first.median / 2);
+  });
+});
+
 describe('Web Speech → player → lip-sync (fake timers)', () => {
   afterEach(() => vi.useRealTimers());
 

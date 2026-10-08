@@ -53,5 +53,20 @@ mean absolute RGB error.
 | `jaw wide round smile browUp blink blinkL blinkR gazeX gazeY yaw pitch roll energy` | AnimState overrides |
 | `w`, `h` | canvas size (CSS px); `ui=0` hides the controls; `stats=1` shows fps/draw calls |
 | `follow=1` | eyes follow the mouse |
+| `press tuck teeth tongue asym` | the speech mouth channels (AnimState `mouthPress` …) |
+| `vis=<sil\|PP\|FF\|TH\|DD\|kk\|CH\|SS\|RR\|aa\|E\|I\|O\|U>` | one viseme's mouth shape (explicit sliders still win) |
+| `say=<text>&t=<s>` | the system-voice lip-sync path run deterministically to `t` seconds (a scripted voice with word boundaries); `bounds=0`, `rate`, `voiceTempo` (1.1), `jitter` (0.15), `latency` (0.06), `caption=1` (shows the word being said) |
 
-`window.__avatar` is the avatar API; `window.__ready` turns true after the first frames.
+`window.__avatar` is the avatar API; `window.__ready` turns true after the first frames. In `say`
+mode `window.__seek(t)` steps the simulation to `t` and renders.
+
+## film.mjs — speech videos
+
+```bash
+node tools/visual/film.mjs --url "http://127.0.0.1:5173/dev/avatar.html?ui=0&idle=0&caption=1" \
+     --say "Hello! I'm Claude. How are you feeling today?" --fps 30 --dur 4 --out out/film
+ffmpeg -framerate 30 -i out/film/%04d.png -pix_fmt yuv420p out/film.mp4
+```
+
+Loads the harness once in `say` mode and saves one PNG per `__seek` step (`--t0`, `--w`, `--h`,
+`--selector`).

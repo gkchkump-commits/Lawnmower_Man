@@ -41,10 +41,11 @@ vec3 rigFace(vec3 p, inout vec3 n) {
   p += aRig0.w * uCornerL + aRig1.x * uCornerR;
   p.y += aRig0.y * uLips.x - aRig0.z * uLips.y;
   p.z += (aRig0.y + aRig0.z) * uLips.z;
-  // pressed lips thin toward the seam (aExtra.y = seam closeness) and roll in; a tucked lower
-  // lip draws back under the upper teeth
+  // pressed lips thin toward the seam (aExtra.y = seam closeness) and flatten, the seam itself
+  // stays put (moving it back would let the mouth cavity show); a tucked lower lip draws back
+  // under the upper teeth
   p.y += (aRig0.z - aRig0.y) * uMouthX.x * (1.0 - aExtra.y);
-  p.z -= (aRig0.y + aRig0.z) * uMouthX.y * aExtra.y + aRig0.z * uMouthX.z;
+  p.z -= (aRig0.y + aRig0.z) * uMouthX.y * (1.0 - aExtra.y) + aRig0.z * uMouthX.z;
   p.y += aRig1.y * uBrow.x + aRig1.z * uBrow.y;
   p += aRig1.w * vec3(0.0, uLips.w, uLips.w * 0.35);
   // jaw hinge (weighted rotation = a smooth skin blend between skull and mandible)

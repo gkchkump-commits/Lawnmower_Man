@@ -24,8 +24,8 @@ export const PROC_LIMITS = Object.freeze({
   tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)
   tuckRaiseFh: 0.004,      // the lower lip rises to the upper teeth...
   tuckBackFh: 0.012,       // ...and draws back under them
-  pressThinFh: 0.014,      // pressed lips thin toward the seam...
-  pressInFh: 0.008,        // ...and roll in
+  pressThinFh: 0.005,      // pressed lips thin toward the seam...
+  pressInFh: 0.004,        // ...and flatten (the seam itself stays: the cavity must not show)
   jawLipK: 0.37,           // lower-lip drop per radian of jaw rotation (cancelled by a closure)
   asymFh: 0.008,           // corner height difference at |mouthAsym| = 1
 });
@@ -106,7 +106,7 @@ export function deformVertex(p, w, u, rig, out, seam = 0) {
   z += (w[1] + w[2]) * u.lips[2];
   const mx = u.mouthX || [0, 0, 0, 0];
   y += (w[2] - w[1]) * mx[0] * (1 - seam);
-  z -= (w[1] + w[2]) * mx[1] * seam + w[2] * mx[2];
+  z -= (w[1] + w[2]) * mx[1] * (1 - seam) + w[2] * mx[2];
   y += w[5] * u.brow[0] + w[6] * u.brow[1];
   y += w[7] * u.lips[3];
   z += w[7] * u.lips[3] * 0.35;

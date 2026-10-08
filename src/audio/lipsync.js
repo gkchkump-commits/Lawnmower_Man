@@ -261,7 +261,7 @@ export class SpeechTrack {
     const j = this.confirmed + 1;
     if (j >= words.length) return Infinity;
     // planned pause before it: wait at rest; else hold the end of the current word's last sound
-    return words[j - 1].pause > 0 ? words[j].t0 - 0.12 : words[j].t0 - 0.01;
+    return words[j - 1].pause > 0 ? words[j].t0 - 0.07 : words[j].t0 - 0.01;
   }
 
   /** @param {number} dt @param {number} now */

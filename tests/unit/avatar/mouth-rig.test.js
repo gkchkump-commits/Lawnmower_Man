@@ -124,10 +124,11 @@ describe('procedural rig: speech channels', () => {
     const lo = deformVertex([0, 0, 0], w(0, 1), u, rig, [0, 0, 0], 0);
     expect(up[1]).toBeLessThan(0);
     expect(lo[1]).toBeGreaterThan(0);
-    // at the seam the lips only roll in
+    // the seam itself stays where it is (the lips stay closed, the cavity hidden)
     const seam = deformVertex([0, 0, 0], w(1, 0), u, rig, [0, 0, 0], 1);
     expect(seam[1]).toBeCloseTo(0, 9);
-    expect(seam[2]).toBeLessThan(0);
+    expect(seam[2]).toBeCloseTo(0, 9);
+    expect(up[2]).toBeLessThan(0);                   // the rest of the lip flattens
   });
 
   it('tuck lifts the upper lip, raises and draws back the lower lip; teeth lift; asymmetry tilts', () => {

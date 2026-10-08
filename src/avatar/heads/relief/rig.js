@@ -22,7 +22,7 @@ export const RIG_LIMITS = {
   jawDropFh: 0.095,       // lower lip drop at jawOpen = 1
   wideCornerHw: 0.11,     // corners outward for mouthWide = 1
   wideLipFh: 0.007,       // lips part (teeth show) for wide
-  roundCornerHw: 0.4,     // corners inward for mouthRound = 1
+  roundCornerHw: 0.34,    // corners inward for mouthRound = 1 (more stretches the cheek grid)
   roundPushFh: 0.035,     // lips forward for round
   roundLipFh: 0.015,      // centre parting for round (the lip weights are 0 at the corners)
   smileUpFh: 0.032,       // corners up for smile

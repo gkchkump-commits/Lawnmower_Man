@@ -324,7 +324,8 @@ export function jawFromLandmarks(lm, W, H) {
  */
 export function cavityTeeth(a) {
   const open = Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06, a.mouthTeeth ?? 0, (a.mouthTuck ?? 0) * 0.8);
-  return open * (1 - (a.mouthPress ?? 0));
+  // rounded lips cover the teeth more; pressed lips hide them
+  return open * (1 - 0.4 * a.mouthRound * (1 - (a.mouthTeeth ?? 0))) * (1 - (a.mouthPress ?? 0));
 }
 
 /**

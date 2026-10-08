@@ -1,55 +1,47 @@
 // Lip-sync: turns what is being played into mouth targets for the avatar,
-// { jaw, wide, round } (0..1 each, avatar.setMouth) plus a loudness level (setSpeechLevel).
+// { jaw, wide, round, press, tuck, teeth, tongue } (0..1 each, avatar.setMouth), a loudness level
+// (setSpeechLevel) and prosody cues (avatar.setProsody: nods, brows, blinks, smiles).
 //
-// Three drivers, best first:
-//   (a) the voice server's viseme timeline, sampled at the playback clock, with a viseme →
-//       mouth-shape table and coarticulation (neighbouring shapes cross-fade at boundaries,
-//       bilabial closures are kept crisp, the visual leads the audio by a few ms);
+// Three drivers, best first; all of them go through the same coarticulation model
+// (articulation.js: dominance-blended targets, crisp closures, anticipatory rounding):
+//   (a) the voice server's viseme timeline, sampled at the playback clock (+ a small visual lead),
+//       with the jaw scaled by vowel prominence and the measured loudness;
 //   (b) audio analysis of the playing clip when no visemes came with it: RMS → jaw with a noise
-//       gate, band-energy ratios → wide (E/I/S: bright, high energy) vs round (O/U: dark);
-//   (c) Web Speech fallback (no audio samples available): word boundary events drive a syllable
-//       oscillator whose vowels pick wide/round; a free-running oscillator covers voices that
-//       send no boundary events.
+//       gate, band-energy ratios → spread (E / I / S) vs round (O / U);
+//   (c) the system voice (Web Speech: no samples, no phonemes): the words of the utterance are
+//       converted to phonemes (g2p.js) and timed (planSpeech); the voice's word-boundary events
+//       anchor each word, the gaps between them are predicted at a speaking rate learned from the
+//       boundaries, a word that arrives early compresses the rest of the previous one, the mouth
+//       rests at punctuation pauses, and voices without boundary events play the whole timeline
+//       at the estimated rate.
 // The mapping functions are pure and unit-tested; LipSync wires them to the player.
 
+import {
+  CHANNELS, LEAD_IN, REST, TAIL, VISEME_SHAPES, closureCentreIn, planSpeech, sampleSegments, segmentsFromVisemes,
+  toShape,
+} from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
 
-/** @typedef {{ jaw: number, wide: number, round: number }} MouthShape */
+export { CHANNELS, VISEME_SHAPES, planSpeech };
+
+/** @typedef {import('./articulation.js').MouthShape} MouthShape */
+/** @typedef {import('./articulation.js').Cue} Cue */
 /** @typedef {{ start: number, end: number, viseme: string }} VisemeSegment */
 
-/** Mouth shape per viseme id (contract §6). */
-export const VISEME_SHAPES = Object.freeze({
-  sil: { jaw: 0.0, wide: 0.0, round: 0.0 },
-  PP: { jaw: 0.0, wide: 0.0, round: 0.12 }, // m b p: lips pressed
-  FF: { jaw: 0.1, wide: 0.3, round: 0.0 }, // f v: lower lip to teeth
-  TH: { jaw: 0.18, wide: 0.22, round: 0.0 },
-  DD: { jaw: 0.24, wide: 0.25, round: 0.0 }, // t d n l
-  kk: { jaw: 0.3, wide: 0.15, round: 0.0 }, // k g
-  CH: { jaw: 0.2, wide: 0.0, round: 0.55 }, // ch j sh: protruded
-  SS: { jaw: 0.1, wide: 0.55, round: 0.0 }, // s z: teeth together, spread
-  RR: { jaw: 0.22, wide: 0.0, round: 0.45 },
-  aa: { jaw: 0.78, wide: 0.22, round: 0.0 },
-  E: { jaw: 0.45, wide: 0.6, round: 0.0 },
-  I: { jaw: 0.26, wide: 0.78, round: 0.0 },
-  O: { jaw: 0.52, wide: 0.0, round: 0.75 },
-  U: { jaw: 0.24, wide: 0.0, round: 0.92 },
-});
-
-const SIL = VISEME_SHAPES.sil;
+const SIL = REST;
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
-const smoothstep = (x) => {
-  const t = clamp01(x);
-  return t * t * (3 - 2 * t);
-};
+const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
 /** @param {string} id @returns {MouthShape} */
 export function visemeShape(id) {
   return /** @type {any} */ (VISEME_SHAPES)[id] || SIL;
 }
 
-/** @param {MouthShape} a @param {MouthShape} b @param {number} t */
+/** @param {MouthShape} a @param {MouthShape} b @param {number} t @returns {MouthShape} */
 export function mixShapes(a, b, t) {
-  return { jaw: a.jaw + (b.jaw - a.jaw) * t, wide: a.wide + (b.wide - a.wide) * t, round: a.round + (b.round - a.round) * t };
+  const o = /** @type {any} */ ({});
+  for (const k of CHANNELS) o[k] = (a[k] || 0) + ((b[k] || 0) - (a[k] || 0)) * t;
+  return o;
 }
 
 /**
@@ -69,45 +61,40 @@ export function visemeIndexAt(tl, t) {
   return lo;
 }
 
+/** Coarticulation segments of a server timeline, built once per timeline array. */
+const _segCache = new WeakMap();
+/** @param {VisemeSegment[]} tl */
+function segmentsFor(tl) {
+  let s = _segCache.get(tl);
+  if (!s) {
+    s = segmentsFromVisemes(tl);
+    _segCache.set(tl, s);
+  }
+  return s;
+}
+
+/** Default visual lead: the mouth shapes a sound slightly before it is heard. */
+export const VISEME_LEAD = 0.05;
+
 /**
  * Mouth shape at playback time t from a viseme timeline, with coarticulation.
  * @param {VisemeSegment[]} tl
  * @param {number} t seconds into the clip
- * @param {{ lead?: number, blend?: number }} [opts]
- *   lead: the mouth leads the sound (default 0.04 s); blend: cross-fade half-width (default 0.05 s)
+ * @param {{ lead?: number, prevT?: number }} [opts]
+ *   lead: the mouth leads the sound (default VISEME_LEAD); prevT: the previous sample time — a
+ *   closure whose centre lies in between is sampled at its centre (never skipped)
  * @returns {MouthShape}
  */
 export function mouthFromVisemes(tl, t, opts = {}) {
-  const lead = opts.lead ?? 0.04;
-  const blend = opts.blend ?? 0.05;
-  if (!Array.isArray(tl) || !tl.length) return { ...SIL };
-  const tt = t + lead;
-  const i = visemeIndexAt(tl, tt);
-  if (i < 0) {
-    // approaching the first segment: open towards it
-    const w = smoothstep(1 - (tl[0].start - tt) / blend);
-    return mixShapes(SIL, visemeShape(tl[0].viseme), w * 0.5);
+  if (!Array.isArray(tl) || !tl.length || !Number.isFinite(t)) return { ...SIL };
+  const lead = opts.lead ?? VISEME_LEAD;
+  const segs = segmentsFor(tl);
+  let tt = t + lead;
+  if (Number.isFinite(opts.prevT)) {
+    const c = closureCentreIn(segs, /** @type {number} */ (opts.prevT) + lead, tt);
+    if (Number.isFinite(c)) tt = c;
   }
-  if (i >= tl.length) {
-    const w = smoothstep(1 - (tt - tl[tl.length - 1].end) / blend);
-    return mixShapes(SIL, visemeShape(tl[tl.length - 1].viseme), w * 0.5);
-  }
-  const seg = tl[i];
-  const cur = visemeShape(seg.viseme);
-  const dur = Math.max(1e-3, seg.end - seg.start);
-  // closures (PP) and short segments blend less so they stay visible
-  const b = Math.min(blend * (seg.viseme === 'PP' ? 0.5 : 1), dur / 2);
-  const fromStart = tt - seg.start;
-  const toEnd = seg.end - tt;
-  if (toEnd < b && i + 1 <= tl.length) {
-    const next = i + 1 < tl.length ? visemeShape(tl[i + 1].viseme) : SIL;
-    return mixShapes(cur, next, 0.5 * smoothstep(1 - toEnd / b));
-  }
-  if (fromStart < b) {
-    const prev = i > 0 ? visemeShape(tl[i - 1].viseme) : SIL;
-    return mixShapes(prev, cur, 0.5 + 0.5 * smoothstep(fromStart / b));
-  }
-  return { ...cur };
+  return toShape(sampleSegments(segs, tt));
 }
 
 /**
@@ -142,14 +129,16 @@ export function mouthFromAudio(rmsLevel, bands, opts = {}) {
   const jaw = 0.85 * open ** 0.8;
   const [lo = 0, mid = 0, hi = 0] = bands || [];
   const total = lo + mid + hi;
-  if (!(total > 0)) return { jaw, wide: 0, round: 0 };
+  if (!(total > 0)) return { ...SIL, jaw, teeth: 0.3 * jaw };
   const lf = lo / total;
   const hf = hi / total;
   const mf = mid / total;
   // dark, low-heavy spectrum → rounded (O/U); bright → spread (E/I) or sibilant (S)
   const round = clamp01((lf - 0.6) * 3.2) * (0.4 + 0.6 * open);
-  const wide = clamp01((hf + 0.5 * mf - 0.38) * 2.6);
-  return { jaw, wide: wide * (1 - round), round };
+  const wide = clamp01((hf + 0.5 * mf - 0.38) * 2.6) * (1 - round);
+  // a quiet, hissy block is a sibilant: teeth together, lips spread
+  const hiss = clamp01((hf - 0.55) * 3) * (1 - open);
+  return { ...SIL, jaw: jaw * (1 - 0.6 * hiss), wide, round, teeth: clamp01(0.35 * jaw + 0.5 * wide + 0.6 * hiss) };
 }
 
 /**
@@ -167,84 +156,217 @@ export function countSyllables(word) {
   return Math.max(1, n) + digits;
 }
 
-/** Vowel letters of each syllable of a word, in order (for wide/round). @param {string} word */
-function vowelGroups(word) {
-  return String(word || '').toLowerCase().match(/[aeiouy]+/g) || ['a'];
-}
+// ---------------------------------------------------------------------------------------------
+// System voice (Web Speech): plan time driven by word boundaries
+// ---------------------------------------------------------------------------------------------
 
-/** @param {string} group @returns {MouthShape} */
-function shapeForVowels(group) {
-  const g = group[0];
-  if (g === 'o') return VISEME_SHAPES.O;
-  if (g === 'u' || group === 'oo' || group === 'ou') return VISEME_SHAPES.U;
-  if (g === 'e' && group !== 'ea') return VISEME_SHAPES.E;
-  if (g === 'i' || g === 'y' || group === 'ee' || group === 'ea') return VISEME_SHAPES.I;
-  return VISEME_SHAPES.aa;
-}
+/** Plan seconds the mouth runs ahead of a word boundary (visual lead). */
+const BOUNDARY_LEAD = 0.035;
+/** Errors larger than this (plan s) jump instead of catching up. */
+const SNAP = 0.35;
 
 /**
- * Syllable oscillator for the Web Speech fallback: word boundary events start an
- * open/close cycle per syllable; without boundary events it free-runs at ~4.5 Hz.
+ * Plays one utterance's articulation plan in wall time.
+ *
+ * Plan time p advances at `speed` plan-seconds per second. A word boundary sets where p should
+ * be (the word's start + a small lead); the error is closed smoothly: quickly when the voice is
+ * ahead (the rest of the previous word is compressed), gently when it is behind. With boundary
+ * events, p does not run more than a few ms into a word whose boundary has not arrived (at a
+ * planned pause it waits at rest, otherwise the last sound of the word is held), and gives up
+ * waiting after a while (some voices skip boundaries for some words). Without boundary events
+ * it simply plays the plan at `speed`.
  */
-export class SyllableOscillator {
-  /** @param {{ syllablesPerSec?: number }} [opts] */
-  constructor(opts = {}) {
-    this.rate = opts.syllablesPerSec ?? 4.6;
-    this.speaking = false;
-    this._t0 = 0;
-    /** @type {{ start: number, dur: number, groups: string[] }|null} */
-    this._word = null;
-    this._lastBoundary = -Infinity;
+export class SpeechTrack {
+  /**
+   * @param {import('./articulation.js').SpeechPlan} plan
+   * @param {{ speed?: number, now?: number }} [o] speed: plan seconds per second (rate × learned factor)
+   */
+  constructor(plan, o = {}) {
+    this.plan = plan;
+    this.speed = o.speed > 0 ? o.speed : 1;
+    /** @type {'waiting'|'free'|'boundary'} */
+    this.mode = 'waiting';
+    this.p = 0;
+    this.pPrev = 0;
+    this.anchor = { p: 0, t: o.now ?? 0 };
+    this.created = o.now ?? 0;
+    this.began = NaN;           // wall time the voice started
+    this.confirmed = -1;        // last word whose boundary arrived (or was given up on)
+    this.boundaries = 0;
+    /** @type {{ k: number, t: number }|null} */
+    this.lastBoundary = null;
+    this.holdSince = NaN;
+    this._cue = 0;
+    /** @type {Cue[]} */
+    this._cues = [];
+    /** @type {number[]} learned speed samples (plan s per wall s), consumed by LipSync */
+    this.speedSamples = [];
   }
 
-  /** @param {number} now seconds @param {number} [rateScale] the utterance rate (1 = normal) */
-  start(now, rateScale = 1) {
-    this.speaking = true;
-    this._t0 = now;
-    this._word = null;
-    this._scale = rateScale > 0 ? rateScale : 1;
-  }
-
-  /** @param {number} _now */
-  stop(_now) {
-    this.speaking = false;
-    this._word = null;
+  /** The voice started speaking (utterance onstart). @param {number} now */
+  begin(now) {
+    if (this.mode !== 'waiting') return;
+    this.mode = 'free';
+    this.began = now;
+    this.anchor = { p: LEAD_IN + BOUNDARY_LEAD, t: now };
   }
 
   /**
-   * A word boundary event (SpeechSynthesisUtterance 'boundary', name 'word').
-   * @param {number} now @param {string} word
+   * Index of the plan word a boundary event refers to: by character index when the voice sends
+   * one, else the next word (in order) whose text matches, else simply the next word.
+   * @param {{ charIndex?: number, word?: string }} ev
    */
-  word(now, word) {
-    const syl = Math.max(1, countSyllables(word));
-    const groups = vowelGroups(word);
-    this._word = { start: now, dur: syl / (this.rate * (this._scale || 1)), groups };
-    this._lastBoundary = now;
+  wordIndex(ev) {
+    const words = this.plan.words;
+    if (!words.length) return -1;
+    const ci = Number(ev?.charIndex);
+    if (Number.isFinite(ci) && ci >= 0) {
+      // the word containing charIndex, or the first one after it (an index on a space / mark)
+      for (let k = 0; k < words.length; k++) if (ci < words[k].end) return k;
+      return words.length - 1;
+    }
+    const want = String(ev?.word || '').toLowerCase().replace(/[^a-z0-9']/g, '');
+    for (let k = this.confirmed + 1; k < Math.min(words.length, this.confirmed + 4); k++) {
+      if (want && words[k].text.toLowerCase().replace(/[^a-z0-9']/g, '').startsWith(want.slice(0, 3))) return k;
+    }
+    return Math.min(words.length - 1, this.confirmed + 1);
   }
 
-  /** @param {number} now @returns {MouthShape & { level: number }} */
-  sample(now) {
-    if (!this.speaking) return { ...SIL, level: 0 };
-    const w = this._word;
-    if (w && now - w.start < w.dur) {
-      const n = Math.max(1, Math.round(w.dur * this.rate * (this._scale || 1)));
-      const ph = ((now - w.start) / w.dur) * n;
-      const k = Math.min(n - 1, Math.floor(ph));
-      const open = Math.sin(Math.PI * (ph - k)); // one open/close per syllable
-      const shape = shapeForVowels(w.groups[k % w.groups.length]);
-      const s = mixShapes(SIL, shape, 0.35 + 0.65 * open);
-      return { ...s, level: 0.25 + 0.5 * open };
+  /** A word boundary event. @param {number} now @param {{ charIndex?: number, word?: string }} ev */
+  boundary(now, ev) {
+    const k = this.wordIndex(ev);
+    if (k < 0) return;
+    if (this.lastBoundary && k <= this.lastBoundary.k) return; // repeat (e.g. "42" read as two words)
+    if (this.mode === 'waiting') this.began = now;
+    const words = this.plan.words;
+    const lb = this.lastBoundary;
+    if (lb && lb.k === k - 1 && !(words[lb.k].pause > 0)) {
+      // consecutive words without a planned pause: how fast does this voice really speak?
+      const span = words[k].t0 - words[lb.k].t0;
+      const wall = now - lb.t;
+      if (span > 0.08 && wall > 0.04) this.speedSamples.push(span / wall);
     }
-    // Boundary events recently → we are between words: rest the mouth.
-    if (now - this._lastBoundary < 0.6) return { ...SIL, level: 0.1 };
-    // No boundary events at all: free-running syllables with slow variation.
-    const t = now - this._t0;
-    const ph = t * this.rate * (this._scale || 1);
-    const open = Math.max(0, Math.sin(Math.PI * (ph % 1))) * (0.65 + 0.35 * Math.sin(t * 1.7));
-    const vowel = ['aa', 'E', 'O', 'I', 'aa', 'U'][Math.floor(ph) % 6];
-    const s = mixShapes(SIL, visemeShape(vowel), clamp01(open));
-    return { ...s, level: 0.2 + 0.5 * clamp01(open) };
+    this.mode = 'boundary';
+    this.boundaries++;
+    this.lastBoundary = { k, t: now };
+    this.confirmed = Math.max(this.confirmed, k);
+    this.anchor = { p: words[k].t0 + BOUNDARY_LEAD, t: now };
+    this.holdSince = NaN;
   }
+
+  /** Plan position the mouth may not pass before the next word's boundary. */
+  _limit() {
+    if (this.mode !== 'boundary') return Infinity;
+    const words = this.plan.words;
+    const j = this.confirmed + 1;
+    if (j >= words.length) return Infinity;
+    // planned pause before it: wait at rest; else hold the end of the current word's last sound
+    return words[j - 1].pause > 0 ? words[j].t0 - 0.12 : words[j].t0 - 0.01;
+  }
+
+  /** @param {number} dt @param {number} now */
+  update(dt, now) {
+    this.pPrev = this.p;
+    if (this.mode === 'waiting') {
+      // a voice that never reports its start: assume it started shortly after the request
+      if (now - this.created > 0.6) this.begin(now);
+      else return;
+    }
+    let limit = this._limit();
+    if (Number.isFinite(limit) && this.p >= limit - 0.005) {
+      if (!Number.isFinite(this.holdSince)) this.holdSince = now;
+      const j = this.confirmed + 1;
+      const maxHold = this.plan.words[j - 1]?.pause > 0 ? 0.7 : 0.3;
+      if (now - this.holdSince > maxHold) {
+        // no boundary for this word: carry on as if it had arrived
+        this.confirmed = j;
+        this.anchor = { p: this.p, t: now };
+        this.holdSince = NaN;
+        limit = this._limit();
+      }
+    }
+    const v0 = this.speed;
+    const desired = Math.min(limit, this.anchor.p + v0 * (now - this.anchor.t));
+    const e = desired - this.p;
+    if (Math.abs(e) > SNAP) {
+      this.p = desired;
+    } else {
+      const v = clamp(v0 + e / (e > 0 ? 0.05 : 0.12), e < 0 && desired >= limit ? 0 : 0.25 * v0, 5 * v0);
+      this.p = Math.min(limit, this.p + v * Math.max(0, dt));
+    }
+    if (this.p < this.pPrev) this.p = this.pPrev; // plan time never runs backwards (no stutter)
+    // prosody cues passed on the way
+    const cues = this.plan.cues;
+    while (this._cue < cues.length && cues[this._cue].t <= this.p) {
+      const c = cues[this._cue++];
+      if (this.p - c.t < 0.4) this._cues.push(c); // skip what a jump flew over
+    }
+  }
+
+  /** Mouth channels at the current plan position (a closure passed since the last frame is shown). */
+  sample() {
+    const segs = this.plan.segs;
+    let t = this.p;
+    const c = closureCentreIn(segs, this.pPrev, this.p);
+    if (Number.isFinite(c)) t = c;
+    return sampleSegments(segs, t);
+  }
+
+  /** Cues crossed since the last call. @returns {Cue[]|null} */
+  takeCues() {
+    if (!this._cues.length) return null;
+    const c = this._cues;
+    this._cues = [];
+    return c;
+  }
+
+  /** The whole plan has been played (only rest is left). */
+  get finished() {
+    return this.p >= this.plan.duration + TAIL;
+  }
+}
+
+/**
+ * Prosody cues for an audio clip with a server timeline: phrase starts/ends at the rest gaps,
+ * accents on long (stressed) vowels, punctuation and friendliness from the clip's text.
+ * @param {VisemeSegment[]} tl @param {string} [text] @returns {Cue[]}
+ */
+export function cuesFromVisemes(tl, text = '') {
+  if (!Array.isArray(tl) || !tl.length) return [];
+  const ends = text ? planSpeech(text).cues.filter((c) => c.type === 'phrase-end') : [];
+  /** @type {Array<[number, number]>} speech runs between rests >= 100 ms */
+  const runs = [];
+  let start = NaN;
+  let last = NaN;
+  for (const s of tl) {
+    const rest = s.viseme === 'sil';
+    if (!rest && !Number.isFinite(start)) start = s.start;
+    if (!rest) last = s.end;
+    if (rest && Number.isFinite(start) && s.end - s.start >= 0.1) {
+      runs.push([start, last]);
+      start = NaN;
+    }
+  }
+  if (Number.isFinite(start)) runs.push([start, last]);
+  /** @type {Cue[]} */
+  const cues = [];
+  runs.forEach(([a, b], r) => {
+    cues.push({ t: a, type: 'phrase-start', strength: r === 0 ? 1 : 0.7 });
+    const e = ends.length === runs.length ? ends[r] : r === runs.length - 1 ? ends[ends.length - 1] : null;
+    cues.push({ t: b, type: 'phrase-end', strength: 1, punct: e?.punct || (r === runs.length - 1 ? '.' : ','), friendly: e?.friendly || 0 });
+  });
+  const vowels = tl.filter((s) => ['aa', 'E', 'I', 'O', 'U'].includes(s.viseme));
+  const durs = vowels.map((s) => s.end - s.start).sort((x, y) => x - y);
+  const median = durs.length ? durs[(durs.length - 1) >> 1] : 0.1;
+  let lastAccent = -Infinity;
+  for (const s of vowels) {
+    const d = s.end - s.start;
+    if (d >= Math.max(0.08, 1.3 * median) && s.start - lastAccent >= 0.25) {
+      cues.push({ t: s.start, type: 'accent', strength: clamp01(d / (1.8 * median)) });
+      lastAccent = s.start;
+    }
+  }
+  return cues.sort((x, y) => x.t - y.t);
 }
 
 /**
@@ -253,53 +375,107 @@ export class SyllableOscillator {
  *   player.level(): number           (linear RMS of the output, audio clips)
  *   player.spectrum(Float32Array): boolean   (dB data; false when unavailable)
  *   player.sampleRate: number
+ *   events: 'start' (clip), 'speechstart' (clip), 'boundary' ({ word, charIndex?, clip }), 'end' (clip, { stopped })
  */
 export class LipSync {
   /**
-   * @param {{ player: any, oscillator?: SyllableOscillator, now?: () => number }} deps
+   * @param {{ player: any, now?: () => number }} deps
    *   now: seconds clock, the same one passed to update()
    */
   constructor(deps) {
     this.player = deps.player;
-    this.osc = deps.oscillator || new SyllableOscillator();
     this._now = deps.now || (() => (globalThis.performance?.now?.() ?? Date.now()) / 1000);
     this._freq = new Float32Array(1024);
-    this._sm = { jaw: 0, wide: 0, round: 0, level: 0 };
+    this._sm = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0 };
+    /** @type {SpeechTrack|null} */
+    this.track = null;
+    this._trackClip = null;
+    /** learned speaking speed of the system voice per utterance rate (plan s per s / rate) */
+    this._speed = new Map();
+    /** audio clip prosody: { clip, cues, i } */
+    this._audioCues = null;
+    this._prevClip = null;
+    this._prevT = NaN;
     /** @type {Array<() => void>} */
     this._offs = [];
     const p = this.player;
     if (p && typeof p.on === 'function') {
-      // Web Speech clips: drive the syllable oscillator from the utterance's word boundaries.
       this._offs.push(
-        p.on('start', (clip) => { if (clip?.kind === 'speech') this.osc.start(this._now(), clip.rate || 1); }),
-        p.on('end', (clip) => { if (clip?.kind === 'speech') this.osc.stop(this._now()); }),
-        p.on('boundary', (ev) => this.osc.word(this._now(), ev?.word || '')),
+        p.on('start', (clip) => { if (clip?.kind === 'speech') this._startSpeech(clip); }),
+        p.on('speechstart', (clip) => { if (clip === this._trackClip) this.track?.begin(this._now()); }),
+        p.on('boundary', (ev) => {
+          if (this.track && (!ev?.clip || ev.clip === this._trackClip)) this.track.boundary(this._now(), ev || {});
+        }),
+        p.on('end', (clip, info) => { if (clip === this._trackClip) this._endSpeech(!!info?.stopped); }),
       );
     }
+  }
+
+  /** Learned speed factor for an utterance rate (1 = the plan's nominal tempo). @param {number} rate */
+  speedFactor(rate = 1) {
+    return this._speed.get(roundRate(rate)) ?? 1;
+  }
+
+  /** @param {any} clip */
+  _startSpeech(clip) {
+    const rate = Number(clip.rate) > 0 ? Number(clip.rate) : 1;
+    this.track = new SpeechTrack(planSpeech(clip.text || ''), { speed: rate * this.speedFactor(rate), now: this._now() });
+    this.track.rate = rate;
+    this._trackClip = clip;
+  }
+
+  /** @param {boolean} stopped */
+  _endSpeech(stopped) {
+    const tr = this.track;
+    if (tr && !stopped) {
+      // a voice without boundary events: learn its tempo from the utterance length
+      const wall = this._now() - tr.began;
+      const planLen = tr.plan.duration - LEAD_IN;
+      if (!tr.boundaries && Number.isFinite(wall) && wall > 0.4 && planLen > 0.3) this._learn(tr.rate, [planLen / wall], 0.5);
+    }
+    this.track = null;
+    this._trackClip = null;
+  }
+
+  /** @param {number} rate @param {number[]} samples plan s per wall s @param {number} [alpha] */
+  _learn(rate, samples, alpha = 0.3) {
+    const key = roundRate(rate);
+    let f = this._speed.get(key) ?? 1;
+    for (const s of samples) f += alpha * (clamp(s / rate, 0.5, 2) - f);
+    this._speed.set(key, f);
+    return f;
   }
 
   dispose() {
     for (const off of this._offs) off();
     this._offs = [];
+    this.track = null;
   }
 
   /**
    * @param {number} dt seconds since the previous update
-   * @param {number} now seconds (for the oscillator)
-   * @returns {MouthShape & { level: number, source: 'visemes'|'audio'|'speech'|'none' }}
+   * @param {number} now seconds (for the system-voice driver)
+   * @returns {MouthShape & { level: number, source: 'visemes'|'audio'|'speech'|'none', cues: Cue[]|null }}
    */
   update(dt, now) {
     const cur = this.player && this.player.current;
     /** @type {MouthShape & { level: number }} */
     let target;
     let source = /** @type {'visemes'|'audio'|'speech'|'none'} */ ('none');
+    /** @type {Cue[]|null} */
+    let cues = null;
     if (cur && cur.kind === 'audio') {
       const lvl = this.player.level();
       const level = dbToUnit(toDb(lvl), -50, -14);
       const tl = cur.clip.visemes;
+      const prevT = cur.clip === this._prevClip ? this._prevT : NaN;
       if (tl && tl.length) {
-        target = { ...mouthFromVisemes(tl, cur.time), level };
+        const m = mouthFromVisemes(tl, cur.time, { prevT });
+        // louder syllables open the jaw a little more, a dip in the audio a little less
+        m.jaw = clamp01(m.jaw * (0.78 + 0.4 * level));
+        target = { ...m, level };
         source = 'visemes';
+        cues = this._clipCues(cur.clip, tl, cur.time + VISEME_LEAD);
       } else {
         const bins = this.player.analyser?.frequencyBinCount;
         if (bins && this._freq.length !== bins) this._freq = new Float32Array(bins);
@@ -308,20 +484,59 @@ export class LipSync {
         target = { ...mouthFromAudio(lvl, bands), level };
         source = 'audio';
       }
-    } else if (cur && cur.kind === 'speech') {
-      target = this.osc.sample(now);
+      this._prevClip = cur.clip;
+      this._prevT = cur.time;
+    } else if (cur && cur.kind === 'speech' && this.track && cur.clip === this._trackClip) {
+      const tr = this.track;
+      tr.speed = (tr.rate || 1) * this.speedFactor(tr.rate);
+      tr.update(dt, now);
+      if (tr.speedSamples.length) {
+        this._learn(tr.rate, tr.speedSamples);
+        tr.speedSamples = [];
+      }
+      const v = toShape(tr.sample());
+      const voiced = tr.mode !== 'waiting' && tr.p > LEAD_IN && tr.p < tr.plan.duration;
+      target = { ...v, level: voiced ? clamp01(0.12 + 0.8 * v.jaw + 0.2 * (v.wide + v.round)) : 0.04 };
       source = 'speech';
+      cues = tr.takeCues();
     } else {
       target = { ...SIL, level: 0 };
     }
-    // light smoothing (visemes are already blended; audio needs a little more)
-    const tau = source === 'visemes' ? 0.025 : 0.05;
-    const k = 1 - Math.exp(-Math.max(0, dt) / tau);
+    // Timeline sources are already smooth (dominance blending): only take the frame steps off.
+    // Audio analysis is noisy: open fast, close a little slower.
     const sm = this._sm;
-    sm.jaw += (target.jaw - sm.jaw) * k;
-    sm.wide += (target.wide - sm.wide) * k;
-    sm.round += (target.round - sm.round) * k;
+    const step = (key, tauUp, tauDown) => {
+      const tau = target[key] > sm[key] ? tauUp : tauDown;
+      sm[key] += (target[key] - sm[key]) * (1 - Math.exp(-Math.max(0, dt) / tau));
+    };
+    const audio = source === 'audio';
+    for (const k of CHANNELS) {
+      if (audio || source === 'none') step(k, 0.03, 0.06);
+      else step(k, 0.008, 0.008);
+    }
     sm.level += (target.level - sm.level) * (1 - Math.exp(-Math.max(0, dt) / 0.08));
-    return { jaw: sm.jaw, wide: sm.wide, round: sm.round, level: sm.level, source };
+    return {
+      jaw: sm.jaw, wide: sm.wide, round: sm.round, press: sm.press, tuck: sm.tuck, teeth: sm.teeth, tongue: sm.tongue,
+      level: sm.level, source, cues,
+    };
   }
+
+  /** Prosody cues of a server-voiced clip passed since the last frame. */
+  _clipCues(clip, tl, t) {
+    let ac = this._audioCues;
+    if (!ac || ac.clip !== clip) {
+      ac = this._audioCues = { clip, cues: cuesFromVisemes(tl, clip.text || ''), i: 0 };
+    }
+    let out = null;
+    while (ac.i < ac.cues.length && ac.cues[ac.i].t <= t) {
+      const c = ac.cues[ac.i++];
+      if (t - c.t < 0.4) (out ||= []).push(c);
+    }
+    return out;
+  }
+}
+
+/** @param {number} r */
+function roundRate(r) {
+  return Math.round((Number(r) > 0 ? Number(r) : 1) * 20) / 20;
 }

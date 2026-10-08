@@ -211,7 +211,9 @@ export class WebSpeechTTS {
    * Speak one chunk. Resolves when it ended, was cancelled or timed out (never rejects for
    * cancellation; rejects on a synthesis error so the caller can report it).
    * @param {string} text
-   * @param {{ rate?: number, onStart?: () => void, onBoundary?: (word: string) => void }} [o]
+   * @param {{ rate?: number, onStart?: () => void,
+   *   onBoundary?: (word: string, info: { charIndex: number, charLength: number }) => void }} [o]
+   *   onBoundary: a word starts (charIndex / charLength into `text`, for the lip-sync)
    */
   speak(text, o = {}) {
     if (!this.supported) return Promise.reject(new Error('Speech synthesis is not supported'));
@@ -253,8 +255,9 @@ export class WebSpeechTTS {
       };
       u.onboundary = (e) => {
         if (e.name && e.name !== 'word') return;
-        const len = e.charLength || (/^\S+/.exec(text.slice(e.charIndex))?.[0].length ?? 0);
-        o.onBoundary?.(text.substr(e.charIndex, len));
+        const ci = Number.isFinite(e.charIndex) ? e.charIndex : 0;
+        const len = e.charLength || (/^\S+/.exec(text.slice(ci))?.[0].length ?? 0);
+        o.onBoundary?.(text.substr(ci, len), { charIndex: ci, charLength: len });
       };
       try {
         // Chromium can be stuck "speaking" after a previous error: reset before speaking.

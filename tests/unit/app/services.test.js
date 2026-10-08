@@ -289,8 +289,10 @@ describe('Web Speech', () => {
     expect(await ws.init()).toBe(true);
     expect(ws.voice.name).toMatch(/Aria/);
     const words = [];
-    await ws.speak('hello world', { rate: 1.3, onBoundary: (w) => words.push(w) });
+    const infos = [];
+    await ws.speak('hello world', { rate: 1.3, onBoundary: (w, info) => { words.push(w); infos.push(info); } });
     expect(words).toEqual(['hello', 'world']);
+    expect(infos).toEqual([{ charIndex: 0, charLength: 5 }, { charIndex: 6, charLength: 5 }]);
     expect(synth.spoken[0].rate).toBe(1.3);
   });
 

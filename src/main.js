@@ -7,6 +7,7 @@
 /* global URLSearchParams, location, innerWidth, innerHeight */
 
 import { ClickThroughGate, probeAvatar } from './app/click-through.js';
+import { WindowDrag, nextSizePreset } from './app/window-drag.js';
 import { Controller } from './app/controller.js';
 import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
@@ -104,6 +105,15 @@ async function boot() {
   );
 
   const gate = new ClickThroughGate({ apply: (ignore) => bridge.window.setIgnoreMouse(ignore) });
+  // Moving the window by the head (wired to pointer events below; created early because settings
+  // changes consult it).
+  const windowDrag = new WindowDrag({
+    win: bridge.window,
+    isLocked: () => !!settings.window.lockPosition,
+    gate,
+    onChange: (on) => { body.dataset.dragging = on ? '1' : ''; },
+  });
+  const syncLockAttr = () => { body.dataset.lock = settings.window.lockPosition || !windowDrag.supported ? '1' : ''; };
   const clickThroughWanted = () => {
     if (!settings.window.clickThrough) return false;
     if (isMock) return q.get('clickThrough') === '1';
@@ -181,6 +191,8 @@ async function boot() {
     applyLayout();
     drawer.update(settings);
     gate.setEnabled(clickThroughWanted());
+    syncLockAttr();
+    if (settings.window.lockPosition) windowDrag.release();
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
     if (!settings.avatar.followCursor) avatarHost.avatar.lookAt(null);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
@@ -230,6 +242,9 @@ async function boot() {
       view.toast('Restarting the voice server…', 'info');
     } else if (a === 'setupVoice') {
       setupVoice();
+    } else if (a === 'resetPosition') {
+      if (typeof bridge.window.resetPosition === 'function') bridge.window.resetPosition();
+      else view.toast('Restart Lawnmower Man to reset the position.', 'info');
     }
   }
 
@@ -502,7 +517,7 @@ async function boot() {
     releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), releaseMs));
   };
   // Desktop app: main reports the cursor anywhere on the screen (~30 Hz, only when it moves),
-  // so the eyes follow it outside the window and over drag regions too. The browser preview
+  // so the eyes follow it outside the window and while it is being dragged too. The browser preview
   // (mock bridge) has no such event and falls back to pointer events over the page.
   const globalCursor = typeof bridge.onCursor === 'function';
   if (globalCursor) {
@@ -510,10 +525,54 @@ async function boot() {
       if (p && typeof p === 'object') lookAtPoint(Number(p.x), Number(p.y));
     });
   }
+  // ---------------------------------------------------------------- moving the window
+  // Press on the head (its visible silhouette), the chat status bar or the settings header and
+  // drag: main moves the window (see src/app/window-drag.js for why not CSS drag regions).
+  const DRAG_CONTROLS = 'button, input, textarea, select, a, label, [contenteditable], .toolbar, .perm-card, .setup-card, .toast, .transcript, .composer';
+  /** @param {PointerEvent|MouseEvent} e  over the head, away from any control */
+  const overHeadAt = (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (!t?.closest || !t.closest('#stage') || t.closest(DRAG_CONTROLS)) return false;
+    return !!avatarHost.avatar.hitTest(e.clientX, e.clientY);
+  };
+  /** @param {PointerEvent} e */
+  const dragHandleAt = (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (!t?.closest || t.closest(DRAG_CONTROLS)) return false;
+    if (t.closest('.statusbar, .drawer-head')) return true;
+    return overHeadAt(e);
+  };
+  syncLockAttr();
+  window.addEventListener('pointerdown', (e) => {
+    if (!windowDrag.press(e, dragHandleAt(e))) return;
+    e.preventDefault(); // no text selection or focus change while the window moves
+    try {
+      /** @type {HTMLElement} */ (e.target).setPointerCapture?.(e.pointerId);
+    } catch { /* the release still arrives via window listeners */ }
+  });
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    window.addEventListener(type, (e) => windowDrag.release(/** @type {PointerEvent} */ (e)), true);
+  }
+  window.addEventListener('blur', () => windowDrag.release());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) windowDrag.release(); });
+  // Ctrl + mouse wheel over the head: next size preset (S / M / L)
+  let lastWheelSize = 0;
+  window.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || !overHeadAt(e)) return;
+    e.preventDefault(); // never zoom the page
+    const now = performance.now();
+    if (now - lastWheelSize < 350) return;
+    const next = nextSizePreset(settings.window.sizePreset, e.deltaY);
+    if (!next) return;
+    lastWheelSize = now;
+    bridge.window.setSizePreset(next);
+  }, { passive: false });
+
   window.addEventListener('pointermove', (e) => {
     view.notePointer();
     controller.noteActivity();
     const av = avatarHost.avatar;
+    if (!windowDrag.active) body.dataset.overHead = overHeadAt(e) ? '1' : '';
     if (!globalCursor) lookAtPoint(e.clientX, e.clientY);
     if (gate.enabled) {
       const t = /** @type {HTMLElement} */ (e.target);

@@ -173,3 +173,42 @@ export function resizeAnchored(old, size, wa) {
 export function reclamp(b, displays, primary) {
   return placeWindow({ saved: { x: b.x, y: b.y }, size: { width: b.width, height: b.height }, displays, primary });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Dragging the avatar. CSS drag regions (-webkit-app-region) do not mix with click-through on
+// Windows: entering one makes the page see a pointerleave, the click-through gate then turns the
+// window transparent to clicks and the mouse-down goes to the desktop. So the window is moved by
+// the main process instead: the renderer reports pointer down / up over the head, main polls the
+// global cursor and moves the window by the cursor's offset from where the drag started.
+
+/** The cursor must move this far (DIP) before a press on the head becomes a drag (else: a click). */
+export const DRAG_THRESHOLD = 3;
+/** A drag never lasts longer than this (a lost pointer-up must not glue the window to the cursor). */
+export const DRAG_MAX_MS = 120_000;
+
+/**
+ * Window bounds while dragging: the start bounds shifted by the cursor's movement, size unchanged.
+ * Returns null while the cursor is still within DRAG_THRESHOLD of where the press started.
+ * @param {Rect} start window bounds when the press started
+ * @param {{x:number,y:number}} from cursor (screen DIP) when the press started
+ * @param {{x:number,y:number}} to current cursor (screen DIP)
+ * @param {boolean} moving already past the threshold (then every movement counts)
+ * @returns {Rect|null}
+ */
+export function dragBounds(start, from, to, moving) {
+  const dx = Math.round(to.x - from.x);
+  const dy = Math.round(to.y - from.y);
+  if (!moving && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return null;
+  return { x: start.x + dx, y: start.y + dy, width: start.width, height: start.height };
+}
+
+/**
+ * Where a dragged window settles when the button is released: fully on the display it was
+ * dropped on (most overlap, else the nearest), so it cannot end up under the taskbar or half
+ * off-screen.
+ * @param {Rect} b @param {DisplayLike[]} displays @param {DisplayLike} primary @returns {Rect}
+ */
+export function settleDrop(b, displays, primary) {
+  const d = pickDisplay(b, displays) || primary;
+  return clampToWorkArea(b, d.workArea);
+}

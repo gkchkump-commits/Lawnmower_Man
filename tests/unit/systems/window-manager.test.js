@@ -1,15 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import {
   CHAT_PANEL_HEIGHT,
+  DRAG_THRESHOLD,
   EDGE_MARGIN,
   MIN_CHAT_PANEL_HEIGHT,
   SIZE_PRESETS,
   clampToWorkArea,
   defaultBounds,
+  dragBounds,
   pickDisplay,
   placeWindow,
   reclamp,
   resizeAnchored,
+  settleDrop,
   windowLayout,
 } from '../../../electron/window-manager.js';
 
@@ -100,5 +103,30 @@ describe('resizeAnchored', () => {
   it('reclamp moves a window back after a monitor disappears', () => {
     const b = reclamp({ x: 3000, y: 0, width: 400, height: 600 }, [primary], primary);
     expect(b.x + b.width).toBeLessThanOrEqual(1920);
+  });
+});
+
+describe('dragging', () => {
+  const start = { x: 900, y: 200, width: 400, height: 840 };
+  it('a press that barely moves stays a click', () => {
+    const from = { x: 1000, y: 500 };
+    expect(dragBounds(start, from, { x: 1000 + DRAG_THRESHOLD - 1, y: 500 - (DRAG_THRESHOLD - 1) }, false)).toBe(null);
+    expect(dragBounds(start, from, { x: 1000 + DRAG_THRESHOLD, y: 500 }, false)).toEqual({ ...start, x: 900 + DRAG_THRESHOLD });
+  });
+  it('once moving, follows the cursor exactly (also back within the threshold), size unchanged', () => {
+    const from = { x: 1000, y: 500 };
+    expect(dragBounds(start, from, { x: 1001, y: 499 }, true)).toEqual({ ...start, x: 901, y: 199 });
+    expect(dragBounds(start, from, { x: 400.4, y: 1300.6 }, true)).toEqual({ x: 300, y: 1001, width: 400, height: 840 });
+  });
+  it('crosses onto a second monitor with negative coordinates', () => {
+    expect(dragBounds(start, { x: 1000, y: 500 }, { x: 2600, y: 100 }, true)).toEqual({ ...start, x: 2500, y: -200 });
+  });
+  it('settles a drop fully onto the display it landed on', () => {
+    // half under the taskbar of the primary display
+    expect(settleDrop({ ...start, y: 600 }, [primary, second], primary)).toEqual({ ...start, y: 1032 - 840 });
+    // mostly on the second monitor, poking above its top edge
+    expect(settleDrop({ ...start, x: 2500, y: -400 }, [primary, second], primary)).toEqual({ ...start, x: 2500, y: -200 });
+    // nowhere near any display: nearest one
+    expect(settleDrop({ ...start, x: -9000, y: 0 }, [primary, second], primary)).toEqual({ ...start, x: 0, y: 0 });
   });
 });

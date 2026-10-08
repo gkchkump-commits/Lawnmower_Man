@@ -279,6 +279,73 @@ describe('electron/main.js wiring', () => {
     expect(tracker.running).toBe(true);
   });
 
+  it('moves the window by the head: follows the global cursor, settles on the display, saves', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeout = 2000) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > timeout) throw new Error('timeout');
+        await sleep(10);
+      }
+    };
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    const wa = m.display.workArea;
+    win.setBounds({ x: 900, y: 300, width: 400, height: 840 });
+    const start = win.getBounds();
+    Object.assign(m.cursor, { x: 1000, y: 400 });
+
+    // a press that does not move is a click: the window stays put
+    drag('drag-start');
+    m.cursor.x += 2;
+    await sleep(60);
+    expect(win.bounds).toEqual(start);
+
+    // past the threshold every movement counts; the size never changes
+    Object.assign(m.cursor, { x: 940, y: 370 });
+    await until(() => win.bounds.x === start.x - 60);
+    expect(win.bounds).toEqual({ ...start, x: start.x - 60, y: start.y - 30 });
+    // the renderer cannot make the window click-through mid-drag (the release must arrive)
+    m.listeners.get('lm:window:set-ignore-mouse')(trusted(), true);
+    expect(win.setIgnoreMouseEvents).not.toHaveBeenCalledWith(true, expect.anything());
+    expect(main.__test.state.ignoreMouse).toBe(false);
+
+    // dropped half off-screen: settles fully onto the work area and saves the position
+    Object.assign(m.cursor, { x: 1000 + 5000, y: 400 - 5000 });
+    drag('drag-end');
+    expect(win.bounds).toEqual({ x: wa.x + wa.width - start.width, y: wa.y, width: start.width, height: start.height });
+    expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+    expect(main.__test.state.drag).toBe(null);
+    const settled = win.getBounds();
+    Object.assign(m.cursor, { x: 10, y: 10 });
+    await sleep(40);
+    expect(win.bounds).toEqual(settled); // no timer left running
+
+    // locked: a press never moves the window
+    await invoke('lm:settings:set', { window: { lockPosition: true } });
+    drag('drag-start');
+    expect(main.__test.state.drag).toBe(null);
+    await invoke('lm:settings:set', { window: { lockPosition: false } });
+
+    // hiding the window ends a drag in progress
+    drag('drag-start');
+    expect(main.__test.state.drag).not.toBe(null);
+    win.hide();
+    expect(main.__test.state.drag).toBe(null);
+    win.show();
+
+    // these calls take no arguments
+    m.listeners.get('lm:window:drag-start')(trusted(), { x: 1 });
+    expect(main.__test.state.drag).toBe(null);
+
+    // "Reset position": back to the bottom-right corner of the display
+    drag('reset-position');
+    expect(win.bounds).toEqual({ x: wa.x + wa.width - start.width - 24, y: wa.y + wa.height - start.height - 24, width: start.width, height: start.height });
+    expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+    const tray = main.__test.state.tray;
+    expect(tray.menu.template.some((i) => i.label === 'Lock position' && i.type === 'checkbox')).toBe(true);
+    expect(tray.menu.template.some((i) => i.label === 'Reset position')).toBe(true);
+  });
+
   it('cancel IPC validates the turn id', async () => {
     await expect(invoke('lm:claude:cancel', '../x')).rejects.toThrow(/turn id/);
     expect(await invoke('lm:claude:cancel', 'turn-1-unknown')).toEqual({ cancelled: false, interrupted: false });

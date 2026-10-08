@@ -176,6 +176,63 @@ test.describe('app (mock bridge)', () => {
     await page.waitForTimeout(300);
     expect(await calls()).toEqual([false, true, false]);
   });
+
+  test('moving the window: press on the head or the status bar drags; controls, empty space and a lock do not', async ({ page }) => {
+    await boot(page, { clickThrough: 1 });
+    const drags = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'dragStart' || c[0] === 'dragEnd').map((c) => c[0]));
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    const face = { x: box.x + box.width / 2, y: box.y + box.height * 0.4 };
+
+    await page.mouse.move(face.x, face.y);
+    await expect(page.locator('body')).toHaveAttribute('data-over-head', '1');
+    await page.mouse.down();
+    await expect(page.locator('body')).toHaveAttribute('data-dragging', '1');
+    // the pointer leaves the page mid-drag (the window moves under it): never click-through
+    await page.mouse.move(box.x + 4, box.y + 4, { steps: 4 });
+    await page.waitForTimeout(250);
+    expect((await ignores()).at(-1)).toBe(false);
+    await page.mouse.up();
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd']);
+    await expect(page.locator('body')).toHaveAttribute('data-dragging', '');
+
+    // the status bar is a handle too
+    const bar = await page.locator('#status').boundingBox();
+    await page.mouse.move(bar.x + bar.width - 6, bar.y + bar.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+
+    // toolbar buttons and transparent space never start a drag
+    await page.locator('#btn-settings').click();
+    await page.locator('.drawer-close').click();
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.up();
+    expect(await drags()).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+
+    // locked: pressing on the head does nothing, and the cursor no longer offers to grab
+    await page.evaluate(() => window.__app.bridge.settings.set({ window: { lockPosition: true } }));
+    await expect(page.locator('body')).toHaveAttribute('data-lock', '1');
+    await page.mouse.move(face.x, face.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    expect(await drags()).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+  });
+
+  test('Ctrl + mouse wheel over the head changes the size preset', async ({ page }) => {
+    await boot(page);
+    const sizes = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setSizePreset').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -120);
+    await page.keyboard.up('Control');
+    await expect.poll(sizes).toEqual(['large']);
+    await page.mouse.wheel(0, -120); // without Ctrl: nothing
+    await page.waitForTimeout(400);
+    expect(await sizes()).toEqual(['large']);
+  });
 });
 
 test.describe('voice (fake voice server)', () => {

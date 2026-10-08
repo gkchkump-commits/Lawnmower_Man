@@ -23,6 +23,8 @@
  * @property {(on: boolean) => void} setShowChat
  * @property {(mode: 'chat'|'assistant'|'agent') => void} setMode
  * @property {(preset: 'small'|'medium'|'large') => void} setSizePreset
+ * @property {(on: boolean) => void} [setLockPosition]
+ * @property {() => void} [resetPosition]
  * @property {() => void} newConversation
  * @property {() => void} restartVoice
  * @property {() => void} [setupVoice]
@@ -94,6 +96,8 @@ export function buildTrayTemplate(st, a) {
     { label: 'Show chat panel', type: 'checkbox', checked: !!s.window.showChat, click: (/** @type {any} */ item) => a.setShowChat(!!item?.checked) },
     { label: 'Always on top', type: 'checkbox', checked: !!s.window.alwaysOnTop, click: (/** @type {any} */ item) => a.setAlwaysOnTop(!!item?.checked) },
     { label: 'Click-through background', type: 'checkbox', checked: !!s.window.clickThrough, click: (/** @type {any} */ item) => a.setClickThrough(!!item?.checked) },
+    { label: 'Lock position', type: 'checkbox', checked: !!s.window.lockPosition, click: (/** @type {any} */ item) => a.setLockPosition?.(!!item?.checked) },
+    { label: 'Reset position', click: () => a.resetPosition?.() },
     { type: 'separator' },
     { label: 'Restart voice', click: () => a.restartVoice() },
     st.voiceSetup === 'running'

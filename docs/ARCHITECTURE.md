@@ -126,6 +126,9 @@ lawnmower = {
     setIgnoreMouse(ignore: boolean): void,  // click-through for transparent pixels (forward:true)
     setSizePreset(preset: 'small'|'medium'|'large'): void,
     setAlwaysOnTop(on: boolean): void,
+    dragStart(): void,     // primary button pressed on the head / status bar / settings header
+    dragEnd(): void,       // released (or blur / hidden): settle on the display, save the position
+    resetPosition(): void, // default corner of the current display
     minimize(): void, hide(): void, quit(): void,
   },
   onHotkey(cb: (name: 'toggleListen'|'stopSpeaking'|'toggleChat') => void): () => void,
@@ -136,6 +139,17 @@ lawnmower = {
   app: { info(): Promise<{ version: string, platform: string, electron: string, chrome: string }> },
 }
 ```
+
+Moving the window: there are no CSS drag regions (`-webkit-app-region: drag`). On Windows they fight
+click-through: entering one reads as the pointer leaving the page, the click-through gate makes the
+window transparent to clicks and the press lands on the desktop. Instead the renderer
+(`src/app/window-drag.js`) calls `dragStart()` on a primary press over the head's silhouette, the
+status bar or the settings header, holds the gate interactive and captures the pointer; main follows
+`screen.getCursorScreenPoint()` at ~60 Hz (`dragBounds` in `electron/window-manager.js`: nothing moves
+until the cursor travelled 3 DIP, so a click stays a click; `setBounds` keeps the size exact on
+fractional display scaling) and refuses click-through until `dragEnd()`, which settles the window
+fully onto the display it was dropped on and saves the position. A drag also ends when the window
+hides, minimizes or its renderer dies, and after 2 minutes at most. `window.lockPosition` disables it.
 
 Renderer use of `onCursor`: the eyes follow the cursor anywhere on the desktop (`src/app/gaze.js`:
 inside the avatar stage exactly like pointer tracking, outside it the gaze keeps the direction but
@@ -257,6 +271,7 @@ command line — user text only ever travels over stdin; long prompts go in file
     clickThrough: true,          // transparent pixels pass clicks to the desktop
     position: null,              // {x,y} remembered
     showChat: true,
+    lockPosition: false,         // true: pressing on the head does not move the window
   },
   hotkeys: {                     // Linux/macOS defaults
     toggleListen: 'CommandOrControl+Alt+Space',

@@ -62,6 +62,10 @@ const api = {
     setIgnoreMouse: (ignore) => send('lm:window:set-ignore-mouse', !!ignore),
     setSizePreset: (preset) => send('lm:window:set-size-preset', preset),
     setAlwaysOnTop: (on) => send('lm:window:set-always-on-top', !!on),
+    // Moving the avatar: press on the head → main follows the global cursor until the release.
+    dragStart: () => send('lm:window:drag-start'),
+    dragEnd: () => send('lm:window:drag-end'),
+    resetPosition: () => send('lm:window:reset-position'),
     minimize: () => send('lm:window:minimize'),
     hide: () => send('lm:window:hide'),
     quit: () => send('lm:window:quit'),

@@ -44,6 +44,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     position: /** @type {{x:number,y:number}|null} */ (null),
     showChat: true,
     skipTaskbar: false,
+    lockPosition: false,
   },
   hotkeys: {
     toggleListen: 'CommandOrControl+Alt+Space',

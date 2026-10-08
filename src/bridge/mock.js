@@ -543,6 +543,10 @@ export function createMockBridge(options = {}) {
       setIgnoreMouse: record('setIgnoreMouse'),
       setSizePreset: record('setSizePreset'),
       setAlwaysOnTop: record('setAlwaysOnTop'),
+      // a browser tab cannot move its window: just record (Playwright checks the calls)
+      dragStart: record('dragStart'),
+      dragEnd: record('dragEnd'),
+      resetPosition: record('resetPosition'),
       minimize: record('minimize'),
       hide: record('hide'),
       quit: record('quit'),

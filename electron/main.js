@@ -48,7 +48,7 @@ import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.
 import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
-import { windowLayout, placeWindow, resizeAnchored, reclamp } from './window-manager.js';
+import { windowLayout, placeWindow, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, DRAG_MAX_MS } from './window-manager.js';
 import {
   APP_HOST,
   APP_ORIGIN,
@@ -99,6 +99,11 @@ const state = {
   followCursor: true, // settings.avatar.followCursor, cached (read ~30 times a second)
   /** @type {ReturnType<typeof createLogger>} */ log: createLogger({ dir: null }),
   /** @type {boolean|null} */ ignoreMouse: null,
+  /**
+   * Window drag in progress (renderer pressed on the head): cursor and bounds at the press.
+   * @type {{ from: {x:number,y:number}, start: {x:number,y:number,width:number,height:number}, moving: boolean, timer: NodeJS.Timeout, startedAt: number }|null}
+   */
+  drag: null,
   quitting: false,
   cleanedUp: false,
   rendererCrashes: 0,
@@ -292,6 +297,7 @@ async function init() {
 
 /** Stop child processes and release OS resources (bounded so quitting never hangs). */
 async function shutdown() {
+  endDrag();
   state.cursor?.stop();
   state.setup?.dispose(); // the setup window itself keeps running
   try {
@@ -408,21 +414,28 @@ function createWindow() {
     moveTimer = setTimeout(savePosition, 400);
   });
   const onVisibility = () => {
+    endDrag();
     rebuildTray();
     syncCursorTracking();
   };
   win.on('show', onVisibility);
   win.on('hide', onVisibility);
-  win.on('minimize', syncCursorTracking);
+  win.on('minimize', () => {
+    endDrag();
+    syncCursorTracking();
+  });
   win.on('restore', syncCursorTracking);
   win.on('closed', () => {
+    endDrag();
     if (state.win === win) state.win = null;
     syncCursorTracking();
   });
 
   win.webContents.on('render-process-gone', (_e, details) => {
     state.log('error', `[main] renderer gone: ${details.reason} (exit ${details.exitCode})`);
-    // Fail safe: a click-through window with no live renderer could never turn interactive again.
+    // Fail safe: a click-through window with no live renderer could never turn interactive again
+    // (and a drag it started could never end).
+    endDrag();
     applyMouseIgnore(false);
     if (state.quitting || details.reason === 'clean-exit') return;
     if (++state.rendererCrashes <= 3) setTimeout(() => loadRenderer(win), 1000);
@@ -491,7 +504,8 @@ function applyMouseIgnore(wantIgnore) {
   if (!win || win.isDestroyed()) return;
   // Without forwarded mouse moves (Linux) the renderer could never turn interactivity back on.
   const allowed = CLICK_THROUGH_SUPPORTED && !!state.settings?.get().window.clickThrough;
-  const ignore = allowed && wantIgnore;
+  // never click-through mid-drag: the button-up must reach the renderer
+  const ignore = allowed && wantIgnore && !state.drag;
   if (state.ignoreMouse === ignore) return;
   state.ignoreMouse = ignore;
   win.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
@@ -508,6 +522,72 @@ function syncCursorTracking() {
   if (!state.cursor) return;
   if (cursorTrackingWanted()) state.cursor.start();
   else state.cursor.stop();
+}
+
+/**
+ * The renderer pressed the primary button on the head: follow the global cursor (~60 Hz) until
+ * it reports the release. Moving starts only past DRAG_THRESHOLD, so a click stays a click.
+ */
+function startDrag() {
+  const win = state.win;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+  if (state.settings?.get().window.lockPosition) return;
+  endDrag();
+  applyMouseIgnore(false);
+  const drag = {
+    from: screen.getCursorScreenPoint(),
+    start: win.getBounds(),
+    moving: false,
+    startedAt: Date.now(),
+    timer: setInterval(() => stepDrag(), 16),
+  };
+  state.drag = drag;
+}
+
+function stepDrag() {
+  const drag = state.drag;
+  const win = state.win;
+  if (!drag) return;
+  if (!win || win.isDestroyed() || Date.now() - drag.startedAt > DRAG_MAX_MS) {
+    endDrag();
+    return;
+  }
+  const next = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), drag.moving);
+  if (!next) return;
+  drag.moving = true;
+  const cur = win.getBounds();
+  // setBounds (not setPosition): on Windows with fractional display scaling setPosition can
+  // grow the window by a pixel per call; fixed width/height keep the 2:3 avatar exact.
+  if (cur.x !== next.x || cur.y !== next.y || cur.width !== next.width || cur.height !== next.height) win.setBounds(next);
+}
+
+/** Pointer released (or the drag was abandoned): settle fully onto a display and save. */
+function endDrag() {
+  const drag = state.drag;
+  if (!drag) return;
+  clearInterval(drag.timer);
+  state.drag = null;
+  const win = state.win;
+  if (!drag.moving || !win || win.isDestroyed()) return;
+  stepDragFinal(win, drag);
+}
+
+/** @param {import('electron').BrowserWindow} win @param {NonNullable<typeof state.drag>} drag */
+function stepDragFinal(win, drag) {
+  const last = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), true) || win.getBounds();
+  const next = settleDrop(last, screen.getAllDisplays(), screen.getPrimaryDisplay());
+  win.setBounds(next);
+  savePosition();
+}
+
+/** "Reset position": back to the default corner of the display the window is on. */
+function resetPosition() {
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  endDrag();
+  const b = win.getBounds();
+  win.setBounds(defaultBounds({ width: b.width, height: b.height }, screen.getDisplayMatching(b).workArea));
+  savePosition();
 }
 
 function savePosition() {
@@ -605,6 +685,8 @@ const trayActions = {
   setShowChat: (/** @type {boolean} */ on) => state.settings?.update({ window: { showChat: on } }),
   setMode: (/** @type {string} */ mode) => state.settings?.update({ claude: { mode } }),
   setSizePreset: (/** @type {string} */ preset) => state.settings?.update({ window: { sizePreset: preset } }),
+  setLockPosition: (/** @type {boolean} */ on) => state.settings?.update({ window: { lockPosition: on } }),
+  resetPosition: () => resetPosition(),
   newConversation: () => {
     state.claude?.reset().catch((err) => state.log('warn', `[claude] reset failed: ${err.message}`));
   },
@@ -748,6 +830,18 @@ function registerIpc() {
   on('lm:window:set-ignore-mouse', (ignore) => applyMouseIgnore(validateBoolean(ignore, 'ignore')));
   on('lm:window:set-size-preset', (preset) => settings.update({ window: { sizePreset: validateSizePreset(preset) } }));
   on('lm:window:set-always-on-top', (onTop) => settings.update({ window: { alwaysOnTop: validateBoolean(onTop, 'alwaysOnTop') } }));
+  on('lm:window:drag-start', (...args) => {
+    validateNoArgs(args);
+    startDrag();
+  });
+  on('lm:window:drag-end', (...args) => {
+    validateNoArgs(args);
+    endDrag();
+  });
+  on('lm:window:reset-position', (...args) => {
+    validateNoArgs(args);
+    resetPosition();
+  });
   on('lm:window:minimize', () => state.win?.minimize());
   on('lm:window:hide', () => state.win?.hide());
   on('lm:window:quit', () => app.quit());
@@ -852,7 +946,7 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
+export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
 
 // scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
 // through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).

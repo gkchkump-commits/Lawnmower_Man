@@ -123,25 +123,12 @@ body[data-chat="minimal"] #app {
   display: block;
 }
 
-/* Drag the window by the head (Electron); interactive things opt out with .no-drag. */
-.drag-zone {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.dz {
-  position: absolute;
-  pointer-events: auto;
-  -webkit-app-region: drag;
-  cursor: grab;
-}
-.dz-top { left: 31%; right: 31%; top: 4%; height: 14%; }
-.dz-mid { left: 19%; right: 19%; top: 18%; height: 46%; }
-.dz-low { left: 30%; right: 30%; top: 64%; height: 16%; }
-.no-drag,
-.no-drag * {
-  -webkit-app-region: no-drag;
-}
+/* Moving the window: press on the head (or the status bar / settings header) and drag. The main
+   process moves the window (src/app/window-drag.js); no CSS drag regions, they break
+   click-through on Windows. */
+body[data-over-head="1"]:not([data-lock="1"]) .stage { cursor: grab; }
+body[data-dragging="1"],
+body[data-dragging="1"] * { cursor: grabbing !important; }
 
 /* WebGL unavailable: a CSS orb so there is still a face. */
 .avatar-fallback {
@@ -734,9 +721,10 @@ body[data-state="transcribing"] .mic-btn {
   color: var(--muted);
   font-size: 10.5px;
   white-space: nowrap;
-  -webkit-app-region: drag;
+  cursor: grab;
 }
-.statusbar button { -webkit-app-region: no-drag; }
+.statusbar button { cursor: pointer; }
+body[data-lock="1"] .statusbar { cursor: default; }
 .status-dot {
   width: 6px;
   height: 6px;
@@ -1056,9 +1044,10 @@ body[data-state="speaking"] .status-dot { background: var(--gold); box-shadow: 0
   justify-content: space-between;
   padding: 10px 10px 8px 14px;
   border-bottom: 1px solid var(--line);
-  -webkit-app-region: drag;
+  cursor: grab;
 }
-.drawer-head button { -webkit-app-region: no-drag; }
+.drawer-head button { cursor: pointer; }
+body[data-lock="1"] .drawer-head { cursor: default; }
 .drawer-head h2 {
   display: flex;
   align-items: center;

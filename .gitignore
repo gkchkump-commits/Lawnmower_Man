@@ -22,3 +22,5 @@ voice/models/
 tools/bake/.cache/
 *.mp4
 !docs/**/*.mp4
+# Claude Code agent worktrees
+.claude/worktrees/

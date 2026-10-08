@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     position: /** @type {{x:number,y:number}|null} */ (null),
     showChat: true,
     skipTaskbar: false, // extension to §4: hide the taskbar button (tray icon stays)
+    lockPosition: false, // true: pressing on the head does not move the window
   },
   hotkeys: {
     // Linux/macOS defaults; Windows uses WIN32_HOTKEYS (see defaultSettings()).
@@ -239,6 +240,7 @@ const SCHEMA = {
     position: position(),
     showChat: bool(),
     skipTaskbar: bool(),
+    lockPosition: bool(),
   },
   hotkeys: {
     toggleListen: accelerator(),

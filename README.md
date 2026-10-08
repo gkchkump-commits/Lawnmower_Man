@@ -82,10 +82,11 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | **Ctrl+Shift+F10** (global; Linux/macOS: Ctrl+Alt+X) | stop speaking |
 | **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
-| drag the head | move the window |
-| tray icon | show/hide, always on top, click-through, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
+| drag the head (or the chat's status bar) | move the window; it settles fully on the screen you drop it on and remembers the place |
+| **Ctrl + mouse wheel** over the head | bigger / smaller (small, medium, large) |
+| tray icon | show/hide, always on top, click-through, lock / reset position, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
-Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
+Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
 Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
 

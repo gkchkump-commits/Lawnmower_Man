@@ -10,15 +10,12 @@
   </head>
   <body data-state="idle" data-chat="full" data-panel="shown" data-boot="loading">
     <div id="app">
-      <!-- Avatar area: the hologram canvas, a drag zone over the head, window toolbar,
-           toasts and permission cards. Transparent everywhere the head isn't. -->
+      <!-- Avatar area: the hologram canvas (press on the head to move the window), window
+           toolbar, toasts and permission cards. Transparent everywhere the head isn't. -->
       <section id="stage" class="stage" aria-label="Claude">
         <canvas id="avatar" class="avatar-canvas"></canvas>
         <div class="avatar-fallback" aria-hidden="true">
           <div class="orb"><span class="eye l"></span><span class="eye r"></span><span class="mouth"></span></div>
-        </div>
-        <div class="drag-zone" aria-hidden="true">
-          <i class="dz dz-top"></i><i class="dz dz-mid"></i><i class="dz dz-low"></i>
         </div>
         <nav class="toolbar no-drag" aria-label="Window controls">
           <button id="btn-new" type="button" class="icon-btn" aria-label="New conversation" title="New conversation">

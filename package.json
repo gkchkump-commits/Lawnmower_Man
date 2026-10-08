@@ -33,6 +33,7 @@
     "test:packaged": "node scripts/electron-e2e.mjs --packaged"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "1.1.0",
     "three": "^0.186.1"
   },
   "devDependencies": {

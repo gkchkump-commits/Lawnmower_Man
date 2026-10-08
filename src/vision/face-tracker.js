@@ -1,0 +1,280 @@
+// FaceTracker: feeds camera frames to the Face Landmarker and reports one FaceObservation (or
+// null) per processed frame.
+//
+//  * The landmarker runs in a module worker (face-worker.js). Each tick grabs a small frame
+//    (~320 px wide) from the <video> with createImageBitmap — cheap and asynchronous on the main
+//    thread — and transfers it; the next frame is only sent once the worker answered, so detection
+//    never queues up behind a slow machine.
+//  * If the worker cannot start (no module workers, no OffscreenCanvas WebGL, …) it falls back
+//    to running the landmarker on the main thread, capped at a low rate.
+//  * The rate is set by the caller (setRate): ~12/s while someone is there, a few per second to
+//    notice someone arriving, 0 to pause.
+//
+// Events: 'ready' ({ mode: 'worker'|'main', delegate, ms }), 'observation' ({ obs, t, ms }),
+//         'error' (Error; fatal ones also stop the tracker), 'mode' (the fallback kicked in).
+/* global Worker, createImageBitmap */
+
+import { Emitter } from '../app/emitter.js';
+import { visionAssetUrls } from './assets.js';
+
+export { visionAssetUrls };
+
+/** Width of the frames sent to the detector (the face detector itself works on 128 px). */
+export const DETECT_WIDTH = 320;
+/** The main-thread fallback never runs faster than this (it shares the thread with rendering). */
+export const MAIN_THREAD_MAX_HZ = 4;
+
+/** Detector frame size for a video of w×h (keeps the aspect ratio). @param {number} w @param {number} h */
+export function detectSize(w, h, maxW = DETECT_WIDTH) {
+  if (!(w > 0) || !(h > 0)) return { width: 0, height: 0 };
+  const k = Math.min(1, maxW / w);
+  return { width: Math.max(1, Math.round(w * k)), height: Math.max(1, Math.round(h * k)) };
+}
+
+export class FaceTracker extends Emitter {
+  /**
+   * @param {object} [o]
+   * @param {() => Worker} [o.createWorker]   tests / custom builds
+   * @param {() => Promise<{ createFaceEngine: Function }>} [o.loadEngine]  main-thread fallback
+   * @param {{ wasmBase: string, modelUrl: string }} [o.urls]
+   * @param {() => number} [o.now]
+   */
+  constructor(o = {}) {
+    super();
+    this._createWorker = o.createWorker || (() => new Worker(new URL('./face-worker.js', import.meta.url), { type: 'module', name: 'face-tracker' }));
+    this._loadEngine = o.loadEngine || (() => import('./landmarker.js'));
+    this._urls = o.urls || null;
+    this._now = o.now || (() => performance.now());
+    /** @type {HTMLVideoElement|null} */
+    this.video = null;
+    /** @type {'idle'|'starting'|'worker'|'main'|'failed'} */
+    this.mode = 'idle';
+    this.rate = 0;
+    this.delegate = '';
+    /** Last detection time in ms (worker or main thread), for the info panel. */
+    this.lastMs = 0;
+    this.frames = 0;
+    /** @type {Worker|null} */
+    this._worker = null;
+    /** @type {any} */
+    this._engine = null;
+    this._timer = /** @type {any} */ (0);
+    this._inFlight = false;
+    this._seq = 0;
+    this._lastSent = -Infinity;
+    /** @type {Promise<void>|null} */
+    this._starting = null;
+    this._gen = 0;
+  }
+
+  get running() {
+    return this.mode === 'worker' || this.mode === 'main';
+  }
+
+  /**
+   * Load the landmarker (worker first, then the main-thread fallback). Resolves when ready;
+   * rejects (and emits 'error') when neither works.
+   */
+  start() {
+    if (this._starting) return this._starting;
+    const gen = ++this._gen;
+    this.mode = 'starting';
+    this._starting = this._startWorker(gen)
+      .catch((err) => {
+        if (gen !== this._gen) throw err;
+        console.warn('[vision] face tracker worker unavailable, using the main thread:', err?.message || err);
+        this.emit('mode', 'main');
+        return this._startMain(gen);
+      })
+      .catch((err) => {
+        if (gen === this._gen) {
+          this.mode = 'failed';
+          this._starting = null;
+          this.emit('error', Object.assign(new Error(`Face tracking could not start: ${err?.message || err}`), { fatal: true }));
+        }
+        throw err;
+      });
+    return this._starting;
+  }
+
+  /** @param {HTMLVideoElement|null} video */
+  setVideo(video) {
+    this.video = video;
+    this._schedule(0);
+  }
+
+  /** Detections per second (0 pauses). @param {number} hz */
+  setRate(hz) {
+    const r = Math.max(0, Number(hz) || 0);
+    if (r === this.rate) return;
+    this.rate = r;
+    this._schedule(0);
+  }
+
+  /** Stop and release the worker / engine. */
+  stop() {
+    this._gen++;
+    clearTimeout(this._timer);
+    this._timer = 0;
+    this._inFlight = false;
+    this._starting = null;
+    if (this._worker) {
+      try { this._worker.postMessage({ type: 'close' }); } catch { /* gone */ }
+      const w = this._worker;
+      setTimeout(() => { try { w.terminate(); } catch { /* ignore */ } }, 500);
+    }
+    this._worker = null;
+    this._engine?.close?.();
+    this._engine = null;
+    this.mode = 'idle';
+  }
+
+  dispose() {
+    this.stop();
+    this.removeAllListeners();
+  }
+
+  // ------------------------------------------------------------------------------------------
+
+  /** @param {number} gen */
+  _startWorker(gen) {
+    return new Promise((resolve, reject) => {
+      /** @type {Worker} */
+      let w;
+      try {
+        w = this._createWorker();
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const t0 = this._now();
+      const timeout = setTimeout(() => fail(new Error('the face tracker worker did not start within 30 s')), 30_000);
+      const fail = (/** @type {any} */ err) => {
+        clearTimeout(timeout);
+        try { w.terminate(); } catch { /* ignore */ }
+        if (this._worker === w) this._worker = null;
+        reject(err instanceof Error ? err : new Error(String(err?.message || err)));
+      };
+      w.addEventListener('error', (e) => {
+        // a load/parse error of the worker script itself
+        e.preventDefault?.();
+        if (this.mode === 'starting') fail(new Error(e.message || 'the worker script failed to load'));
+        else this.emit('error', new Error(e.message || 'face tracker worker error'));
+      });
+      w.addEventListener('message', (e) => {
+        const m = /** @type {any} */ (e).data || {};
+        if (gen !== this._gen) return;
+        if (m.type === 'ready') {
+          clearTimeout(timeout);
+          this.mode = 'worker';
+          this.delegate = m.delegate || '';
+          this.emit('ready', { mode: 'worker', delegate: this.delegate, ms: Math.round(this._now() - t0) });
+          resolve();
+          this._schedule(0);
+        } else if (m.type === 'result') {
+          this._onResult(m.obs ?? null, m.ms || 0, !!m.skipped);
+        } else if (m.type === 'error') {
+          if (m.fatal && this.mode === 'starting') fail(new Error(m.message));
+          else {
+            this._inFlight = false;
+            this.emit('error', new Error(m.message));
+            this._schedule();
+          }
+        }
+      });
+      this._worker = w;
+      w.postMessage({ type: 'init', ...(this._urls || visionAssetUrls()) });
+    });
+  }
+
+  /** @param {number} gen */
+  async _startMain(gen) {
+    const t0 = this._now();
+    const { createFaceEngine } = await this._loadEngine();
+    const engine = await createFaceEngine(this._urls || visionAssetUrls());
+    if (gen !== this._gen) {
+      engine.close();
+      return;
+    }
+    this._engine = engine;
+    this.mode = 'main';
+    this.delegate = engine.delegate || '';
+    this.emit('ready', { mode: 'main', delegate: this.delegate, ms: Math.round(this._now() - t0) });
+    this._schedule(0);
+  }
+
+  _interval() {
+    const hz = this.mode === 'main' ? Math.min(this.rate, MAIN_THREAD_MAX_HZ) : this.rate;
+    return hz > 0 ? 1000 / hz : Infinity;
+  }
+
+  /** Plan the next frame grab. @param {number} [delay] */
+  _schedule(delay) {
+    clearTimeout(this._timer);
+    this._timer = 0;
+    if (!this.running || this._inFlight || !this.video) return;
+    const iv = this._interval();
+    if (!Number.isFinite(iv)) return;
+    const wait = delay !== undefined ? Math.max(0, this._lastSent + iv - this._now(), delay) : Math.max(0, this._lastSent + iv - this._now());
+    this._timer = setTimeout(() => this._grab(), wait);
+  }
+
+  async _grab() {
+    this._timer = 0;
+    const v = this.video;
+    if (!this.running || this._inFlight || !v) return;
+    if (v.readyState < 2 || !v.videoWidth) {
+      this._timer = setTimeout(() => this._grab(), 100);
+      return;
+    }
+    const gen = this._gen;
+    const { width, height } = detectSize(v.videoWidth, v.videoHeight);
+    this._inFlight = true;
+    this._lastSent = this._now();
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(v, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' });
+    } catch {
+      // the video has no frame right now (device switching): try again on the next tick
+      this._inFlight = false;
+      if (gen === this._gen) this._schedule();
+      return;
+    }
+    if (gen !== this._gen) {
+      bitmap.close();
+      return;
+    }
+    const t = this._now();
+    const id = ++this._seq;
+    if (this.mode === 'worker' && this._worker) {
+      this._worker.postMessage({ type: 'frame', id, bitmap, width, height, t }, [bitmap]);
+      this._sentAt = t;
+      return;
+    }
+    if (this.mode === 'main' && this._engine) {
+      let obs = null;
+      try {
+        obs = this._engine.detect(bitmap, width, height, t);
+      } catch (err) {
+        this.emit('error', err);
+      } finally {
+        bitmap.close();
+      }
+      this._onResult(obs, Math.round((this._now() - t) * 10) / 10, false);
+      return;
+    }
+    bitmap.close();
+    this._inFlight = false;
+  }
+
+  /** @param {any} obs @param {number} ms @param {boolean} skipped */
+  _onResult(obs, ms, skipped) {
+    this._inFlight = false;
+    if (!skipped) {
+      this.frames++;
+      this.lastMs = ms;
+      this.emit('observation', { obs, t: this._now(), ms });
+    }
+    this._schedule();
+  }
+}

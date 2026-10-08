@@ -89,23 +89,32 @@ describe('AudioPlayer', () => {
     expect(errors).toEqual(['not a WAV file']);
   });
 
-  it('speech clips go through the Web Speech wrapper, forwarding word boundaries', async () => {
+  it('speech clips go through the Web Speech wrapper, forwarding the start and word boundaries', async () => {
     const spoken = [];
     const speech = {
       speak: async (text, o) => {
         spoken.push([text, o.rate]);
+        await tick(2);
         o.onStart?.();
-        o.onBoundary?.('hello');
+        o.onBoundary?.('hello', { charIndex: 0, charLength: 5 });
+        o.onBoundary?.('world');
         await tick(5);
       },
       cancel() {},
     };
     const p = new AudioPlayer({ createContext: () => { throw new Error('no audio'); }, speech });
     const words = [];
-    p.on('boundary', (e) => words.push(e.word));
-    await p.enqueue({ kind: 'speech', text: 'hello world', rate: 1.2 });
+    const events = [];
+    const clip = { kind: 'speech', text: 'hello world', rate: 1.2 };
+    p.on('start', (c) => events.push(['start', c === clip]));
+    p.on('speechstart', (c) => events.push(['speechstart', c === clip]));
+    p.on('boundary', (e) => words.push(e));
+    await p.enqueue(clip);
     expect(spoken).toEqual([['hello world', 1.2]]);
-    expect(words).toEqual(['hello']);
+    expect(events).toEqual([['start', true], ['speechstart', true]]);
+    expect(words.map((w) => w.word)).toEqual(['hello', 'world']);
+    expect(words[0]).toMatchObject({ charIndex: 0, charLength: 5, clip });
+    expect(words[1].charIndex).toBeUndefined();
   });
 
   it('toAudioBuffer accepts raw samples', () => {

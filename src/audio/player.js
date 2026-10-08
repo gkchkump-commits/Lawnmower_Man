@@ -7,7 +7,9 @@
 // lip-sync reads for level/spectrum; `current.time` is the playback clock of the clip (output
 // latency compensated) used to sample viseme timelines.
 //
-// Events: 'start' (clip), 'end' (clip, { stopped }), 'idle', 'boundary' ({ word, clip }), 'error' (err, clip)
+// Events: 'start' (clip), 'end' (clip, { stopped }), 'idle', 'error' (err, clip), and for speech
+// clips 'speechstart' (clip: the voice really started) and 'boundary' ({ word, charIndex,
+// charLength, clip }: a word starts; charIndex into clip.text when the voice reports it)
 
 import { Emitter } from '../app/emitter.js';
 import { base64ToBytes, decodeWav } from './wav.js';
@@ -248,8 +250,14 @@ export class AudioPlayer extends Emitter {
     Promise.resolve()
       .then(() => speech.speak(clip.text, {
         rate: clip.rate,
-        onStart: () => { if (this._playing === entry) entry.startAt = this._now(); },
-        onBoundary: (/** @type {string} */ word) => { if (this._playing === entry) this.emit('boundary', { word, clip }); },
+        onStart: () => {
+          if (this._playing !== entry) return;
+          entry.startAt = this._now();
+          this.emit('speechstart', clip);
+        },
+        onBoundary: (/** @type {string} */ word, /** @type {{ charIndex?: number, charLength?: number }} */ info) => {
+          if (this._playing === entry) this.emit('boundary', { word, charIndex: info?.charIndex, charLength: info?.charLength, clip });
+        },
       }))
       .catch((err) => {
         if (this._playing === entry) this.emit('error', err, clip);

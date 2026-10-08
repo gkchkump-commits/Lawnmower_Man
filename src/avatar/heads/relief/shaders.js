@@ -52,16 +52,20 @@ vec2 plateUv(vec3 p) {
 export const FACE_VERT = /* glsl */ `
 ${RIG_CHUNK}
 attribute float aEdge;
+attribute float aSlitD;     // rest px below the closed-mouth slit (+ = below; lip warp)
+uniform vec3 uMouth;        // mouth centre x, y (world, rest), half width (world)
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
 varying float vFace;
+varying vec2 vLip;          // (px below the slit, x across the mouth in half widths)
 void main() {
   vUv = uv;
   vec3 p = applyRig(position);
   vUv2 = plateUv(p);
   vEdge = aEdge;
   vFace = aW2.w;
+  vLip = vec2(aSlitD, (position.x - uMouth.x) / uMouth.z);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(applyHead(p), 1.0);
 }`;
 
@@ -92,10 +96,12 @@ uniform vec3 uColLine;
 uniform vec3 uColRim;
 uniform vec3 uColEye;
 uniform vec3 uColGrid;
+uniform vec4 uLipWarp;      // px: upper thinning, contact, lower lip rise, lower thinning
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
 varying float vFace;
+varying vec2 vLip;
 
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -122,8 +128,33 @@ void main() {
   float ap = mB.r;
   vec2 suv = vUv;
   if (mB.g > 0.001) suv -= (vUv.x < 0.5 ? gazeWarp(vUv, uEyeL) : gazeWarp(vUv, uEyeR));
+  // Lips pressed (m b p) or tucked (f v): the lip texture is compressed toward the seam (thinner,
+  // rolled-in lips), the rest gap is skipped (the lips meet) and a tucked lower lip rises. The
+  // displacement fades out over ~1.5 lip heights, so the mapping never folds.
+  // (sampling gradients of the unwarped uv: the warp is discontinuous at the seam, where
+  // implicit derivatives would pick a blurry mip level; 0.66 = the -0.6 LOD bias below)
+  vec2 gdx = dFdx(vUv) * 0.66, gdy = dFdy(vUv) * 0.66;
+  float contact = 0.0;
+  bool lipWarp = false;
+  if (abs(vLip.y) < 1.25 && abs(vLip.x) < 120.0 && dot(uLipWarp, vec4(1.0)) > 0.001) {
+    float d = vLip.x;
+    float ad = abs(d);
+    float lower = step(0.0, d);
+    float band = mix(32.0, 48.0, lower);
+    // the skin around the lips takes up the displacement over ~2 lip heights (gently, so the
+    // grid is never visibly stretched); a purely geometric falloff: the mouth mask's edge is
+    // too uneven to shape a displacement with
+    float fall = (1.0 - smoothstep(0.5, 2.2, ad / band)) * (1.0 - smoothstep(0.85, 1.2, abs(vLip.y)));
+    float k = mix(uLipWarp.x, uLipWarp.w, lower);
+    float shift = (k * min(ad, band) + uLipWarp.y + lower * uLipWarp.z) * fall;
+    suv.y -= (lower * 2.0 - 1.0) * shift / uPlateSize.y;
+    contact = uLipWarp.y * fall * exp(-d * d / 2.5);
+    lipWarp = shift > 0.01;
+  }
   // (mipmapped: a slight negative LOD bias keeps the fine grid crisp when minified)
   vec3 col = texture2D(tPlate, suv, -0.6).rgb;
+  if (lipWarp) col = textureGrad(tPlate, suv, gdx, gdy).rgb;
+  col *= 1.0 - 0.14 * contact;    // the line where pressed lips meet
   float baseLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
 
   // Blink = lid wipe. w (baked per pixel) is 0 on the open eye's lid margins, 1 on the closed
@@ -213,14 +244,18 @@ export const CAVITY_VERT = /* glsl */ `
 ${RIG_CHUNK}
 attribute float aLayer;
 attribute float aSlit;
+uniform vec3 uMouth;        // mouth centre x, y (world, rest), half width (world)
+uniform float uPxPerUnit;   // plate px per world unit
 varying vec2 vUvM;
 varying float vLayer;
 varying float vSlit;
+varying vec2 vTongue;       // (x across the mouth in half widths, px below the slit where it is now)
 void main() {
   vUvM = uv;
   vLayer = aLayer;
   vSlit = aSlit;
   vec3 p = applyRig(position);
+  vTongue = vec2((p.x - uMouth.x) / uMouth.z, aSlit + (position.y - p.y) * uPxPerUnit);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(applyHead(p), 1.0);
 }`;
 
@@ -229,19 +264,45 @@ uniform sampler2D tMouth;
 uniform float uTeeth;      // teeth visibility (an O / U pucker shows the dark interior, few teeth)
 uniform vec3 uDark;
 uniform float uSleep;
+uniform float uTongue;     // tongue tip at the teeth (th, l)
+uniform float uTeethShift; // mouth-texture v: the upper incisors follow a lifted upper lip
+uniform float uJawPx;      // jaw drop (plate px)
+uniform vec3 uColLine;
 varying vec2 vUvM;
 varying float vLayer;
 varying float vSlit;
+varying vec2 vTongue;
+
+// Tongue tip: a soft rounded tip between the teeth, just under the upper incisors, riding half
+// way down with the jaw. Warm and dim like the rest of the interior (lit by the gold lips).
+vec4 tongueTip() {
+  if (uTongue < 0.004) return vec4(0.0);
+  float cy = 4.0 + 0.45 * uJawPx;
+  vec2 q = vec2(vTongue.x / (0.3 + 0.06 * uTongue), (vTongue.y - cy) / (5.5 + 0.12 * uJawPx));
+  float r = length(q);
+  float m = (1.0 - smoothstep(0.7, 1.0, r)) * smoothstep(0.0, 0.25, uTongue);
+  vec3 body = mix(vec3(0.075, 0.03, 0.024), uColLine * 0.2, 0.3);
+  body *= 0.55 + 0.9 * smoothstep(0.4, -0.9, q.y) * (1.0 - 0.7 * r);  // its upper edge catches light
+  return vec4(body, m);
+}
+
 void main() {
-  vec3 c = texture2D(tMouth, vUvM).rgb;
   float vis = smoothstep(0.02, 0.2, uTeeth);  // teeth only once the lips actually part
+  vec4 tg = tongueTip();
   if (vLayer > 0.5) {
-    float a = smoothstep(0.03, 0.16, max(c.r, max(c.g, c.b))) * vis;
+    vec3 c = texture2D(tMouth, vUvM).rgb;
+    // the tongue tip sits in front of the lower teeth
+    float a = smoothstep(0.03, 0.16, max(c.r, max(c.g, c.b))) * vis * (1.0 - tg.a);
     if (a < 0.01) discard;
     gl_FragColor = vec4(c * a * 0.92, a);
   } else {
+    vec3 c = texture2D(tMouth, vUvM - vec2(0.0, uTeethShift)).rgb;
     float shade = mix(0.3, 1.0, smoothstep(0.0, 6.0, vSlit));   // shadow under the upper lip
-    c = mix(uDark, c, vis) * shade * (1.0 - 0.4 * uSleep);
+    c = mix(uDark, c, vis);
+    // ... and behind the upper incisors' edge
+    float teethLum = smoothstep(0.05, 0.25, max(c.r, max(c.g, c.b))) * vis;
+    c = mix(c, tg.rgb, tg.a * (1.0 - 0.45 * teethLum));
+    c = c * shade * (1.0 - 0.4 * uSleep);
     gl_FragColor = vec4(c, 1.0);
   }
 }`;

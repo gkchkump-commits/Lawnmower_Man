@@ -29,6 +29,11 @@ import { clamp, clamp01, expApproach, fbm1, lerp, mulberry32, noise1 } from './n
  * @property {number} speak      0..1 state weight
  * @property {number} error      0..1 state weight
  * @property {number} sleep      0..1 state weight
+ * @property {number} mouthPress  0..1 lips pressed / rolled in (m b p)
+ * @property {number} mouthTuck   0..1 lower lip under the upper teeth (f v)
+ * @property {number} mouthTeeth  0..1 upper lip raised, teeth show (s z, ee)
+ * @property {number} mouthTongue 0..1 tongue tip at the teeth (th, l)
+ * @property {number} mouthAsym   -1..1 left/right asymmetry of the lips (+ = screen-left corner higher)
  */
 
 export const STATES = /** @type {const} */ (['idle', 'listening', 'thinking', 'speaking', 'error', 'sleep']);
@@ -37,6 +42,7 @@ export const STATES = /** @type {const} */ (['idle', 'listening', 'thinking', 's
 export const ANIM_KEYS = /** @type {const} */ ([
   'jawOpen', 'mouthWide', 'mouthRound', 'smile', 'blinkL', 'blinkR', 'gazeX', 'gazeY', 'browUp',
   'headYaw', 'headPitch', 'headRoll', 'breath', 'speech', 'energy', 'listen', 'think', 'speak', 'error', 'sleep',
+  'mouthPress', 'mouthTuck', 'mouthTeeth', 'mouthTongue', 'mouthAsym',
 ]);
 
 /** @returns {AnimState} the rest pose */
@@ -45,7 +51,48 @@ export function createAnimState() {
     jawOpen: 0, mouthWide: 0, mouthRound: 0, smile: 0, blinkL: 0, blinkR: 0, gazeX: 0, gazeY: 0,
     browUp: 0, headYaw: 0, headPitch: 0, headRoll: 0, breath: 0, speech: 0, energy: 0.5,
     listen: 0, think: 0, speak: 0, error: 0, sleep: 0,
+    mouthPress: 0, mouthTuck: 0, mouthTeeth: 0, mouthTongue: 0, mouthAsym: 0,
   };
+}
+
+/**
+ * Lip-sync smoothing per mouth channel: [attack tau, release tau] (s). The lip-sync output is
+ * already coarticulated and smooth, so these only add the inertia of real tissue: lips press
+ * and tuck fast, rounding is slower; the jaw opens fast and closes a bit slower, except into a
+ * closure (see update()).
+ */
+export const MOUTH_TAU = Object.freeze({
+  jaw: [0.03, 0.045], wide: [0.04, 0.06], round: [0.05, 0.07], press: [0.012, 0.035], tuck: [0.018, 0.04],
+  teeth: [0.03, 0.05], tongue: [0.025, 0.05],
+});
+const MOUTH_IN = /** @type {const} */ (['jaw', 'wide', 'round', 'press', 'tuck', 'teeth', 'tongue']);
+const MOUTH_OUT = /** @type {const} */ ({
+  jaw: 'jawOpen', wide: 'mouthWide', round: 'mouthRound', press: 'mouthPress', tuck: 'mouthTuck',
+  teeth: 'mouthTeeth', tongue: 'mouthTongue',
+});
+
+/**
+ * Speech prosody cue (from the lip-sync, see src/audio/articulation.js):
+ *   accent      a stressed syllable starts (a small nod; strength 0..1)
+ *   emphasis    an emphasised word (brow raise + a firmer nod)
+ *   phrase-start / phrase-end  (punct: , ; . ! ? — ; friendly 0..1 at a sentence end)
+ * @typedef {{ type: 'accent'|'emphasis'|'phrase-start'|'phrase-end', strength?: number, punct?: string,
+ *   friendly?: number }} ProsodyCue
+ */
+
+/** Impulse response that peaks (1) at x = tau and decays: a nod, a lift. */
+function bump(x, tau) {
+  if (x <= 0) return 0;
+  const u = x / tau;
+  return u * Math.exp(1 - u);
+}
+
+/** Attack / hold / release envelope (0..1) at x seconds. */
+function envelope(x, a, h, r) {
+  if (x <= 0) return 0;
+  if (x < a) return smooth01(x / a);
+  if (x < a + h) return 1;
+  return 1 - smooth01((x - a - h) / r);
 }
 
 // Blink envelope (seconds): fast close, short hold, slower open.
@@ -94,8 +141,21 @@ export class Director {
     this._time = 0;
     this._started = false;
     // inputs
-    this._mouth = { jaw: 0, wide: 0, round: 0, at: -Infinity };
+    this._mouth = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, at: -Infinity };
     this._speechTarget = 0;
+    // speech prosody (secondary motion): active impulses { at, kind, amp, ... }
+    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number }>} */
+    this._kicks = [];
+    this._lastAccent = -Infinity;
+    this._lastCue = -Infinity;
+    this._blinkDeferred = false;
+    this._phraseYaw = 0;
+    this._phraseYawS = 0;
+    // prosody and asymmetry draw from their own generator, so the idle blinks / saccades of a
+    // seed stay what they were
+    this.rng2 = mulberry32(this.seed * 104729 + 3);
+    // a speaker's lips are a little lopsided, always to the same side
+    this._asymBias = (this.rng2() < 0.5 ? -1 : 1) * (0.35 + 0.3 * this.rng2());
     this._expr = { smile: 0, browUp: 0 };
     this._look = /** @type {null | {x:number,y:number}} */ (null);
     // blink scheduler
@@ -134,12 +194,69 @@ export class Director {
 
   get state() { return this.current; }
 
-  /** Lip-sync target (0..1 each). @param {{jaw?:number, wide?:number, round?:number}} m */
+  /**
+   * Lip-sync target (0..1 each; a missing field means 0).
+   * @param {{jaw?:number, wide?:number, round?:number, press?:number, tuck?:number, teeth?:number, tongue?:number}} m
+   */
   setMouth(m) {
-    this._mouth.jaw = clamp01(m?.jaw ?? 0);
-    this._mouth.wide = clamp01(m?.wide ?? 0);
-    this._mouth.round = clamp01(m?.round ?? 0);
+    for (const k of MOUTH_IN) this._mouth[k] = clamp01(Number(m?.[k]) || 0);
     this._mouth.at = this._time;
+  }
+
+  /**
+   * Speech prosody cue(s) from the lip-sync: subtle head nods on stressed syllables and phrase
+   * starts, a brow raise on emphasis and questions, blinks at phrase ends (not mid-word) and a
+   * micro-smile after a friendly sentence (the lip-sync sends cues only while speech plays;
+   * fixed-time renders ignore them).
+   * @param {ProsodyCue|ProsodyCue[]|null} cue
+   */
+  setProsody(cue) {
+    if (!cue) return;
+    if (Array.isArray(cue)) { for (const c of cue) this.setProsody(c); return; }
+    const t = this._time;
+    const s = clamp01(Number(cue.strength ?? 1));
+    this._lastCue = t;
+    switch (cue.type) {
+      case 'accent':
+        if (t - this._lastAccent < 0.2) return;           // one nod per syllable at most
+        this._lastAccent = t;
+        this._kick({ at: t, kind: 'nod', amp: 0.5 + 0.5 * s });
+        break;
+      case 'emphasis':
+        this._kick({ at: t, kind: 'brow', amp: 0.6 * s });
+        this._kick({ at: t, kind: 'nod', amp: 0.8 * s });
+        break;
+      case 'phrase-start':
+        this._kick({ at: t, kind: 'lift', amp: s });
+        // each phrase is said from a slightly different head angle
+        this._phraseYaw = (this.rng2() * 2 - 1) * 0.022 * s;
+        break;
+      case 'phrase-end': {
+        const p = cue.punct || '.';
+        if (p === '?') {
+          this._kick({ at: t, kind: 'brow', amp: 0.9 });
+          this._kick({ at: t, kind: 'tilt', amp: 1, dir: this.rng2() < 0.5 ? -1 : 1 });
+        } else if (p === '!') {
+          this._kick({ at: t, kind: 'brow', amp: 0.45 });
+          this._kick({ at: t, kind: 'nod', amp: 0.8 });
+        }
+        if (Number(cue.friendly) > 0) this._kick({ at: t + 0.05, kind: 'smile', amp: clamp01(Number(cue.friendly)) });
+        // blink at the phrase boundary: a deferred blink now, otherwise often
+        const sinceBlink = t - this._blinkStart;
+        if (this._blinkDeferred || (sinceBlink > 1.0 && this.rng2() < (/[.!?]/.test(p) ? 0.75 : 0.4))) {
+          this._blinkRequested = true;
+          this._blinkDeferred = false;
+        }
+        break;
+      }
+      default:
+    }
+  }
+
+  /** @param {{ at: number, kind: string, amp: number, dir?: number }} k */
+  _kick(k) {
+    this._kicks.push(k);
+    if (this._kicks.length > 24) this._kicks.shift();
   }
 
   /** @param {number} level 0..1 loudness envelope */
@@ -202,29 +319,53 @@ export class Director {
 
     // ---- mouth -------------------------------------------------------------------------------
     const age = time - this._mouth.at;
-    let jawT = this._mouth.jaw, wideT = this._mouth.wide, roundT = this._mouth.round;
+    const mt = this._mt || (this._mt = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0 });
+    for (const c of MOUTH_IN) mt[c] = this._mouth[c];
     if (!settle && age > 0.6) {
       // stale viseme target: relax (but keep speech-driven fallback below)
       const fade = clamp01((age - 0.6) / 0.25);
-      jawT *= 1 - fade; wideT *= 1 - fade; roundT *= 1 - fade;
+      for (const c of MOUTH_IN) mt[c] *= 1 - fade;
     }
     if (!settle && age > 0.3 && w.speaking > 0.1 && o.speech > 0.02) {
       // No visemes arriving (e.g. Web Speech fallback): derive a plausible jaw from loudness.
       const wobble = 0.75 + 0.25 * noise1(time * 9.0, this.seed + 5);
-      jawT = Math.max(jawT, clamp01(o.speech * 0.75 * wobble) * w.speaking);
+      mt.jaw = Math.max(mt.jaw, clamp01(o.speech * 0.75 * wobble) * w.speaking);
     }
     if (settle) {
-      o.jawOpen = jawT; o.mouthWide = wideT; o.mouthRound = roundT;
+      for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = mt[c];
     } else {
-      o.jawOpen = lipSmooth(o.jawOpen, jawT, dt, 0.035, 0.085);
-      o.mouthWide = lipSmooth(o.mouthWide, wideT, dt, 0.05, 0.1);
-      o.mouthRound = lipSmooth(o.mouthRound, roundT, dt, 0.06, 0.11);
+      // into a closure (lips pressing for m b p, tucking for f v) the jaw rises as fast as the
+      // lips close: a 50 ms "m" must really close, not just dip
+      const closing = clamp01(Math.max(mt.press, mt.tuck) * 1.6 - 0.4);
+      for (const c of MOUTH_IN) {
+        const [up, down] = MOUTH_TAU[c];
+        const key = MOUTH_OUT[c];
+        o[key] = lipSmooth(o[key], mt[c], dt, up, c === 'jaw' ? lerp(down, 0.012, closing) : down);
+      }
     }
+    // a little lopsided while talking (never at rest: the rest pose stays the reference)
+    const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
+    o.mouthAsym = settle ? 0 : clamp((this._asymBias + 0.6 * fbm1(time * 0.31, this.seed + 61)) * 0.4 * talk, -1, 1);
+
+    // ---- speech prosody: nods, phrase lifts, question tilts, brows, micro-smiles ----------------
+    let nod = 0, lift = 0, tilt = 0, browK = 0, smileK = 0;
+    if (!settle && this._kicks.length) {
+      this._kicks = this._kicks.filter((q) => time - q.at < 3);
+      for (const q of this._kicks) {
+        const x = time - q.at;
+        if (q.kind === 'nod') nod += q.amp * bump(x, 0.11);
+        else if (q.kind === 'lift') lift += q.amp * bump(x, 0.2);
+        else if (q.kind === 'tilt') tilt += q.amp * (q.dir || 1) * envelope(x, 0.25, 0.45, 0.6);
+        else if (q.kind === 'brow') browK = Math.max(browK, q.amp * envelope(x, 0.12, 0.3, 0.45));
+        else if (q.kind === 'smile') smileK = Math.max(smileK, q.amp * envelope(x, 0.3, 0.7, 1.2));
+      }
+    }
+    this._phraseYawS += (this._phraseYaw * w.speaking - this._phraseYawS) * k(0.5);
 
     // ---- expression ----------------------------------------------------------------------------
-    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error);
+    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error + 0.22 * smileK);
     const browT = clamp01(this._expr.browUp + 0.18 * w.listening + 0.1 * w.thinking + 0.25 * w.error
-      - 0.2 * w.sleep);
+      - 0.2 * w.sleep + 0.4 * browK);
     o.smile += (smileT * (1 - w.sleep) - o.smile) * k(0.25);
     o.browUp += (browT - o.browUp) * k(0.2);
 
@@ -232,7 +373,13 @@ export class Director {
     let blink = 0;
     if (!settle) {
       const busy = time - this._blinkStart < BLINK_TOTAL;
-      if (!busy && (this._blinkRequested || time >= this._nextBlink || time >= this._pendingDouble)) {
+      // While talking, a scheduled blink waits for the next phrase boundary (people blink
+      // between phrases, rarely mid-word), at most ~2 s.
+      const midPhrase = w.speaking > 0.5 && time - this._lastCue < 0.6;
+      const due = time >= this._nextBlink && !(midPhrase && time - this._nextBlink < 2);
+      if (!busy && time >= this._nextBlink && !due) this._blinkDeferred = true;
+      if (!busy && (this._blinkRequested || due || time >= this._pendingDouble)) {
+        this._blinkDeferred = false;
         const wasDouble = time >= this._pendingDouble;
         this._blinkStart = time;
         this._blinkRequested = false;
@@ -317,7 +464,10 @@ export class Director {
     this._yaw += (clamp(yawT, -0.35, 0.35) - this._yaw) * k(headTau);
     this._pitch += (clamp(pitchT, -0.25, 0.25) - this._pitch) * k(headTau);
     this._roll += (clamp(rollT, -0.2, 0.2) - this._roll) * k(headTau);
-    o.headYaw = this._yaw; o.headPitch = this._pitch; o.headRoll = this._roll;
+    // prosody rides on top (already smooth impulses; the head smoothing would swallow a nod)
+    o.headYaw = this._yaw + this._phraseYawS;
+    o.headPitch = this._pitch - 0.02 * nod + 0.012 * lift + 0.012 * Math.abs(tilt);
+    o.headRoll = this._roll + 0.03 * tilt;
 
     // ---- energy --------------------------------------------------------------------------------------
     const thinkPulse = 0.12 * (0.5 + 0.5 * Math.sin(time * 2.4));

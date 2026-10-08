@@ -235,6 +235,19 @@ span, weighted by class: vowels and diphthongs get the longest slots, stops the 
 
 Without `--token` or `LAWNMOWER_VOICE_TOKEN`, a token is generated and included in the `ready` line.
 
+### 2.3 Lip-sync in the renderer
+
+`src/audio/lipsync.js` samples the timeline at the playback clock with a 50 ms visual lead and
+blends neighbouring visemes with the renderer's coarticulation model (`src/audio/articulation.js`,
+dominance functions): closures (`PP`) and tucks (`FF`) stay crisp even when they are only 50 ms
+long, rounding (`O`, `U`) is anticipated by up to ~120 ms, long vowels count as stressed and open
+the jaw a little more, and the measured loudness scales the jaw. The 14 viseme ids above are the
+whole interface; nothing here needs the server to change.
+
+When the local voice is not running, the system voice speaks and there is no timeline: the
+renderer predicts one from the words (`src/audio/g2p.js`) and anchors it on the voice's word
+boundary events (details in [RENDERER.md](RENDERER.md#lip-sync)).
+
 ---
 
 ## 3. Research and decision (October 2026)

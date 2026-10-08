@@ -16,8 +16,9 @@ src/app/                 controller.js      conversation state machine (contract
                          gaze.js            cursor position (desktop-wide in Electron) → avatar.lookAt
                          settings-defaults.js renderer copy of the §4 defaults, getPath/patchFor
                          emitter.js         tiny event emitter
-src/audio/               player.js (Web Audio queue + analyser), lipsync.js, mic.js (+ mic-worklet.js),
-                         vad.js, dsp.js (resampler), wav.js
+src/audio/               player.js (Web Audio queue + analyser), lipsync.js (drivers), articulation.js
+                         (coarticulation model, speech plans), g2p.js (text → phonemes), mic.js
+                         (+ mic-worklet.js), vad.js, dsp.js (resampler), wav.js
 src/speech/              voice-client.js (voice server §6), web-speech.js (browser voice), index.js (tts/stt routing)
 src/ui/                  app-view.js, transcript.js, markdown.js, composer.js, permission-cards.js,
                          toasts.js, status.js, settings-drawer.js, accelerator.js, avatar-host.js, layout.js, dom.js
@@ -39,9 +40,8 @@ src/styles/app.css       the glass UI
   `voice.systemVoice`, or the most natural English one; the list refreshes on `voiceschanged`),
   otherwise text only. Up to two sentences
   are synthesized ahead of the one playing.
-* Lip-sync each frame: visemes at the playback clock (with coarticulation) → `avatar.setMouth`;
-  without visemes the audio spectrum drives the mouth; for browser speech, word boundaries drive
-  a syllable oscillator. Loudness → `avatar.setSpeechLevel`.
+* Lip-sync each frame (see [Lip-sync](#lip-sync) below) → `avatar.setMouth` (jaw, wide, round,
+  press, tuck, teeth, tongue), loudness → `avatar.setSpeechLevel`, prosody cues → `avatar.setProsody`.
 * Tool calls show as chips; if Claude goes straight to a tool the avatar says a short cue.
   Permission requests (agent mode) show a card with Allow/Deny and a spoken prompt. Nothing is
   ever approved automatically. Cards disappear when their turn ends or the CLI restarts.
@@ -53,6 +53,48 @@ src/styles/app.css       the glass UI
 * Hands-free (setting): a VAD listens whenever the conversation is idle and pauses while the
   avatar thinks or speaks (half-duplex, so it never hears itself).
 * After 10 idle minutes the avatar dozes (`sleep` state); any activity wakes it.
+
+## Lip-sync
+
+Every source ends in the same coarticulation model (`src/audio/articulation.js`): timed segments,
+each an articulatory target on seven channels, blended by dominance functions (Cohen & Massaro):
+the lips own m/b/p (press) and f/v (tuck), the jaw owns the vowels, rounding spreads ~120 ms ahead
+into the consonants before an O / U (unless a spread vowel is in between), an h or a schwa takes
+its neighbours' shape, and a closure is dominant enough that a 50 ms "m" still closes (press ≥ 0.8,
+jaw ≤ 0.06). A closure passed between two frames is shown, and the director closes the jaw fast
+into it, so it also closes on screen at 30 fps.
+
+| Source | Mouth |
+|---|---|
+| local voice (Kokoro) | the server's viseme timeline at the playback clock + 50 ms visual lead; vowel prominence from duration, the jaw scaled by the measured loudness |
+| system voice (Web Speech) | the utterance's words → phonemes (`g2p.js`: a ~500-word exception dictionary incl. "Claude", NRL letter-to-sound rules, stress, numbers, acronyms) → a timed plan (stressed vowels long, closures ≥ 50 ms, phrase-final lengthening, rests at punctuation). Word-boundary events (`charIndex`) anchor each word; between them the plan runs at a speed learned from the boundaries (per utterance rate); an early boundary compresses the rest of the word, a late one holds the word's last sound (or waits at rest in a pause). Voices without boundary events play the whole plan from `onstart`, and the next utterance uses the tempo the last one turned out to have. |
+| audio without visemes | RMS → jaw (noise gate), band ratios → spread / round, quiet hiss → teeth |
+
+The plan also yields prosody cues (accents on the stressed syllables of content words, the last one
+of a phrase strongest; phrase starts and ends with their punctuation; emphasis; friendliness),
+which the director turns into small nods, phrase lifts, a brow raise and head tilt on questions,
+blinks at phrase boundaries rather than mid-word, and a micro-smile after a friendly sentence. All
+of it is pure and unit-tested (`tests/unit/app/{g2p,articulation,lipsync}.test.js`,
+`tests/unit/avatar/{director-speech,mouth-rig}.test.js`).
+
+![The fourteen visemes on the relief and the procedural head](screenshots/mouth_visemes.jpg)
+
+![Film strip of the system-voice lip-sync saying "Hello! I'm Claude. How are you feeling today?"](screenshots/mouth_speech.jpg)
+
+Rendering: the relief head closes pressed lips over a slightly open jaw and thins them (the lip
+texture is compressed toward the seam and the rest gap skipped), brings a tucked lower lip up under
+the incisors (which fill the small opening), raises the upper lip for teeth (the incisors follow),
+draws a dim tongue tip at the teeth, pulls the corners in for round and out for spread, and tilts
+them slightly with `mouthAsym`. The procedural head does the same in its vertex rig and cavity
+shader; the placeholder maps wide / round / press onto its mouth line.
+
+Check it in the avatar harness: `/dev/avatar.html?fixedTime=1&vis=PP` (one viseme),
+`?fixedTime=1&press=1`, `?fixedTime=1&tuck=1&jaw=0.08`, `?fixedTime=1&tongue=1&jaw=0.2`, and
+`/dev/avatar.html?ui=0&caption=1&say=Hello!%20I'm%20Claude.&t=0.9`: a deterministic run of the real
+system-voice path at 60 Hz (a scripted voice sends word boundaries at its own tempo with jitter;
+`bounds=0` is a voice without boundaries; `rate`, `voiceTempo`, `jitter`, `latency`).
+`window.__seek(t)` steps it; `node tools/visual/film.mjs` records the frames for a video
+(see tools/visual/README.md).
 
 ## Using it
 
@@ -95,8 +137,10 @@ permission card ("run", "tool"), a failure ("simulate error"), otherwise an echo
 ## Tests
 
 * `npx vitest run tests/unit/app` — chunker, speech text, controller (fake bridge/player/TTS/STT/mic),
-  speech queue, lip-sync mapping, VAD/resampler/WAV, mic (fake getUserMedia), player (fake Web
-  Audio), Markdown parser/renderer, mock bridge, voice client, Web Speech, permissions, UI logic.
+  speech queue, G2P, coarticulation and speech plans, lip-sync drivers (incl. Web Speech → player →
+  lip-sync with fake timers, with and without boundary events), VAD/resampler/WAV, mic (fake
+  getUserMedia), player (fake Web Audio), Markdown parser/renderer, mock bridge, voice client,
+  Web Speech, permissions, UI logic.
 * `npx playwright test` — the built app in Chromium (SwiftShader) with the mock bridge: boot +
   hologram pixels, streaming states, safe Markdown + copy, permission cards, interrupt, error
   toasts, settings drawer + renderer switch, minimal mode, hotkeys, click-through, spoken replies

@@ -178,6 +178,7 @@ export default class ProceduralHead {
       uCornerL: { value: new THREE.Vector3() },
       uCornerR: { value: new THREE.Vector3() },
       uLips: { value: new THREE.Vector4() },
+      uMouthX: { value: new THREE.Vector4() },
       uBrow: { value: new THREE.Vector2() },
       uBreathY: { value: 0 },
       uNeckRot: { value: new THREE.Vector2(meta.neck.fadeBottom - 0.02, meta.neck.fadeTop + 0.06) },
@@ -228,6 +229,7 @@ export default class ProceduralHead {
     f.uCornerL.value.fromArray(u.cornerL);
     f.uCornerR.value.fromArray(u.cornerR);
     f.uLips.value.fromArray(u.lips);
+    f.uMouthX.value.fromArray(u.mouthX);
     f.uBrow.value.fromArray(u.brow);
     f.uBreathY.value = u.breathY;
     f.uBlink.value.fromArray(u.blink);

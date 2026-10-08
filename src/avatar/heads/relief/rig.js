@@ -5,6 +5,7 @@
  * @typedef {Object} ReliefRig     rig geometry in world units (built by buildRig)
  * @property {number} faceH         face height (forehead top -> chin)
  * @property {number} mouthHalfW
+ * @property {[number,number]} mouthCenter
  * @property {[number,number,number]} jawPivot   temporomandibular joint (informational)
  * @property {[number,number,number]} headPivot
  * @property {{L: EyeRig, R: EyeRig}} eyes
@@ -21,9 +22,9 @@ export const RIG_LIMITS = {
   jawDropFh: 0.095,       // lower lip drop at jawOpen = 1
   wideCornerHw: 0.11,     // corners outward for mouthWide = 1
   wideLipFh: 0.007,       // lips part (teeth show) for wide
-  roundCornerHw: 0.3,     // corners inward for mouthRound = 1
+  roundCornerHw: 0.34,    // corners inward for mouthRound = 1 (more stretches the cheek grid)
   roundPushFh: 0.035,     // lips forward for round
-  roundLipFh: 0.012,      // centre parting for round (the lip weights are 0 at the corners)
+  roundLipFh: 0.015,      // centre parting for round (the lip weights are 0 at the corners)
   smileUpFh: 0.032,       // corners up for smile
   smileOutHw: 0.07,
   smileLidFrac: 0.12,     // lower lid squint
@@ -31,6 +32,17 @@ export const RIG_LIMITS = {
   gazeX: 0.6,             // iris shift in iris radii
   gazeY: 0.24,
   breathFh: 0.003,
+  // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
+  teethLiftFh: 0.012,     // upper lip lift for teeth = 1 (the incisors show)
+  teethDropFh: 0.004,     // lower lip drop for teeth = 1
+  tuckLiftFh: 0.012,      // upper lip lift for tuck (the incisor edge shows over the lower lip)
+  tuckRaiseFh: 0.003,     // the lower lip rises to the upper teeth
+  pressThin: 0.28,        // lip thinning at press = 1 (texture compressed toward the seam)
+  pressContactPx: 2.5,    // the lips meet: the dark rest gap closes (plate px)
+  tuckThin: 0.32,         // lower lip rolled in under the teeth
+  tuckRisePx: 4,          // its visible edge moves up (plate px)
+  teethShift: 0.6,        // the upper incisors follow a lifted upper lip by this fraction
+  asymFh: 0.008,          // corner height difference at |mouthAsym| = 1
 };
 
 /**
@@ -55,6 +67,7 @@ export function buildRig(pack) {
   return {
     faceH,
     mouthHalfW: r.mouth.halfWidth * s,
+    mouthCenter: /** @type {[number,number]} */ ([wx(r.mouth.center[0]), wy(r.mouth.center[1])]),
     jawPivot,
     headPivot: [wx(r.headPivot[0]), wy(r.headPivot[1]), wz(r.headPivot[2])],
     eyes: { L: eye(r.eyes.L), R: eye(r.eyes.R) },
@@ -94,16 +107,34 @@ export function rigUniforms(rig, a, u) {
   const fh = rig.faceH, hw = rig.mouthHalfW;
   u.jawDrop = L.jawDropFh * fh * clamp01(a.jawOpen);
   const wide = clamp01(a.mouthWide), round = clamp01(a.mouthRound), smile = clamp01(a.smile);
-  u.upperLift = (L.wideLipFh * wide + 0.004 * smile + L.roundLipFh * round) * fh;
-  u.lowerDrop = (L.wideLipFh * 1.2 * wide + L.roundLipFh * round) * fh;
+  const press = clamp01(a.mouthPress ?? 0), teeth = clamp01(a.mouthTeeth ?? 0);
+  const tuck = clamp01(a.mouthTuck ?? 0) * (1 - press);     // a closure wins over a tuck
+  // what the shapes alone would do to the lips
+  const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.roundLipFh * round + L.teethLiftFh * teeth) * fh;
+  const drop0 = (L.wideLipFh * 1.2 * wide + L.roundLipFh * round + L.teethDropFh * teeth) * fh;
+  // Pressing / tucking lips close the slit whatever the jaw does: the lower lip comes back up
+  // over a slightly open jaw (the chin stays down), so a closure never leaks a dark line.
+  u.upperLift = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;
+  u.lowerDrop = drop0 * (1 - press - tuck) - (press + tuck) * u.jawDrop - L.tuckRaiseFh * tuck * fh;
   u.lipPush = L.roundPushFh * round * fh;
-  // corners: x outward is -x for L, +x for R
+  // corners: x outward is -x for L, +x for R; asymmetry tilts the mouth a little
   const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
   const up = L.smileUpFh * smile * fh - 0.004 * round * fh;
+  const tilt = L.asymFh * clamp(a.mouthAsym ?? 0, -1, 1) * fh;
   u.cornerL = u.cornerL || [0, 0];
   u.cornerR = u.cornerR || [0, 0];
-  u.cornerL[0] = -out; u.cornerL[1] = up;
-  u.cornerR[0] = out; u.cornerR[1] = up;
+  u.cornerL[0] = -out; u.cornerL[1] = up + tilt;
+  u.cornerR[0] = out; u.cornerR[1] = up - tilt;
+  // lip texture warp (plate px): x upper thinning, y contact, z lower lip rise, w lower thinning
+  u.lipWarp = u.lipWarp || [0, 0, 0, 0];
+  u.lipWarp[0] = L.pressThin * press;
+  u.lipWarp[1] = L.pressContactPx * press;
+  u.lipWarp[2] = L.tuckRisePx * tuck;
+  u.lipWarp[3] = L.pressThin * press + L.tuckThin * tuck;
+  u.tongue = clamp01(a.mouthTongue ?? 0) * (1 - press);
+  // the upper incisors follow a lifted upper lip part of the way (world units); in a tuck they
+  // fill the small opening down to the lower lip that touches them
+  u.teethShift = L.teethShift * lift0 * (1 - press) + 1.1 * L.tuckLiftFh * tuck * fh;
   // eyelids (world units, + = toward closing)
   const bl = clamp01(a.blinkL), br = clamp01(a.blinkR);
   const eL = rig.eyes.L.height, eR = rig.eyes.R.height;

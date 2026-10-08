@@ -19,6 +19,15 @@ export const PROC_LIMITS = Object.freeze({
   gazePitch: 0.22,
   vergence: 0.025,         // slight convergence (eyes look at a point in front of the face)
   breathFh: 0.004,
+  // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
+  teethLiftFh: 0.011,      // upper lip lift for teeth = 1 (the incisors show)
+  tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)
+  tuckRaiseFh: 0.004,      // the lower lip rises to the upper teeth...
+  tuckBackFh: 0.012,       // ...and draws back under them
+  pressThinFh: 0.005,      // pressed lips thin toward the seam...
+  pressInFh: 0.004,        // ...and flatten (the seam itself stays: the cavity must not show)
+  jawLipK: 0.37,           // lower-lip drop per radian of jaw rotation (cancelled by a closure)
+  asymFh: 0.008,           // corner height difference at |mouthAsym| = 1
 });
 
 /**
@@ -86,14 +95,18 @@ export function buildProcRig(meta) {
  * @param {any} u procRigUniforms() output
  * @param {ProcRig} rig
  * @param {number[]|Float32Array} out (3)
+ * @param {number} [seam] lip-seam closeness 0..1 (aExtra.y; pressed lips thin toward the seam)
  */
-export function deformVertex(p, w, u, rig, out) {
+export function deformVertex(p, w, u, rig, out, seam = 0) {
   let x = p[0], y = p[1], z = p[2];
   x += w[3] * u.cornerL[0] + w[4] * u.cornerR[0];
   y += w[3] * u.cornerL[1] + w[4] * u.cornerR[1];
   z += w[3] * u.cornerL[2] + w[4] * u.cornerR[2];
   y += w[1] * u.lips[0] - w[2] * u.lips[1];
   z += (w[1] + w[2]) * u.lips[2];
+  const mx = u.mouthX || [0, 0, 0, 0];
+  y += (w[2] - w[1]) * mx[0] * (1 - seam);
+  z -= (w[1] + w[2]) * mx[1] * (1 - seam) + w[2] * mx[2];
   y += w[5] * u.brow[0] + w[6] * u.brow[1];
   y += w[7] * u.lips[3];
   z += w[7] * u.lips[3] * 0.35;
@@ -124,21 +137,33 @@ export function procRigUniforms(rig, a, u) {
   const fh = rig.faceH, hw = rig.mouthHW;
   const jaw = clamp01(a.jawOpen), wide = clamp01(a.mouthWide), round = clamp01(a.mouthRound);
   const smile = clamp01(a.smile);
+  const press = clamp01(a.mouthPress ?? 0), teeth = clamp01(a.mouthTeeth ?? 0);
+  const tuck = clamp01(a.mouthTuck ?? 0) * (1 - press);       // a closure wins over a tuck
   u.jawAngle = L.jawAngle * jaw + L.wideJawAngle * wide * (1 - jaw);
   u.jawRot = rotationX(u.jawAngle, u.jawRot || new Float32Array(9));
   u.headRot = rotationYPR(a.headYaw, a.headPitch, a.headRoll, u.headRot || new Float32Array(9));
   const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
   const up = (L.smileUpFh * smile - 0.004 * round) * fh;
   const back = (-L.smileBackFh * smile + 0.01 * round) * fh;
+  const tilt = L.asymFh * clamp(a.mouthAsym ?? 0, -1, 1) * fh;
   u.cornerL = u.cornerL || [0, 0, 0];
   u.cornerR = u.cornerR || [0, 0, 0];
-  u.cornerL[0] = -out; u.cornerL[1] = up; u.cornerL[2] = back;
-  u.cornerR[0] = out; u.cornerR[1] = up; u.cornerR[2] = back;
+  u.cornerL[0] = -out; u.cornerL[1] = up + tilt; u.cornerL[2] = back;
+  u.cornerR[0] = out; u.cornerR[1] = up - tilt; u.cornerR[2] = back;
   u.lips = u.lips || [0, 0, 0, 0];
-  u.lips[0] = (L.wideLipFh * wide + 0.004 * smile) * fh;          // upper lift
-  u.lips[1] = L.wideLipFh * 1.2 * wide * fh;                      // lower drop
+  // pressing / tucking lips stay closed over a slightly open jaw (the lower lip comes back up)
+  const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth) * fh;
+  u.lips[0] = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;      // upper lift
+  u.lips[1] = L.wideLipFh * 1.2 * wide * fh * (1 - press - tuck)    // lower drop
+    - (press + tuck) * L.jawLipK * u.jawAngle - L.tuckRaiseFh * tuck * fh;
   u.lips[2] = L.roundPushFh * round * fh;                         // push forward
   u.lips[3] = L.cheekFh * smile * fh;                             // cheek raise
+  // press thinning, press roll-in, tuck draw-back (world units), tongue tip amount
+  u.mouthX = u.mouthX || [0, 0, 0, 0];
+  u.mouthX[0] = L.pressThinFh * press * fh;
+  u.mouthX[1] = L.pressInFh * press * fh;
+  u.mouthX[2] = L.tuckBackFh * tuck * fh;
+  u.mouthX[3] = clamp01(a.mouthTongue ?? 0) * (1 - press);
   u.brow = u.brow || [0, 0];
   u.brow[0] = u.brow[1] = L.browFh * clamp01(a.browUp) * fh;
   u.breathY = (a.breath - 0.5) * L.breathFh * fh;

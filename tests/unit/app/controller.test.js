@@ -146,6 +146,29 @@ describe('Controller: speech pipeline', () => {
     expect(avatar.levels.at(-1)).toBeGreaterThan(0);
   });
 
+  it('forwards every mouth channel and the prosody cues of the lip-sync to the avatar', async () => {
+    const bridge = fakeBridge();
+    const player = fakePlayer({ clipMs: 40 });
+    const avatar = fakeAvatar();
+    avatar.cues = [];
+    avatar.setProsody = (c) => avatar.cues.push(c);
+    const shape = { jaw: 0.02, wide: 0.1, round: 0.2, press: 0.9, tuck: 0.05, teeth: 0.1, tongue: 0.3, level: 0.5 };
+    const cue = { type: 'accent', strength: 1, t: 0.2 };
+    let n = 0;
+    const lipsync = { update: () => ({ ...shape, source: 'speech', cues: n++ === 1 ? [cue] : null }), dispose() {} };
+    const c = new Controller({ bridge, view: fakeView(), player, tts: fakeTts(), stt: fakeStt(), mic: fakeMic(), avatar, lipsync, sleepAfterMs: 0 });
+    await c.start();
+    player._cur = { clip: { kind: 'speech' } }; // something is playing
+    for (let i = 0; i < 3; i++) c.tick(1 / 60, i / 60);
+    expect(avatar.mouths.at(-1)).toMatchObject({ jaw: 0.02, press: 0.9, tuck: 0.05, teeth: 0.1, tongue: 0.3, wide: 0.1, round: 0.2 });
+    expect(avatar.levels.at(-1)).toBe(0.5);
+    expect(avatar.cues).toEqual([[cue]]);
+    // a closed mouth (press) keeps the lip-sync running after playback until it relaxes
+    player._cur = null;
+    c.tick(1 / 60, 0.1);
+    expect(avatar.mouths.at(-1).press).toBe(0.9);
+  });
+
   it('a spoken cue when Claude uses a tool without saying anything first', async () => {
     const { c, bridge, tts } = setup();
     await c.start();

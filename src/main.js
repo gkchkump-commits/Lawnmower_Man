@@ -457,8 +457,15 @@ async function boot() {
   // off, document.visibilityState always says "visible" in Electron); the browser preview uses
   // the Page Visibility API
   if (typeof bridge.window.onVisibility === 'function') {
-    if (appInfo.visible === false) camera.setVisible(false);
-    bridge.window.onVisibility((v) => camera?.setVisible(v?.visible !== false));
+    // subscribe first, then ask (the boot-time app.info() may predate the window being shown)
+    let heard = false;
+    bridge.window.onVisibility((v) => {
+      heard = true;
+      camera?.setVisible(v?.visible !== false);
+    });
+    bridge.app.info().then((i) => {
+      if (!heard && i && typeof i.visible === 'boolean') camera?.setVisible(i.visible);
+    }, () => {});
   } else {
     document.addEventListener('visibilitychange', () => camera?.setVisible(document.visibilityState === 'visible'));
   }

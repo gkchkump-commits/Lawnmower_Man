@@ -191,6 +191,31 @@ describe('CameraFeature: turning the camera on and off', () => {
     expect(h.view.errors.at(-1).m.kind).toBe('busy');
   });
 
+  it('face tracking that gives up keeps the camera (snapshots work), opens the listen gate, retries on the next start', async () => {
+    const h = setup({ consent: true, settings: { camera: { lookToTalk: true }, voice: { handsFree: true } } });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    for (let i = 0; i < 6; i++) h.frame(face({ yawDeg: 45 }));
+    expect(h.controller.gate).toBe(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    h.trackers[0].emit('error', Object.assign(new Error('the face tracker stopped answering'), { fatal: true }));
+    warn.mockRestore();
+    expect(h.feat.tracking).toBe('failed');
+    expect(h.feat.state).toBe('on');
+    expect(h.view.toasts.at(-1)).toMatch(/not available \(the face tracker stopped answering\)/);
+    expect(h.controller.gate).toBe(true);
+    expect(h.controller.provider.wants({ hidden: false })).toBe(false);
+    h.feat.toggleShot();
+    expect(h.controller.provider.wants({ hidden: false })).toBe(true); // pictures still work
+    h.feat.setVisible(false);
+    h.feat.setVisible(true);
+    await h.flush();
+    expect(h.trackers[0].dispose).toHaveBeenCalled();
+    expect(h.trackers).toHaveLength(2);
+    expect(h.feat.tracking).toBe('on');
+    expect(h.feat.trackingError).toBe('');
+  });
+
   it('pauses and releases the camera while the window is hidden, resumes when shown', async () => {
     const h = setup({ consent: true });
     h.set({ camera: { enabled: true } });

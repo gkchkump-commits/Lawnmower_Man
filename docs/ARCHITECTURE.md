@@ -48,6 +48,7 @@ Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice se
 │ src/audio/*    mic capture/VAD, playback, lip-sync        │
 │ src/speech/*   voice-server client + Web Speech fallback  │──HTTP──┐
 │ src/ui/*       chat panel, settings, permission cards     │        │ 127.0.0.1, bearer token
+│ src/vision/*   camera, face tracking (MediaPipe, worker)  │        │
 └───────────────────────────────────────────────────────────┘   ┌────▼──────────────────┐
                                                                  │ voice/ (Python 3.12)  │
                                                                  │ FastAPI: /stt /tts …  │
@@ -67,6 +68,7 @@ Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice se
 | `public/assets/avatars/reference/` | **avatar-core** | the baked pack generated from the user's video (committed; served at `./assets/avatars/reference/`) |
 | `public/assets/models/` | **procedural** | head mesh(es) for the procedural renderer + LICENSE notes (served at `./assets/models/`) |
 | `src/app/`, `src/audio/`, `src/speech/`, `src/ui/`, `src/bridge/`, `src/main.js`, `src/index.html`, `src/styles/` | **renderer-app** | conversation pipeline, audio, UI, mock bridge |
+| `src/vision/`, `public/assets/vision/`, `scripts/vite-vision-wasm.mjs` | **camera** | webcam capture, MediaPipe face tracking in a worker, attention/presence/gaze logic, snapshots for Claude ([CAMERA.md](CAMERA.md)) |
 | `voice/` | **voice** | Python package `lawnmower_voice`, pyproject, tests |
 | `scripts/` | **voice** (setup-voice.*) / **systems** (others) | setup scripts |
 | `src/dev/` | each lane its own file(s): `src/dev/avatar.html` (avatar-core), `src/dev/procedural.html` (procedural) | dev/visual harness pages served by Vite at `/dev/*.html` (add them to `build.rollupOptions.input` in vite.config.js if tests need them in `vite preview`) |
@@ -89,7 +91,9 @@ The mock is also selected when the URL has `?mock=1`.
 ```js
 lawnmower = {
   claude: {
-    send(text: string): Promise<{ turnId: string }>,   // queue a user turn
+    send(text: string, options?: { images?: Array<{ mediaType: 'image/jpeg'|'image/png'|'image/webp', data: string }> }): Promise<{ turnId: string }>,
+                                                         // queue a user turn; images (webcam snapshots, ≤ 2, base64 without
+                                                         // a data: prefix, ≤ 1.5 MB each) are validated in main (ipc-validate)
     cancel(turnId: string): Promise<{ cancelled: boolean, interrupted: boolean }>,
                                                          // drop a turn that has not started (→ turn_cancelled);
                                                          // a running one is interrupted instead
@@ -127,6 +131,9 @@ lawnmower = {
     setSizePreset(preset: 'small'|'medium'|'large'): void,
     setAlwaysOnTop(on: boolean): void,
     minimize(): void, hide(): void, quit(): void,
+    onVisibility(cb: (v: { visible: boolean }) => void): () => void,
+                                            // shown / hidden / minimized / restored (the camera pauses while hidden;
+                                            // with backgroundThrottling off, document.visibilityState always says visible)
   },
   onHotkey(cb: (name: 'toggleListen'|'stopSpeaking'|'toggleChat') => void): () => void,
   onCursor(cb: (p: { x: number, y: number }) => void): () => void,
@@ -197,7 +204,9 @@ without one the CLI allows reads inside the working folder and asks (an approval
 stdin lines (JSON, newline-terminated):
 
 * `{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — send first; reply arrives as `control_response`.
-* `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}` — one turn.
+* `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}` — one turn. Webcam
+  snapshots follow the text block as `{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"…"}}`
+  (verified with Claude Code 2.1.294: the model sees the image).
 * `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}` — interrupt.
 * Reply to a permission prompt: `{"type":"control_response","response":{"subtype":"success","request_id":"<their id>","response":{"behavior":"allow","updatedInput":{…original input…}}}}`
   or `{"behavior":"deny","message":"User denied"}`.
@@ -263,6 +272,16 @@ command line — user text only ever travels over stdin; long prompts go in file
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },                             // Windows: Control+Shift+Space / Control+Shift+F9 / Control+Shift+F10
+  camera: {                      // docs/CAMERA.md; main allows media/video only while enabled
+    enabled: false,              // off by default; the first use shows a privacy card
+    deviceId: '',                // '' = the default camera
+    followFace: true,            // eye contact (a moving cursor wins for ~1.5 s)
+    presence: true,              // away > 2 min while idle → sleep; back → wake + greeting expression
+    mirrorExpressions: true,     // smile back
+    shareWithClaude: false,      // a snapshot (JPEG ≤ 640 px) with every message
+    greet: false,                // hidden prompt so Claude says hello after ≥ 10 min away
+    lookToTalk: false,           // hands-free only listens while the user looks at the screen
+  },
 }
 ```
 Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key> global shortcut would swallow AltGr characters
@@ -285,9 +304,9 @@ const avatar = await createAvatar(canvas, {
 avatar.setState(s)               // 'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'
 avatar.setMouth({ jaw, wide, round })   // 0..1 each; lip-sync target, director smooths
 avatar.setSpeechLevel(level)     // 0..1 loudness envelope (drives glow/energy)
-avatar.setExpression({ smile, browUp }) // 0..1
+avatar.setExpression({ smile, browUp }) // 0..1 (the camera: smile back, wake-up greeting)
 avatar.blink()
-avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow); lookAt(null) releases
+avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); lookAt(null) releases
 avatar.setOptions(partial)       // quality/particles/bloom/colors at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)
@@ -363,8 +382,12 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   `tools/visual/` has the screenshot and compare tools (URL parameters in its README).
 * Real app: `ELECTRON_PATH=<electron binary> xvfb-run -a node scripts/electron-e2e.mjs [--live]`
   launches `electron/main.js` with Playwright's Electron driver (fake or real Claude CLI) and checks
-  app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, voice
-  status and a clean boot without console errors.
+  app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, an image
+  block the fake CLI acknowledges, the camera (refused while camera.enabled is off; with it on, the
+  privacy card and face tracking loading its wasm + model over app:// in a worker, on Chromium's
+  fake camera), voice status and a clean boot without console errors.
+* Camera in the browser: `tests/e2e/camera.spec.js` runs with Chromium's fake camera playing a frame
+  of `docs/reference/neutral.jpg` (MediaPipe detects that face); see [CAMERA.md](CAMERA.md).
 * Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>
   node scripts/electron-e2e.mjs --packaged` (no app path) also checks `app.isPackaged`, the
   resources an installer must deliver, the per-user voice folder and — through the real launcher in

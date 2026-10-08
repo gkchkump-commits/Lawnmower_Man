@@ -9,8 +9,9 @@ import { SECTIONS } from '../../../src/ui/settings-drawer.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const docs = ['README.md', ...readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`)];
-// Windows' own Settings app, referenced for GPU selection and uninstalling — not the app's drawer
-const OS_SETTINGS = new Set(['System', 'Apps']);
+// Windows' own Settings app, referenced for GPU selection, uninstalling and the camera privacy
+// switch — not the app's drawer
+const OS_SETTINGS = new Set(['System', 'Apps', 'Privacy']);
 
 /** @returns {Array<{ file: string, section: string, field?: string }>} */
 function references() {

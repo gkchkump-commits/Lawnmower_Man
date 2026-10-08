@@ -178,7 +178,6 @@ export class CameraFeature extends Emitter {
     }
     if (!c.followFace) this.d.gaze.setFace(null);
     if (!c.mirrorExpressions) this._mirror = 0;
-    if (!c.shareWithClaude && p.shareWithClaude && this.shotArmed) this._render();
     this._applyExpression();
     this._updateGate();
     this._render();
@@ -293,10 +292,16 @@ export class CameraFeature extends Emitter {
 
   /** @param {number} gen */
   _startTracking(gen) {
+    if (this.tracker && this.tracking === 'failed') {
+      // it gave up before (e.g. the GPU context was lost): try once more with this camera start
+      this.tracker.dispose();
+      this.tracker = null;
+    }
     if (!this.tracker) {
       const t = this._createTracker();
       this.tracker = t;
       this.tracking = 'loading';
+      this.trackingError = '';
       this._offs.push(t.on('observation', (o) => this._onObservation(o)));
       this._offs.push(t.on('ready', () => {
         this.tracking = 'on';
@@ -309,7 +314,8 @@ export class CameraFeature extends Emitter {
         }
         this.tracking = 'failed';
         this.trackingError = String(err.message || err);
-        this.view.toast?.(`Face tracking could not start (${this.trackingError}). Snapshots for Claude still work.`, 'warn');
+        console.warn('[camera] face tracking unavailable:', this.trackingError);
+        this.view.toast?.(`Face tracking is not available (${this.trackingError}). Snapshots for Claude still work.`, 'warn');
         this._updateGate();
         this._render();
       }));

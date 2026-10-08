@@ -23,6 +23,9 @@ export { visionAssetUrls };
 export const DETECT_WIDTH = 320;
 /** The main-thread fallback never runs faster than this (it shares the thread with rendering). */
 export const MAIN_THREAD_MAX_HZ = 4;
+/** This many failed detections in a row, or no answer for this long, stop the tracker. */
+export const MAX_CONSECUTIVE_ERRORS = 5;
+export const ANSWER_TIMEOUT_MS = 10_000;
 
 /** Detector frame size for a video of w×h (keeps the aspect ratio). @param {number} w @param {number} h */
 export function detectSize(w, h, maxW = DETECT_WIDTH) {
@@ -65,6 +68,8 @@ export class FaceTracker extends Emitter {
     /** @type {Promise<void>|null} */
     this._starting = null;
     this._gen = 0;
+    this._errors = 0;
+    this._watchdog = /** @type {any} */ (0);
   }
 
   get running() {
@@ -115,8 +120,11 @@ export class FaceTracker extends Emitter {
   stop() {
     this._gen++;
     clearTimeout(this._timer);
+    clearTimeout(this._watchdog);
     this._timer = 0;
+    this._watchdog = 0;
     this._inFlight = false;
+    this._errors = 0;
     this._starting = null;
     if (this._worker) {
       try { this._worker.postMessage({ type: 'close' }); } catch { /* gone */ }
@@ -156,10 +164,11 @@ export class FaceTracker extends Emitter {
         reject(err instanceof Error ? err : new Error(String(err?.message || err)));
       };
       w.addEventListener('error', (e) => {
-        // a load/parse error of the worker script itself
         e.preventDefault?.();
+        if (gen !== this._gen) return;
+        // starting: the worker script did not load (→ main-thread fallback); later: it crashed
         if (this.mode === 'starting') fail(new Error(e.message || 'the worker script failed to load'));
-        else this.emit('error', new Error(e.message || 'face tracker worker error'));
+        else this._fail(new Error(e.message || 'the face tracker worker crashed'));
       });
       w.addEventListener('message', (e) => {
         const m = /** @type {any} */ (e).data || {};
@@ -175,11 +184,7 @@ export class FaceTracker extends Emitter {
           this._onResult(m.obs ?? null, m.ms || 0, !!m.skipped);
         } else if (m.type === 'error') {
           if (m.fatal && this.mode === 'starting') fail(new Error(m.message));
-          else {
-            this._inFlight = false;
-            this.emit('error', new Error(m.message));
-            this._schedule();
-          }
+          else this._onDetectError(new Error(m.message));
         }
       });
       this._worker = w;
@@ -248,28 +253,53 @@ export class FaceTracker extends Emitter {
     const id = ++this._seq;
     if (this.mode === 'worker' && this._worker) {
       this._worker.postMessage({ type: 'frame', id, bitmap, width, height, t }, [bitmap]);
-      this._sentAt = t;
+      // a worker that hangs (or died without an error event) must not stall tracking silently
+      this._watchdog = setTimeout(() => this._fail(new Error('the face tracker stopped answering')), ANSWER_TIMEOUT_MS);
       return;
     }
     if (this.mode === 'main' && this._engine) {
       let obs = null;
+      let failed = null;
       try {
         obs = this._engine.detect(bitmap, width, height, t);
       } catch (err) {
-        this.emit('error', err);
+        failed = err;
       } finally {
         bitmap.close();
       }
-      this._onResult(obs, Math.round((this._now() - t) * 10) / 10, false);
+      if (failed) this._onDetectError(/** @type {Error} */ (failed));
+      else this._onResult(obs, Math.round((this._now() - t) * 10) / 10, false);
       return;
     }
     bitmap.close();
     this._inFlight = false;
   }
 
+  /** One detection failed: tolerated now and then, not over and over. @param {Error} err */
+  _onDetectError(err) {
+    clearTimeout(this._watchdog);
+    this._inFlight = false;
+    if (++this._errors >= MAX_CONSECUTIVE_ERRORS) {
+      this._fail(new Error(`face detection keeps failing: ${err.message}`));
+      return;
+    }
+    this.emit('error', err);
+    this._schedule();
+  }
+
+  /** Give up: release the worker / engine and report a fatal error. @param {Error} err */
+  _fail(err) {
+    if (this.mode === 'failed' || this.mode === 'idle') return;
+    this.stop();
+    this.mode = 'failed';
+    this.emit('error', Object.assign(err, { fatal: true }));
+  }
+
   /** @param {any} obs @param {number} ms @param {boolean} skipped */
   _onResult(obs, ms, skipped) {
+    clearTimeout(this._watchdog);
     this._inFlight = false;
+    if (!skipped) this._errors = 0;
     if (!skipped) {
       this.frames++;
       this.lastMs = ms;

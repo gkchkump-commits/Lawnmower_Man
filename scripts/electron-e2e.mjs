@@ -82,6 +82,9 @@ delete env.ELECTRON_RUN_AS_NODE;
 const args = packaged ? [] : [root];
 if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
 if (softwareWebgl) args.unshift('--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+// Chromium's built-in fake camera (a moving test pattern): the camera checks need a device, and
+// the permission policy (not a UI flag) must decide whether the page may use it
+args.unshift('--use-fake-device-for-media-stream');
 
 /** @type {Record<string, any>} */
 const report = { ok: false, live, packaged, checks: {} };
@@ -213,6 +216,58 @@ try {
   report.turn = { text: turn.text, types: turn.types, isError: turn.end && turn.end.isError, cli: turn.status.cliPath, cliVersion: turn.status.cliVersion };
   check('Claude turn streamed to renderer', !!turn.end && !turn.end.isError && turn.text.length > 0 && (live || turn.text === 'You said: hello from electron'), turn);
 
+  if (!live) {
+    // A webcam snapshot travels with the turn as an image content block after the text; the fake
+    // CLI checks it like the API would and says what it saw. Malformed images never reach it.
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9, 0]).toString('base64');
+    const img = await page.evaluate(async (data) => {
+      const lm = /** @type {any} */ (window).lawnmower;
+      const events = [];
+      const off = lm.claude.onEvent((e) => events.push(e));
+      const { turnId } = await lm.claude.send('look at me', { images: [{ mediaType: 'image/jpeg', data }] });
+      for (let i = 0; i < 300 && !events.some((e) => e.type === 'turn_end' && e.turnId === turnId); i++) await new Promise((r) => setTimeout(r, 50));
+      off();
+      let rejected = '';
+      try {
+        await lm.claude.send('x', { images: [{ mediaType: 'image/png', data }] });
+      } catch (err) {
+        rejected = String(err && err.message);
+      }
+      return { text: events.filter((e) => e.type === 'text_delta' && e.turnId === turnId).map((e) => e.text).join(''), rejected };
+    }, jpeg);
+    report.image = img;
+    check('fake CLI receives the image block of a turn', img.text === 'You said: look at me [saw 1 image: image/jpeg 640x480, 24 bytes]', img);
+    check('a mislabelled image is refused by main', /not really image\/png/.test(img.rejected), img);
+  }
+
+  // The camera: denied while camera.enabled is off (the permission policy in main), allowed once
+  // it is on; in the app the privacy card comes first, then face tracking loads its wasm runtime
+  // and model from app:// in a worker (CSP, asar) and processes frames.
+  const camOff = await page.evaluate(async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      for (const t of s.getTracks()) t.stop();
+      return 'allowed';
+    } catch (err) {
+      return /** @type {any} */ (err).name;
+    }
+  });
+  check('camera denied while camera.enabled is off', camOff === 'NotAllowedError', camOff);
+  await page.waitForFunction(() => /** @type {any} */ (window).__app?.ready, null, { timeout: 60000 });
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ camera: { enabled: true } }));
+  const consent = await page.waitForSelector('.camera-card .camera-accept', { timeout: 10000 }).then(() => true, () => false);
+  check('privacy card before the camera is used', consent);
+  if (consent) await page.click('.camera-card .camera-accept');
+  const cam = await page.waitForFunction(() => {
+    const st = /** @type {any} */ (window).__app?.camera?.status;
+    return st && st.state === 'on' && st.tracking === 'on' && st.frames >= 3 ? st : (st && (st.state === 'error' || st.tracking === 'failed') ? st : null);
+  }, null, { timeout: 60000 }).then((h) => h.jsonValue(), async () => page.evaluate(() => /** @type {any} */ (window).__app?.camera?.status));
+  report.camera = cam && { state: cam.state, tracking: cam.tracking, mode: cam.mode, delegate: cam.delegate, frames: cam.frames, lastMs: cam.lastMs, error: cam.error?.kind, trackingError: cam.trackingError };
+  check('camera on: face tracking runs in a worker (wasm + model over app://)', cam?.state === 'on' && cam?.tracking === 'on' && cam?.mode === 'worker' && cam?.frames >= 3, report.camera);
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ camera: { enabled: false } }));
+  const released = await page.waitForFunction(() => document.body.dataset.camera === 'off' && !(/** @type {any} */ (window).__app.camera.camera.running), null, { timeout: 10000 }).then(() => true, () => false);
+  check('camera off releases the device', released);
+
   const voice = await page.evaluate(() => /** @type {any} */ (window).lawnmower.voice.info());
   report.voice = voice;
   check('voice status reported', ['disabled', 'starting', 'ready', 'error'].includes(voice.status), voice);
@@ -260,7 +315,9 @@ async function packagedChecks(electronApp) {
     const fsm = process.getBuiltinModule('node:fs');
     const pathm = process.getBuiltinModule('node:path');
     const res = t.resourcesPath();
-    const files = ['app.asar', 'voice/lawnmower_voice/__main__.py', 'voice/pyproject.toml', 'scripts/setup-voice.ps1', 'scripts/setup-voice.sh', 'scripts/setup-voice.cmd', 'THIRD_PARTY_NOTICES.md'];
+    const files = ['app.asar', 'voice/lawnmower_voice/__main__.py', 'voice/pyproject.toml', 'scripts/setup-voice.ps1', 'scripts/setup-voice.sh', 'scripts/setup-voice.cmd', 'THIRD_PARTY_NOTICES.md',
+      // the camera's face tracker (Electron's fs reads inside app.asar)
+      'app.asar/dist/assets/vision/face_landmarker.task', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.js', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.wasm'];
     const unwanted = ['voice/tests', 'voice/.venv', 'voice/models', 'app.asar.unpacked/node_modules'];
     return {
       packaged: t.packaged(),

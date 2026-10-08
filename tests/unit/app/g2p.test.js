@@ -1,7 +1,7 @@
 // Grapheme-to-phoneme conversion for the system-voice lip-sync (src/audio/g2p.js).
 import { describe, expect, it } from 'vitest';
 import {
-  DICTIONARY, expandNumber, letterToSound, numberWords, parsePhones, spell, textToWords, wordToPhones,
+  DICTIONARY, expandNumber, genericPhones, letterToSound, numberWords, parsePhones, spell, textToWords, wordToPhones,
 } from '../../../src/audio/g2p.js';
 
 /** "HH AH0 L OW1" style string of a word's pronunciation. */
@@ -195,6 +195,18 @@ describe('textToWords', () => {
     expect(textToWords('→ ★ :) #')).toEqual([]);
     expect(textToWords('')).toEqual([]);
     expect(textToWords('Café naïve').map((w) => w.phones.length > 0)).toEqual([true, true]);
+  });
+
+  it('gives words in other scripts a generic syllable rhythm (never a still mouth)', () => {
+    const ru = textToWords('Привет, как дела?');
+    expect(ru.map((w) => w.text)).toEqual(['Привет', 'как', 'дела']);
+    expect(ru[0].punct).toBe(',');
+    for (const w of ru) expect(w.phones.length).toBeGreaterThanOrEqual(2);
+    const ja = textToWords('こんにちは');
+    expect(ja[0].phones.filter((p) => p.stress === 1)).toHaveLength(1);
+    expect(ja[0].phones.length).toBe(10);               // one syllable per kana
+    expect(genericPhones('дела')).toEqual(genericPhones('дела'));   // deterministic
+    expect(genericPhones('')).toEqual([]);
   });
 
   it('marks intensifiers as emphasis', () => {

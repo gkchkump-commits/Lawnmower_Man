@@ -491,7 +491,7 @@ export function textToWords(text) {
   const shouting = letters.length > 0 && letters === letters.toUpperCase();
   /** @type {WordPron[]} */
   const words = [];
-  const re = /(\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th)?%?)|([A-Za-zÀ-ɏ]+(?:['’][A-Za-z]+)*)|([,;:.!?…—–]+)/g;
+  const re = /(\d[\d,]*(?:\.\d+)?(?:st|nd|rd|th)?%?)|([A-Za-zÀ-ɏ]+(?:['’][A-Za-z]+)*)|([,;:.!?…—–]+)|([\p{L}\p{M}]+)/gu;
   let m;
   while ((m = re.exec(s))) {
     if (m[3]) {
@@ -505,6 +505,8 @@ export function textToWords(text) {
       const pct = tok.endsWith('%');
       phones = wordToPhones(pct ? tok.slice(0, -1) : tok);
       if (pct) phones.push(...wordToPhones('percent'));
+    } else if (m[4]) {
+      phones = genericPhones(tok);       // another script: a plausible open/close per syllable
     } else if (isAcronym(tok)) {
       phones = spell(tok.replace(/s$/, ''));
       if (tok.endsWith('s')) phones.push({ ph: 'Z', stress: 0 });
@@ -522,6 +524,29 @@ export function textToWords(text) {
     });
   }
   return words;
+}
+
+const SYLLABIC_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const GENERIC_C = ['D', 'N', 'K', 'L', 'M', 'S', 'T', 'R'];
+const GENERIC_V = ['AA', 'EH', 'IH', 'OW', 'AE', 'UW'];
+
+/**
+ * Words of scripts these rules do not cover (Cyrillic, Greek, CJK…): one consonant-vowel pair
+ * per estimated syllable (a character each in CJK / kana / hangul, ~2.4 letters elsewhere),
+ * chosen from the characters so the same word always looks the same. Better than a still mouth.
+ * @param {string} tok @returns {Phone[]}
+ */
+export function genericPhones(tok) {
+  const chars = [...String(tok)].filter((c) => /\p{L}/u.test(c));
+  if (!chars.length) return [];
+  const n = chars.some((c) => SYLLABIC_SCRIPT.test(c)) ? chars.length : Math.max(1, Math.round(chars.length / 2.4));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const code = chars[i % chars.length].codePointAt(0) || 0;
+    out.push({ ph: GENERIC_C[code % GENERIC_C.length], stress: 0 });
+    out.push({ ph: GENERIC_V[(code >> 3) % GENERIC_V.length], stress: i === 0 ? 1 : 0 });
+  }
+  return out;
 }
 
 /** @param {string} p */

@@ -77,6 +77,7 @@ export default class ReliefHead {
       uCornerL: { value: new THREE.Vector2() }, uCornerR: { value: new THREE.Vector2() },
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
+      uMouth: { value: new THREE.Vector3(r.mouthCenter[0], r.mouthCenter[1], r.mouthHalfW) },
     };
   }
 
@@ -109,6 +110,8 @@ export default class ReliefHead {
     geo.setAttribute('aW1', new THREE.BufferAttribute(w1, 4));
     geo.setAttribute('aW2', new THREE.BufferAttribute(w2, 4));
     geo.setAttribute('aEdge', new THREE.BufferAttribute(Float32Array.from(mesh.edge), 1));
+    // distance below the closed-mouth slit (px): the lip warp of press / tuck
+    geo.setAttribute('aSlitD', new THREE.BufferAttribute(slitDistances(mesh.positions, n, this.pack.rig.slitLine), 1));
     const Index = n > 65535 ? Uint32Array : Uint16Array;
     geo.setIndex(new THREE.BufferAttribute(Index.from(mesh.indices), 1));
     geo.computeBoundingSphere();
@@ -130,6 +133,7 @@ export default class ReliefHead {
       uTime: { value: 0 }, uEnergy: { value: 0.5 }, uSpeech: { value: 0 }, uListen: { value: 0 },
       uThink: { value: 0 }, uSpeak: { value: 0 }, uError: { value: 0 }, uSleep: { value: 0 }, uFx: { value: this.fx },
       uChinV: { value: 1 - this.pack.framing.chinY / H },
+      uLipWarp: { value: new THREE.Vector4() },
       uColLine: { value: palette.line.clone() }, uColRim: { value: palette.rim.clone() },
       uColEye: { value: palette.eye.clone() }, uColGrid: { value: palette.grid.clone() },
     };
@@ -159,19 +163,16 @@ export default class ReliefHead {
     geo.setAttribute('aW2', new THREE.BufferAttribute(w2, 4));
     geo.setAttribute('aLayer', new THREE.BufferAttribute(Float32Array.from(c.layer), 1));
     // distance below the closed-mouth slit (px) for the shadow under the upper lip
-    const slit = this.pack.rig.slitLine;
-    const sx = [], sy = [];
-    for (let i = 0; i < slit.length; i += 2) { sx.push(slit[i]); sy.push(slit[i + 1]); }
-    const slitDist = new Float32Array(n);
-    for (let i = 0; i < n; i++) slitDist[i] = c.positions[i * 3 + 1] - interp(c.positions[i * 3], sx, sy);
-    geo.setAttribute('aSlit', new THREE.BufferAttribute(slitDist, 1));
+    geo.setAttribute('aSlit', new THREE.BufferAttribute(slitDistances(c.positions, n, this.pack.rig.slitLine), 1));
     geo.setIndex(new THREE.BufferAttribute(Uint16Array.from(c.indices), 1));
     geo.computeBoundingSphere();
     const dark = this.pack.mouth?.darkColor ?? [0.06, 0.035, 0.03];
     this.cavityUniforms = {
       ...this._commonUniforms(),
       tMouth: { value: this.textures.mouth },
-      uTeeth: { value: 0 }, uSleep: { value: 0 },
+      uTeeth: { value: 0 }, uSleep: { value: 0 }, uTongue: { value: 0 }, uTeethShift: { value: 0 }, uJawPx: { value: 0 },
+      uPxPerUnit: { value: this.pack.plate.height },
+      uColLine: { value: this.ctx.palette.line.clone() },
       uDark: { value: new THREE.Color().setRGB(dark[0], dark[1], dark[2], THREE.SRGBColorSpace) },
     };
     // share the rig uniform objects so one update drives both meshes
@@ -219,9 +220,15 @@ export default class ReliefHead {
     f.uError.value = a.error;
     f.uSleep.value = a.sleep;
     f.uFx.value = this.fx;
+    f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
     const cu = this.cavityUniforms;
+    const H = this.pack.plate.height;
     cu.uTeeth.value = cavityTeeth(a);
     cu.uSleep.value = a.sleep;
+    cu.uTongue.value = u.tongue;
+    cu.uJawPx.value = u.jawDrop * H;
+    // world -> px -> mouth texture v (its upper half, the cavity, spans the mouth rect height)
+    cu.uTeethShift.value = (u.teethShift * H * 0.5) / (this.pack.mouthRect?.[3] || 127);
   }
 
   /**
@@ -316,7 +323,21 @@ export function jawFromLandmarks(lm, W, H) {
  * @param {AnimState} a
  */
 export function cavityTeeth(a) {
-  return Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06);
+  const open = Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06, a.mouthTeeth ?? 0, (a.mouthTuck ?? 0) * 0.8);
+  return open * (1 - (a.mouthPress ?? 0));
+}
+
+/**
+ * Vertical distance (plate px, + = below) of each vertex from the closed-mouth slit polyline.
+ * @param {ArrayLike<number>} positions xyz per vertex (plate px) @param {number} n
+ * @param {ArrayLike<number>} slit [x0, y0, x1, y1, ...] @returns {Float32Array}
+ */
+export function slitDistances(positions, n, slit) {
+  const sx = [], sy = [];
+  for (let i = 0; i + 1 < slit.length; i += 2) { sx.push(slit[i]); sy.push(slit[i + 1]); }
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = positions[i * 3 + 1] - interp(positions[i * 3], sx, sy);
+  return out;
 }
 
 /** 1x1 masks_c stand-in for packs without one: no lid coordinate, full occlusion. */

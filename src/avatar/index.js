@@ -115,24 +115,29 @@ export async function createAvatar(canvas, options = {}) {
   /** @type {Array<() => void>} */
   const frameWaiters = [];
 
+  // advance(): a scripted clock (deterministic speech renders); its frames must not settle
+  let live = false;
+  /** @param {number} dt @param {number} time @param {boolean} settle */
+  function update(dt, time, settle) {
+    const a = limitHeadMotion(director.update(dt, time, { settle }), motionLimits);
+    for (const k in overrides) a[k] = overrides[k];
+    if (opts.autoQuality && !settle && dt > 0) {
+      const next = governor.sample(performance.now() / 1000, stage.fps, stage.quality);
+      if (next) {
+        console.warn(`[avatar] sustained ${Math.round(stage.fps)} fps: lowering quality ${stage.quality} -> ${next}`);
+        applyQuality(next);
+      }
+    }
+    head?.update(dt, time, a);
+    particles?.update(dt, time, a);
+    post?.update(a);
+  }
+
   const stage = new Stage(canvas, {
     quality: opts.quality,
     fixedTime: opts.fixedTime,
     zoom: opts.zoom,
-    onUpdate: (dt, time, settle) => {
-      const a = limitHeadMotion(director.update(dt, time, { settle }), motionLimits);
-      for (const k in overrides) a[k] = overrides[k];
-      if (opts.autoQuality && !settle && dt > 0) {
-        const next = governor.sample(performance.now() / 1000, stage.fps, stage.quality);
-        if (next) {
-          console.warn(`[avatar] sustained ${Math.round(stage.fps)} fps: lowering quality ${stage.quality} -> ${next}`);
-          applyQuality(next);
-        }
-      }
-      head?.update(dt, time, a);
-      particles?.update(dt, time, a);
-      post?.update(a);
-    },
+    onUpdate: (dt, time, settle) => update(dt, time, settle && !live),
     onRender: () => {
       post?.render(stage.scene, stage.camera);
       while (frameWaiters.length) frameWaiters.shift()();
@@ -305,8 +310,16 @@ export async function createAvatar(canvas, options = {}) {
     get state() { return director.state; },
     /** @param {import('./director.js').AvatarState} s */
     setState(s) { director.setState(s); stage.requestRender(); },
-    /** @param {{jaw?:number, wide?:number, round?:number}} m */
+    /**
+     * Lip-sync target, 0..1 each; missing fields mean 0.
+     * @param {{jaw?:number, wide?:number, round?:number, press?:number, tuck?:number, teeth?:number, tongue?:number}} m
+     */
     setMouth(m) { director.setMouth(m); stage.requestRender(); },
+    /**
+     * Speech prosody cue(s) from the lip-sync (nods, brow raises, phrase-end blinks, smiles).
+     * @param {import('./director.js').ProsodyCue|import('./director.js').ProsodyCue[]} cue
+     */
+    setProsody(cue) { director.setProsody(cue); stage.requestRender(); },
     /** @param {number} level */
     setSpeechLevel(level) { director.setSpeechLevel(level); stage.requestRender(); },
     /** @param {{smile?:number, browUp?:number}} e */
@@ -354,6 +367,21 @@ export async function createAvatar(canvas, options = {}) {
     },
     /** Render a single frame at `time` seconds (deterministic). @param {number} time */
     renderOnce(time) { stage.renderOnce(time); },
+    /**
+     * Test / harness hook: advance the animation by `dt` seconds of a scripted clock (live
+     * dynamics, not settled), optionally rendering the result. Deterministic for a seed. Use it
+     * with autoStart: false so the render loop does not interleave its own frames.
+     * @param {number} dt @param {{ render?: boolean }} [o]
+     */
+    advance(dt, o = {}) {
+      const t = stage.time + Math.max(0, Number(dt) || 0);
+      stage.time = t;
+      update(Math.max(0, Number(dt) || 0), t, false);
+      if (o.render !== false) {
+        live = true;
+        try { stage.renderOnce(t); } finally { live = false; }
+      }
+    },
     /** Resolves after the next rendered frame. */
     nextFrame() {
       return new Promise((res) => { frameWaiters.push(res); stage.requestRender(); });

@@ -206,7 +206,8 @@ export class Director {
   /**
    * Speech prosody cue(s) from the lip-sync: subtle head nods on stressed syllables and phrase
    * starts, a brow raise on emphasis and questions, blinks at phrase ends (not mid-word) and a
-   * micro-smile after a friendly sentence. Ignored unless the avatar is speaking.
+   * micro-smile after a friendly sentence (the lip-sync sends cues only while speech plays;
+   * fixed-time renders ignore them).
    * @param {ProsodyCue|ProsodyCue[]|null} cue
    */
   setProsody(cue) {

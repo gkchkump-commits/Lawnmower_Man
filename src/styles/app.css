@@ -1203,6 +1203,103 @@ body[data-lock="1"] .drawer-head { cursor: default; }
   animation: pulse 1s infinite;
 }
 
+/* ------------------------------------------------------------------ camera (src/vision) */
+
+/* toolbar button: lit while the camera is on (or waiting for the OK on the privacy card) */
+#btn-camera[aria-pressed="true"] { color: #ff9d8f; }
+#btn-camera[aria-pressed="true"]:hover { background: rgba(255, 138, 122, 0.12); }
+
+/* always visible while the camera runs: the toolbar itself only appears on hover */
+.cam-live {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 138, 122, 0.4);
+  background: rgba(7, 11, 18, 0.62);
+  color: var(--text-2);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.cam-live[hidden],
+.shot-btn[hidden] { display: none; }
+.cam-live:hover { border-color: rgba(255, 138, 122, 0.75); color: var(--text); }
+.cam-live:focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 1px; }
+.cam-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff6b5e;
+  box-shadow: 0 0 6px rgba(255, 107, 94, 0.9);
+}
+body[data-camera="starting"] .cam-live-dot { animation: pulse 0.9s infinite; }
+/* a cyan ring once it actually sees you */
+body[data-face="present"] .cam-live-dot,
+body[data-face="looking"] .cam-live-dot { box-shadow: 0 0 6px rgba(255, 107, 94, 0.9), 0 0 0 2px rgba(127, 227, 255, 0.35); }
+
+/* 📷: a snapshot with the next message (amber while armed; dashed when every message has one) */
+.shot-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.shot-btn:hover { color: var(--amber); background: rgba(255, 184, 103, 0.08); }
+.shot-btn:focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 1px; }
+.shot-btn[aria-pressed="true"] {
+  color: var(--amber);
+  border-color: rgba(255, 184, 103, 0.55);
+  background: rgba(255, 184, 103, 0.14);
+  box-shadow: 0 0 10px rgba(255, 170, 80, 0.3);
+}
+.shot-btn.always { border-style: dashed; box-shadow: none; }
+
+/* the snapshot sent with a message */
+.msg-shots {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin: 3px 0 0;
+}
+.msg-shot {
+  display: block;
+  max-width: 112px;
+  max-height: 84px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 184, 103, 0.3);
+  opacity: 0.92;
+}
+.msg-shots figcaption {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* privacy and error cards (setup-card look) */
+.camera-card .setup-head .icon { color: #ff9d8f; }
+.camera-points { padding-left: 16px; }
+.camera-points li { margin: 3px 0; color: var(--text-2); }
+.camera-actions { justify-content: flex-end; }
+.camera-actions .btn { margin-left: 0; }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

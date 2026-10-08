@@ -25,6 +25,7 @@
  * @property {(preset: 'small'|'medium'|'large') => void} setSizePreset
  * @property {(on: boolean) => void} [setLockPosition]
  * @property {() => void} [resetPosition]
+ * @property {(on: boolean) => void} [setCamera]
  * @property {() => void} newConversation
  * @property {() => void} restartVoice
  * @property {() => void} [setupVoice]
@@ -98,6 +99,8 @@ export function buildTrayTemplate(st, a) {
     { label: 'Click-through background', type: 'checkbox', checked: !!s.window.clickThrough, click: (/** @type {any} */ item) => a.setClickThrough(!!item?.checked) },
     { label: 'Lock position', type: 'checkbox', checked: !!s.window.lockPosition, click: (/** @type {any} */ item) => a.setLockPosition?.(!!item?.checked) },
     { label: 'Reset position', click: () => a.resetPosition?.() },
+    // the avatar can see you (docs/CAMERA.md); the first time, the window explains it before it starts
+    { label: 'Camera', type: 'checkbox', checked: !!s.camera?.enabled, click: (/** @type {any} */ item) => a.setCamera?.(!!item?.checked) },
     { type: 'separator' },
     { label: 'Restart voice', click: () => a.restartVoice() },
     st.voiceSetup === 'running'

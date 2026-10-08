@@ -9,6 +9,7 @@ A holographic desktop avatar for Claude. A glowing wireframe head floats on your
 * **Brain:** your locally installed [Claude CLI](https://docs.claude.com/en/docs/claude-code). The app runs one persistent `claude -p` session over stream-json and uses your existing login; no API key is needed.
 * **Face:** a real-time WebGL hologram on your GPU, built from the frames of the reference video (`docs/reference/`).
 * **Voice:** runs locally on an NVIDIA GPU. Speech to text is [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`large-v3-turbo`); text to speech is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Both are tuned for an **RTX 5070 Laptop GPU (8 GB, Blackwell)** and fall back to the CPU automatically.
+* **Eyes (optional):** your webcam. Turned on, the avatar makes eye contact, notices when you come and go and smiles back, with face tracking that runs on your PC; Claude sees a picture only when you let it. Off by default ([docs/CAMERA.md](docs/CAMERA.md)).
 
 ![Reference video frame vs. the relief renderer vs. the procedural renderer](docs/screenshots/compare_rest.jpg)
 
@@ -78,17 +79,31 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | Type + **Enter** | send a message (Shift+Enter: new line, ↑: recall) |
 | hold **Space** (outside a text field) | push-to-talk; release to send |
 | mic button | click: listen until you stop talking; hold: push-to-talk |
+| camera button (toolbar) | turn the camera on/off; while it runs, a **● camera** light shows in the top-left corner |
+| camera button (message box) | attach a snapshot of you to the next message (only while the camera is on) |
 | **Ctrl+Shift+Space** (global; Linux/macOS: Ctrl+Alt+Space) | talk / interrupt |
 | **Ctrl+Shift+F10** (global; Linux/macOS: Ctrl+Alt+X) | stop speaking |
 | **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
 | drag the head (or the chat's status bar) | move the window; it settles fully on the screen you drop it on and remembers the place |
 | **Ctrl + mouse wheel** over the head | bigger / smaller (small, medium, large) |
-| tray icon | show/hide, always on top, click-through, lock / reset position, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
+| tray icon | show/hide, always on top, click-through, lock / reset position, camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
-Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
+Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode, the camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
 Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
+
+### The camera
+
+Off by default. Turn it on with the toolbar's camera button, *Settings › Camera* or the tray's **Camera** item; the first time, a card explains it before anything is opened. Then the avatar:
+
+* makes **eye contact** (a moving cursor still wins for a moment),
+* **dozes off** when you have been away for 2 minutes and **wakes up** with a smile when you are back,
+* **smiles back** when you smile,
+* optionally **says hello** when you sit down after 10+ minutes away (*Say hello when I sit down*),
+* optionally **listens only while you look at the screen** in hands-free mode (*Listen only when I look*).
+
+Face tracking (Google's MediaPipe Face Landmarker) runs inside the app, offline; no video is recorded or uploaded. **Claude sees you only** when *Settings › Camera › Let Claude see me* is on (a snapshot goes with every message) or when you press the camera button in the message box (the next message only); the chat shows the picture that was sent. The camera is released while the window is hidden or minimized. Details, privacy and troubleshooting: [docs/CAMERA.md](docs/CAMERA.md).
 
 ### Claude modes
 
@@ -144,6 +159,7 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `electron/` | main process: window, tray, hotkeys, `app://` protocol, CSP, settings, Claude CLI session, voice sidecar |
 | `src/avatar/` | hologram engine (three.js): stage, animation director, particles, bloom, relief / procedural / placeholder heads |
 | `src/app/`, `src/audio/`, `src/speech/`, `src/ui/` | conversation state machine, sentence chunking, lip-sync, mic and VAD, voice client, chat UI |
+| `src/vision/` | the camera: capture, face tracking (MediaPipe, in a worker), attention, presence, eye contact, snapshots ([docs/CAMERA.md](docs/CAMERA.md)) |
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
 | `docs/ARCHITECTURE.md` | the interface contract between all of the above |
@@ -168,6 +184,7 @@ Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawn
 * **"Local voice is not fully installed (missing: uvicorn)"**: an earlier setup stopped halfway. The app does not keep restarting the voice server in that state. Open *Settings › Voice*: the last lines of the failed step (pip's `ERROR: …`) are shown there, and **Open setup log** opens the whole log. Fix what it says (often: network, disk space, or a file locked by another program), then choose *Set up local voice again…*. If it fails again, send `setup.log`.
 * **Voice is slow the first time**: on RTX 50-series GPUs, the first Whisper GPU run compiles kernels once (30–90 s). After that it is fast.
 * **More voice issues** (driver, "no kernel image", cuDNN, CPU fallback): see [docs/VOICE.md § Troubleshooting](docs/VOICE.md#5-troubleshooting).
+* **"The camera is blocked"**: in Windows *Settings › Privacy & security › Camera*, turn on **Camera access** and **Let desktop apps access your camera**, then press **Try again** on the card. "In use": close Teams, Zoom, the Camera app or a video call in the browser. More in [docs/CAMERA.md](docs/CAMERA.md#when-the-camera-does-not-start).
 
 ## Credits
 

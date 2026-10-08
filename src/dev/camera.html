@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>Lawnmower Man — camera harness</title>
+    <style>
+      body { margin: 12px; background: #05080d; color: #cfe3f2; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+      .wrap { position: relative; width: 480px; }
+      video, canvas { width: 480px; display: block; transform: scaleX(-1); border-radius: 8px; }
+      canvas { position: absolute; inset: 0; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <!-- Dev only (npm run dev → /dev/camera.html): the camera, the face tracker's key points and
+         the attention signals, live. ?main=1 runs the tracker on the main thread, ?hz=N sets the rate. -->
+    <div class="wrap"><video id="v" autoplay muted playsinline></video><canvas id="c"></canvas></div>
+    <pre id="out">starting…</pre>
+    <script type="module" src="./camera.js"></script>
+  </body>
+</html>

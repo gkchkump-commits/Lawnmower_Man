@@ -45,6 +45,46 @@ export const ASSISTANT_TOOLS = 'Read,Glob,Grep,WebSearch,WebFetch';
 export const ASSISTANT_ALLOWED_TOOLS = 'WebSearch';
 /** Longest single user turn we accept (characters). */
 export const MAX_TURN_CHARS = 100_000;
+/** Images a user turn may carry (webcam snapshots, docs/CAMERA.md). */
+export const MAX_TURN_IMAGES = 2;
+/** Largest image we pass on, in characters of base64 (~1.1 MB of image data). */
+export const MAX_IMAGE_BASE64 = 1.5 * 1024 * 1024;
+/** Image types the Claude API accepts in an image content block (and that we pass on). */
+export const IMAGE_MEDIA_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
+
+/**
+ * @typedef {{ mediaType: 'image/jpeg'|'image/png'|'image/webp', data: string }} TurnImage
+ *   data: base64 without a data: prefix (electron/ipc-validate.js checks it fully)
+ */
+
+/**
+ * The content blocks of a user turn: the text first, then one base64 image block per image
+ * (the stream-json format the CLI accepts: `{"type":"image","source":{"type":"base64",…}}`).
+ * @param {string} text @param {TurnImage[]} [images]
+ */
+export function userMessageContent(text, images = []) {
+  /** @type {Array<Record<string, any>>} */
+  const content = [{ type: 'text', text }];
+  for (const img of images) content.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+  return content;
+}
+
+/**
+ * Light shape check of send() options (main validates IPC input fully in ipc-validate.js).
+ * @param {unknown} o @returns {TurnImage[]}
+ */
+function turnImages(o) {
+  const images = o && typeof o === 'object' ? /** @type {any} */ (o).images : undefined;
+  if (images === undefined || images === null) return [];
+  if (!Array.isArray(images)) throw new TypeError('images must be an array');
+  if (images.length > MAX_TURN_IMAGES) throw new Error(`A message can carry at most ${MAX_TURN_IMAGES} images`);
+  return images.map((img) => {
+    if (!img || !IMAGE_MEDIA_TYPES.includes(img.mediaType) || typeof img.data !== 'string' || !img.data || img.data.length > MAX_IMAGE_BASE64) {
+      throw new Error('Invalid image (expected { mediaType: image/jpeg|png|webp, data: base64 })');
+    }
+    return { mediaType: img.mediaType, data: img.data };
+  });
+}
 
 /**
  * How the Claude CLI words a missing or expired login (code.claude.com/docs/en/errors, checked
@@ -279,7 +319,7 @@ export class ClaudeSession extends EventEmitter {
     this._pendingRestart = false;
     /** @type {{ key: string, path: string, version?: string, source?: string }|null} */
     this._cli = null;
-    /** @type {{ turnId: string, text: string }[]} */
+    /** @type {{ turnId: string, text: string, images: TurnImage[] }[]} */
     this._queue = [];
     /** @type {Turn|null} */
     this._active = null;
@@ -307,13 +347,15 @@ export class ClaudeSession extends EventEmitter {
    * Queue a user turn. Resolves as soon as it is queued (the reply streams as events).
    * Rejects if the text is invalid or the Claude CLI cannot be found at all.
    * @param {string} text
+   * @param {{ images?: TurnImage[] }} [opts]  images go into the turn after the text
    * @returns {Promise<{ turnId: string }>}
    */
-  async send(text) {
+  async send(text, opts) {
     if (typeof text !== 'string') throw new TypeError('text must be a string');
     const clean = text.replace(/\r\n?/g, '\n');
     if (!clean.trim()) throw new Error('Message is empty');
     if (clean.length > MAX_TURN_CHARS) throw new Error(`Message is too long (max ${MAX_TURN_CHARS} characters)`);
+    const images = turnImages(opts);
     this._stopped = false;
 
     // Fail fast (and visibly) when there is no CLI at all, instead of queueing forever.
@@ -325,7 +367,7 @@ export class ClaudeSession extends EventEmitter {
     }
 
     const turnId = `turn-${++this._turnCounter}-${Date.now().toString(36)}`;
-    this._queue.push({ turnId, text: clean });
+    this._queue.push({ turnId, text: clean, images });
     if (!this._procInfo && !this._starting) {
       // Not running (never started, stopped, gave up, or waiting in backoff): start now.
       if (this._restartTimer) {
@@ -916,7 +958,7 @@ export class ClaudeSession extends EventEmitter {
     };
     this._setStatus('busy');
     this._emit({ type: 'turn_start', turnId: next.turnId, text: next.text });
-    const ok = this._write({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: next.text }] } });
+    const ok = this._write({ type: 'user', message: { role: 'user', content: userMessageContent(next.text, next.images) } });
     if (!ok) this._log('warn', '[claude] could not write the turn to stdin; waiting for restart');
   }
 

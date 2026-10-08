@@ -69,6 +69,7 @@ import {
   validateSetupOptions,
   validateSizePreset,
   validateTurnId,
+  validateTurnOptions,
   validateTurnText,
 } from './ipc-validate.js';
 import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
@@ -328,15 +329,17 @@ function setupSessionSecurity(ses) {
       callback({ responseHeaders: details.responseHeaders });
     }
   });
+  // The camera (media with video) is allowed only while settings.camera.enabled is on.
+  const policy = () => ({ ...trust, camera: !!state.settings?.get().camera?.enabled });
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
     const d = /** @type {any} */ (details);
-    const ok = decidePermission(permission, { url: d.requestingUrl, mediaTypes: d.mediaTypes }, trust);
-    if (!ok) state.log('info', `[security] denied permission "${permission}" for ${d.requestingUrl}`);
+    const ok = decidePermission(permission, { url: d.requestingUrl, mediaTypes: d.mediaTypes }, policy());
+    if (!ok) state.log('info', `[security] denied permission "${permission}"${Array.isArray(d.mediaTypes) ? ` (${d.mediaTypes.join('+')})` : ''} for ${d.requestingUrl}`);
     callback(ok);
   });
   ses.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
     const d = /** @type {any} */ (details) || {};
-    return decidePermission(permission, { url: requestingOrigin || d.requestingUrl, mediaType: d.mediaType }, trust);
+    return decidePermission(permission, { url: requestingOrigin || d.requestingUrl, mediaType: d.mediaType }, policy());
   });
   if (typeof ses.setDevicePermissionHandler === 'function') ses.setDevicePermissionHandler(() => false);
 }
@@ -519,6 +522,7 @@ function cursorTrackingWanted() {
 }
 
 function syncCursorTracking() {
+  notifyVisibility();
   if (!state.cursor) return;
   if (cursorTrackingWanted()) state.cursor.start();
   else state.cursor.stop();
@@ -590,6 +594,16 @@ function resetPosition() {
   savePosition();
 }
 
+/**
+ * Tell the renderer whether the window can be seen: the camera pauses (and is released) while it
+ * cannot. With backgroundThrottling off, document.visibilityState always says "visible".
+ */
+function notifyVisibility() {
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  sendToRenderer('lm:window:visibility', { visible: win.isVisible() && !win.isMinimized() });
+}
+
 function savePosition() {
   const win = state.win;
   if (!win || win.isDestroyed()) return;
@@ -654,7 +668,7 @@ function onSettingsChanged(next, prev) {
     if (next.window.clickThrough !== prev.window.clickThrough && !next.window.clickThrough) applyMouseIgnore(false);
     if (next.window.sizePreset !== prev.window.sizePreset || next.window.showChat !== prev.window.showChat) applyWindowLayout();
   }
-  if (changed('window') || changed('claude') || changed('hotkeys')) rebuildTray();
+  if (changed('window') || changed('claude') || changed('hotkeys') || changed('camera')) rebuildTray();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -687,6 +701,7 @@ const trayActions = {
   setSizePreset: (/** @type {string} */ preset) => state.settings?.update({ window: { sizePreset: preset } }),
   setLockPosition: (/** @type {boolean} */ on) => state.settings?.update({ window: { lockPosition: on } }),
   resetPosition: () => resetPosition(),
+  setCamera: (/** @type {boolean} */ on) => state.settings?.update({ camera: { enabled: on } }),
   newConversation: () => {
     state.claude?.reset().catch((err) => state.log('warn', `[claude] reset failed: ${err.message}`));
   },
@@ -784,7 +799,7 @@ function registerIpc() {
   const voice = /** @type {VoiceSidecar} */ (state.voice);
   const settings = /** @type {SettingsStore} */ (state.settings);
 
-  handle('lm:claude:send', (text) => claude.send(validateTurnText(text)));
+  handle('lm:claude:send', (text, options) => claude.send(validateTurnText(text), validateTurnOptions(options)));
   handle('lm:claude:cancel', (turnId) => claude.cancel(validateTurnId(turnId)));
   handle('lm:claude:interrupt', () => claude.interrupt());
   handle('lm:claude:reset', () => claude.reset());
@@ -821,6 +836,7 @@ function registerIpc() {
       // Extensions beyond the contract (renderer may ignore):
       layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea()),
       clickThroughSupported: CLICK_THROUGH_SUPPORTED,
+      visible: !!state.win && !state.win.isDestroyed() && state.win.isVisible() && !state.win.isMinimized(),
       hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
       gpu: state.gpu,
       logFile: state.log.file,

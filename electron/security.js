@@ -76,20 +76,22 @@ export function isTrustedUrl(url, o = {}) {
 }
 
 /**
- * Permission policy: only microphone capture ('media' with audio only) and sanitized clipboard
- * writes (copy buttons in the chat panel) for our own origin. Everything else is denied.
+ * Permission policy, for our own origin only: microphone capture ('media' with audio), the
+ * camera ('media' with video) only while settings.camera.enabled is on (`o.camera`), and
+ * sanitized clipboard writes (copy buttons in the chat panel). Everything else is denied.
  * @param {string} permission
  * @param {{ url?: string, mediaTypes?: string[], mediaType?: string }} details
- * @param {{ devServerUrl?: string|null }} [o]
+ * @param {{ devServerUrl?: string|null, camera?: boolean }} [o]
  */
 export function decidePermission(permission, details, o = {}) {
   if (!isTrustedUrl(details && details.url, o)) return false;
   if (permission === 'media') {
+    const allowed = o.camera === true ? ['audio', 'video'] : ['audio'];
     if (Array.isArray(details.mediaTypes)) {
-      return details.mediaTypes.length > 0 && details.mediaTypes.every((t) => t === 'audio');
+      return details.mediaTypes.length > 0 && details.mediaTypes.every((t) => allowed.includes(t));
     }
     // Permission *checks* carry a single mediaType ('audio' | 'video' | 'unknown').
-    return details.mediaType === 'audio' || details.mediaType === undefined;
+    return details.mediaType === undefined || allowed.includes(details.mediaType);
   }
   return permission === 'clipboard-sanitized-write';
 }

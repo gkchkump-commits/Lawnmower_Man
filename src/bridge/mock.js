@@ -13,6 +13,9 @@
 // ?claudeRetries=N failed attempts). voice.setup() answers with the manual command, as main
 // does when it cannot open a terminal. ?voiceSetup=failed starts after a failed setup run (the
 // output tail and "Open setup log" in the drawer); voice.openSetupLog() is recorded.
+// claude.send(text, { images }) checks images like main does (≤ 2 JPEG/PNG/WebP, base64 without
+// a data: prefix, ≤ 1.5 MB) and acknowledges them in the reply; __mock.images() lists what
+// arrived (for the camera tests).
 
 import { DEFAULT_SETTINGS, clone, deepMerge, isPlainObject } from '../app/settings-defaults.js';
 import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
@@ -56,7 +59,24 @@ export const MOCK_REPLIES = Object.freeze({
   tool: "Sure, I'll run the tests for you.",
   toolAllowed: 'Done. All 42 tests passed in about three seconds.',
   toolDenied: "Okay, I won't run it. Let me know if you change your mind.",
+  image: "Thanks for the picture! I'm the mock bridge, so I can't really look at it, but it arrived. The desktop app passes it to Claude.",
 });
+
+/** Like electron/ipc-validate.js validateTurnOptions (lighter: no magic-byte check). @param {unknown} o */
+export function mockTurnImages(o) {
+  if (o === undefined || o === null) return [];
+  if (!isPlainObject(o)) throw new Error('Message options must be an object');
+  const images = /** @type {any} */ (o).images;
+  if (images === undefined || images === null) return [];
+  if (!Array.isArray(images)) throw new Error('Message images must be a list');
+  if (images.length > 2) throw new Error('A message can carry at most 2 images');
+  return images.map((img) => {
+    if (!isPlainObject(img) || !['image/jpeg', 'image/png', 'image/webp'].includes(img.mediaType)) throw new Error('The image must be a JPEG, PNG or WebP image');
+    if (typeof img.data !== 'string' || !img.data || /^data:/i.test(img.data)) throw new Error('The image must be plain base64 (without a data: prefix)');
+    if (img.data.length > 1.5 * 1024 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(img.data)) throw new Error('The image is too large or not valid base64');
+    return { mediaType: img.mediaType, data: img.data };
+  });
+}
 
 /** @param {string} text */
 export function pickScript(text) {
@@ -189,8 +209,10 @@ export function createMockBridge(options = {}) {
   let sessionId = '';
   let turnCounter = 0;
   let permCounter = 0;
-  /** @type {Array<{ turnId: string, text: string }>} */
+  /** @type {Array<{ turnId: string, text: string, images: Array<{ mediaType: string, data: string }> }>} */
   const queue = [];
+  /** @type {Array<{ turnId: string, text: string, mediaType: string, data: string }>} images received (test hook) */
+  const received = [];
   /** @type {any} */
   let active = null;
   /** @type {Map<string, { turnId: string, input: any, resolve: (d: any) => void }>} */
@@ -283,7 +305,7 @@ export function createMockBridge(options = {}) {
       return;
     }
     if (problem && problem.kind === 'auth') setProblem(null);
-    const script = pickScript(q.text);
+    const script = q.images?.length ? { kind: 'say', say: MOCK_REPLIES.image } : pickScript(q.text);
     let isError = false;
     await sleep(opt.firstTokenMs * 0.5);
     if (!turn.interrupted) emit({ type: 'thinking', turnId: turn.turnId });
@@ -330,18 +352,23 @@ export function createMockBridge(options = {}) {
   }
 
   const claude = {
-    /** @param {string} text */
-    async send(text) {
+    /** @param {string} text @param {{ images?: Array<{ mediaType: string, data: string }> }} [options] */
+    async send(text, options) {
       if (typeof text !== 'string') throw new TypeError('text must be a string');
       const clean = text.replace(/\r\n?/g, '\n');
       if (!clean.trim()) throw new Error('Message is empty');
       if (clean.length > 100000) throw new Error('Message is too long (max 100000 characters)');
+      const images = mockTurnImages(options);
       if (cli === 'missing') {
         setStatus('error', MOCK_NOT_FOUND);
         throw new Error(MOCK_NOT_FOUND);
       }
       const turnId = `turn-${++turnCounter}-${Date.now().toString(36)}`;
-      queue.push({ turnId, text: clean });
+      if (images.length) {
+        calls.push(['claude.send', { text: clean, images: images.map((i) => ({ mediaType: i.mediaType, chars: i.data.length })) }]);
+        for (const img of images) received.push({ turnId, text: clean, ...img });
+      }
+      queue.push({ turnId, text: clean, images });
       // like the real session: the turn may start (turn_start) before send() resolves
       pump();
       return { turnId };
@@ -577,6 +604,8 @@ export function createMockBridge(options = {}) {
       /** @param {any} info */
       emitVoice: (info) => deliver('voice', info),
       settings: () => clone(settings),
+      /** Images claude.send() received, oldest first ({ turnId, text, mediaType, data }). */
+      images: () => received.map((r) => ({ ...r })),
       pendingPermissions: () => [...permissions.keys()],
       dispose: () => clearTimeout(startTimer),
     },

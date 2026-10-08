@@ -27,6 +27,9 @@ import { computeLayout } from './ui/layout.js';
 import { SettingsDrawer } from './ui/settings-drawer.js';
 import { setupTailView } from './ui/setup-cards.js';
 import { copyText } from './ui/transcript.js';
+import { CameraFeature } from './vision/index.js';
+import { GazeArbiter } from './vision/gaze.js';
+import { CameraUi, cameraInfoLines } from './vision/ui.js';
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -130,6 +133,8 @@ async function boot() {
       if (open) {
         refreshInfo();
         refreshAppInfo(); // e.g. hotkey conflicts may have changed since boot
+        camera?.refreshDevices();
+        refreshCameraInfo();
       }
     },
   });
@@ -147,6 +152,7 @@ async function boot() {
     },
     onCreated: (a) => {
       controller?.setAvatar(a);
+      gaze.reapply(); // the new avatar starts without a gaze target
       app.avatarReady = true;
       body.dataset.avatar = a.renderer || 'none';
     },
@@ -155,6 +161,11 @@ async function boot() {
   });
   app.avatarHost = avatarHost;
   Object.defineProperty(app, 'avatar', { get: () => avatarHost.avatar });
+  // where the eyes look: the cursor, or (camera) the user's face — see src/vision/gaze.js
+  const gaze = new GazeArbiter({ apply: (t) => (t ? avatarHost.avatar.lookAt(t[0], t[1]) : avatarHost.avatar.lookAt(null)) });
+  app.gaze = gaze;
+  /** @type {CameraFeature|null} the camera (created after the controller) */
+  let camera = null;
 
   // ---------------------------------------------------------------- controller
   controller = new Controller({
@@ -194,7 +205,8 @@ async function boot() {
     syncLockAttr();
     if (settings.window.lockPosition) windowDrag.release();
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
-    if (!settings.avatar.followCursor) avatarHost.avatar.lookAt(null);
+    if (!settings.avatar.followCursor) gaze.releaseCursor();
+    camera?.applySettings(settings);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
     if (prev.voice.systemVoice !== settings.voice.systemVoice) {
       webSpeech.setPreferred(settings.voice.systemVoice);
@@ -422,8 +434,62 @@ async function boot() {
     drawer.setInfo('hotkeyInfo', hk);
   }
 
+  // ---------------------------------------------------------------- camera (docs/CAMERA.md)
+  let cameraInfoTimer = 0;
+  /** The drawer's Camera info block (only while the drawer is open; at most ~4 times a second). */
+  function refreshCameraInfo() {
+    if (!camera || !drawer.isOpen || cameraInfoTimer) return;
+    cameraInfoTimer = /** @type {any} */ (setTimeout(() => {
+      cameraInfoTimer = 0;
+      if (camera && drawer.isOpen) drawer.setInfo('cameraInfo', cameraInfoLines(camera.status));
+    }, 250));
+  }
+  const cameraUi = new CameraUi(
+    { body, cards: $('cards'), button: /** @type {HTMLButtonElement} */ ($('btn-camera')), indicator: /** @type {HTMLButtonElement} */ ($('cam-live')), shot: /** @type {HTMLButtonElement} */ ($('shot')) },
+    {
+      onToggle: () => camera?.toggle(),
+      onShot: () => camera?.toggleShot(),
+      toast: (msg, level) => view.toast(msg, /** @type {any} */ (level)),
+      setDevices: (cams) => drawer.setCameraOptions(cams),
+      changed: () => refreshCameraInfo(),
+    },
+  );
+  camera = new CameraFeature({
+    getSettings: () => settings,
+    saveSettings: (patch) => {
+      const [group, fields] = Object.entries(patch)[0];
+      const [key, value] = Object.entries(/** @type {any} */ (fields))[0];
+      return saveSettings(patch, `${group}.${key}`, value);
+    },
+    controller,
+    getAvatar: () => avatarHost.avatar,
+    gaze,
+    view: cameraUi,
+    platform,
+    userBusy: () => !!composer.text.trim(),
+  });
+  app.camera = camera;
+  // the camera pauses while the window cannot be seen: main reports it (with backgroundThrottling
+  // off, document.visibilityState always says "visible" in Electron); the browser preview uses
+  // the Page Visibility API
+  if (typeof bridge.window.onVisibility === 'function') {
+    // subscribe first, then ask (the boot-time app.info() may predate the window being shown)
+    let heard = false;
+    bridge.window.onVisibility((v) => {
+      heard = true;
+      camera?.setVisible(v?.visible !== false);
+    });
+    bridge.app.info().then((i) => {
+      if (!heard && i && typeof i.visible === 'boolean') camera?.setVisible(i.visible);
+    }, () => {});
+  } else {
+    document.addEventListener('visibilitychange', () => camera?.setVisible(document.visibilityState === 'visible'));
+  }
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => camera?.refreshDevices());
+
   // ---------------------------------------------------------------- start
   await controller.start();
+  camera.applySettings(settings);
   webSpeech.setPreferred(settings.voice.systemVoice);
   webSpeech.onVoicesChanged(() => {
     drawer.setSystemVoiceOptions(webSpeech.allVoices());
@@ -512,9 +578,8 @@ async function boot() {
     if (!settings.avatar.followCursor) return;
     const g = gazeFromPoint(x, y, stage.getBoundingClientRect());
     if (!g) return;
-    avatarHost.avatar.lookAt(g[0], g[1]);
     clearTimeout(releaseGaze);
-    releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), releaseMs));
+    gaze.cursor(g, releaseMs); // holds for releaseMs, or 1.5 s while the camera sees the user
   };
   // Desktop app: main reports the cursor anywhere on the screen (~30 Hz, only when it moves),
   // so the eyes follow it outside the window and while it is being dragged too. The browser preview
@@ -585,7 +650,7 @@ async function boot() {
     gate.leave();
     if (globalCursor) return; // the global cursor keeps the eyes following outside the window
     clearTimeout(releaseGaze);
-    releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), 1200));
+    releaseGaze = /** @type {any} */ (setTimeout(() => gaze.releaseCursor(), 1200));
   });
   window.addEventListener('pointerdown', () => {
     gate.hold('pointer', true);

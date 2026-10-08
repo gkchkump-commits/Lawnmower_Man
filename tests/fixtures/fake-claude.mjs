@@ -23,6 +23,10 @@
 //   "subagent"→ includes a sub-agent stream (parent_tool_use_id set) that must be ignored
 //   "notloggedin" → answers like a CLI without a login (see FAKE_CLAUDE_AUTH_FILE)
 //   otherwise → "You said: <text>" in a few chunks
+// Image content blocks after the text (webcam snapshots) are checked like the API does (base64
+// source, JPEG/PNG/WebP whose bytes match the media type) and acknowledged in the reply:
+// "You said: <text> [saw 1 image: image/jpeg 640x480, 41234 bytes]"; a malformed one gives an
+// error result "invalid image" instead.
 //
 // Env:
 //   FAKE_CLAUDE_STATE_DIR  persist per-session history (so --resume really resumes)
@@ -194,7 +198,43 @@ async function interruptedResult() {
   await out({ type: 'result', subtype: 'error_during_execution', is_error: true, duration_ms: 5, session_id: sessionId, total_cost_usd: 0, errors: ['[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null'], uuid: randomUUID() });
 }
 
-async function runTurn(text) {
+/**
+ * Check image blocks like the Messages API would and describe them for the reply.
+ * @param {any[]} blocks @returns {{ ok: true, note: string }|{ ok: false, error: string }}
+ */
+function describeImages(blocks) {
+  const seen = [];
+  for (const b of blocks) {
+    const src = b && b.source;
+    if (!src || src.type !== 'base64' || typeof src.data !== 'string' || !src.data) return { ok: false, error: 'invalid image: expected a base64 source' };
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(src.media_type)) return { ok: false, error: `invalid image: unsupported media_type ${src.media_type}` };
+    if (/^data:/.test(src.data)) return { ok: false, error: 'invalid image: data must not carry a data: prefix' };
+    const bytes = Buffer.from(src.data, 'base64');
+    const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+    const png = bytes[0] === 0x89 && bytes[1] === 0x50;
+    const webp = bytes.subarray(0, 4).toString('latin1') === 'RIFF';
+    if ((src.media_type === 'image/jpeg' && !jpeg) || (src.media_type === 'image/png' && !png) || (src.media_type === 'image/webp' && !webp)) {
+      return { ok: false, error: `invalid image: the data is not ${src.media_type}` };
+    }
+    const size = jpeg ? jpegSize(bytes) : png ? `${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}` : '';
+    seen.push(`${src.media_type}${size ? ` ${size}` : ''}, ${bytes.length} bytes`);
+  }
+  return { ok: true, note: seen.length ? ` [saw ${seen.length} image${seen.length > 1 ? 's' : ''}: ${seen.join('; ')}]` : '' };
+}
+
+/** Width x height from a JPEG's SOF marker ('' when not found). @param {Buffer} b */
+function jpegSize(b) {
+  for (let i = 2; i + 9 < b.length;) {
+    if (b[i] !== 0xff) return '';
+    const marker = b[i + 1];
+    const len = b.readUInt16BE(i + 2);
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return `${b.readUInt16BE(i + 7)}x${b.readUInt16BE(i + 5)}`;
+    i += 2 + len;
+  }
+  return '';
+}
+
+async function runTurn(text, images = []) {
   current = { interrupted: false, hang: false };
   const prev = history.length ? history[history.length - 1] : null;
   history.push(text);
@@ -318,10 +358,16 @@ async function runTurn(text) {
     return;
   }
 
+  const seen = describeImages(images);
+  if (!seen.ok) {
+    await streamText(`API Error: 400 ${seen.error}`);
+    await result(`API Error: 400 ${seen.error}`, { isError: true, subtype: 'error_during_execution' });
+    return;
+  }
   let reply;
   if (lower.includes('args')) reply = JSON.stringify({ argv, cwd: process.cwd() });
   else if (lower.includes('recall')) reply = prev ? `You previously said: ${prev}` : 'You have not said anything before.';
-  else reply = `You said: ${text}`;
+  else reply = `You said: ${text}${seen.note}`;
   const finished = await streamText(reply);
   if (!finished) { await interruptedResult(); return; }
   await out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' }, ...base() });
@@ -334,7 +380,7 @@ async function drain() {
   while (queue.length) {
     const next = queue.shift();
     try {
-      await runTurn(next.text);
+      await runTurn(next.text, next.images);
     } catch (err) {
       process.stderr.write(`fake-claude internal error: ${err && err.stack}\n`);
     }
@@ -399,7 +445,8 @@ function handleInput(msg) {
   if (msg.type === 'user') {
     const content = msg.message && msg.message.content;
     const text = Array.isArray(content) ? content.filter((b) => b.type === 'text').map((b) => b.text).join('') : String(content || '');
-    queue.push({ text });
+    const images = Array.isArray(content) ? content.filter((b) => b && b.type === 'image') : [];
+    queue.push({ text, images });
     drain();
   }
 }

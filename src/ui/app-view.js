@@ -75,6 +75,11 @@ export class AppView {
     this.transcript.markUser(id, status, detail);
   }
 
+  /** Camera snapshots sent with a message (thumbnails, "sent to Claude"). */
+  attachUserImages(id, thumbs) {
+    this.transcript.attachImages(id, thumbs);
+  }
+
   assistantStart(turnId) {
     this.transcript.startAssistant(turnId);
   }

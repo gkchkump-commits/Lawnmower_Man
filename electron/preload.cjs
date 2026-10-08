@@ -34,7 +34,8 @@ function subscribe(channel, cb) {
 
 const api = {
   claude: {
-    send: (text) => invoke('lm:claude:send', text),
+    // options: { images?: [{ mediaType, data }] } (webcam snapshots, validated in main)
+    send: (text, options) => invoke('lm:claude:send', text, options),
     cancel: (turnId) => invoke('lm:claude:cancel', turnId),
     interrupt: () => invoke('lm:claude:interrupt'),
     reset: () => invoke('lm:claude:reset'),
@@ -69,6 +70,8 @@ const api = {
     minimize: () => send('lm:window:minimize'),
     hide: () => send('lm:window:hide'),
     quit: () => send('lm:window:quit'),
+    // { visible }: the window was shown / hidden / minimized / restored (the camera pauses)
+    onVisibility: (cb) => subscribe('lm:window:visibility', cb),
   },
   onHotkey: (cb) => subscribe('lm:hotkey', cb),
   // Global cursor position {x, y} in CSS px relative to the window's top-left (may be outside).

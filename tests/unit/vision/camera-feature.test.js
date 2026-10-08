@@ -1,0 +1,430 @@
+// CameraFeature (src/vision/index.js) with fakes: consent, start/stop/errors, visibility,
+// behaviours (eye contact, presence sleep/wake, smile back, greeting, look-to-talk), the
+// detection rate, and the pictures it hands the controller.
+import { describe, expect, it, vi } from 'vitest';
+import { Emitter } from '../../../src/app/emitter.js';
+import { withDefaults, deepMerge } from '../../../src/app/settings-defaults.js';
+import { summarizeFaceResult } from '../../../src/vision/attention.js';
+import { CONSENT_KEY, CameraFeature, MIRROR_SMILE, TRACK_RATES, WELCOME, greetingPrompt } from '../../../src/vision/index.js';
+import { faceResult } from './helpers.js';
+
+const MIN = 60_000;
+const face = (o) => summarizeFaceResult(faceResult(o), 320, 240);
+
+function setup(o = {}) {
+  let now = 1000;
+  const timers = [];
+  const clock = {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      const t = { fn, at: now + ms };
+      timers.push(t);
+      return t;
+    },
+    clearTimeout: (t) => {
+      const i = timers.indexOf(t);
+      if (i >= 0) timers.splice(i, 1);
+    },
+  };
+  const advance = (ms) => {
+    const end = now + ms;
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at);
+      const t = timers[0];
+      if (!t || t.at > end) break;
+      timers.shift();
+      now = t.at;
+      t.fn();
+    }
+    now = end;
+  };
+  let settings = withDefaults(deepMerge({ camera: { enabled: false } }, o.settings || {}));
+  const saved = [];
+  const camera = Object.assign(new Emitter(), {
+    label: 'Fake Cam',
+    video: null,
+    fail: /** @type {string[]} */ ([]),
+    start: vi.fn(async () => {
+      const f = camera.fail.shift();
+      if (f) throw Object.assign(new Error(f), { name: f });
+      camera.video = { readyState: 4, videoWidth: 640, videoHeight: 480 };
+    }),
+    stop: vi.fn(() => { camera.video = null; }),
+  });
+  const trackers = [];
+  const createTracker = () => {
+    const t = Object.assign(new Emitter(), {
+      mode: 'worker', delegate: 'CPU', rate: 0, lastMs: 0, frames: 0,
+      start: vi.fn(async () => { t.emit('ready', { mode: 'worker' }); }),
+      setVideo: vi.fn(), setRate: vi.fn((hz) => { t.rate = hz; }), dispose: vi.fn(),
+    });
+    trackers.push(t);
+    return t;
+  };
+  const expressions = [];
+  const avatar = { setExpression: vi.fn((e) => expressions.push(e)), blink: vi.fn() };
+  const gazes = [];
+  const gaze = { setFace: vi.fn((g) => gazes.push(g)) };
+  const controller = {
+    state: 'idle', sleeping: false, claudeProblem: null, claudeStatus: { status: 'ready' },
+    provider: null, gate: true, sent: [],
+    idle: true,
+    isIdle: () => controller.idle,
+    setSnapshotProvider: (p) => { controller.provider = p; },
+    setListenGate: vi.fn((open) => { controller.gate = open; }),
+    sleep: vi.fn(() => { controller.sleeping = true; return true; }),
+    noteActivity: vi.fn(() => { controller.sleeping = false; }),
+    sendText: vi.fn((text, opts) => { controller.sent.push([text, opts]); return true; }),
+  };
+  const store = new Map(o.consent ? [[CONSENT_KEY, 'yes']] : []);
+  const view = {
+    states: [], consent: null, errors: [], toasts: [],
+    setState: (s) => view.states.push(s),
+    showConsent: (cb) => { view.consent = cb; },
+    hideConsent: () => { view.consent = null; },
+    showError: (m, cb) => view.errors.push({ m, cb }),
+    hideError: vi.fn(),
+    toast: (m) => view.toasts.push(m),
+    setDevices: vi.fn(),
+  };
+  const capture = vi.fn(async () => ({ mediaType: 'image/jpeg', data: '/9j/AAAA', width: 640, height: 480, thumb: 'data:image/jpeg;base64,/9j/BB' }));
+  const feat = new CameraFeature({
+    getSettings: () => settings,
+    saveSettings: vi.fn(async (patch) => {
+      saved.push(patch);
+      settings = withDefaults(deepMerge(settings, patch));
+      feat.applySettings(settings);
+    }),
+    controller, getAvatar: () => avatar, gaze, view, camera, createTracker,
+    storage: { get: (k) => store.get(k) ?? null, set: (k, v) => store.set(k, v) },
+    capture, listCameras: async () => [{ id: 'a', label: 'Fake Cam' }],
+    userBusy: () => !!o.userBusy?.(),
+    platform: 'win32', ...clock,
+  });
+  const set = (patch) => {
+    settings = withDefaults(deepMerge(settings, patch));
+    feat.applySettings(settings);
+  };
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  /** a tracker frame at the current time, then advance */
+  const frame = (obs, dt = 83) => {
+    trackers.at(-1).emit('observation', { obs, t: now, ms: 10 });
+    advance(dt);
+  };
+  return { feat, camera, trackers, controller, avatar, expressions, gaze, gazes, view, store, saved, capture, set, flush, frame, advance, now: () => now, settings: () => settings };
+}
+
+describe('CameraFeature: turning the camera on and off', () => {
+  it('the first time, the privacy card comes first; nothing is opened before the OK', async () => {
+    const h = setup();
+    h.set({ camera: { enabled: true } });
+    expect(h.feat.state).toBe('consent');
+    expect(h.camera.start).not.toHaveBeenCalled();
+    expect(h.view.consent).toBeTruthy();
+    h.view.consent.onAccept();
+    await h.flush();
+    expect(h.store.get(CONSENT_KEY)).toBe('yes');
+    expect(h.camera.start).toHaveBeenCalledWith('');
+    expect(h.feat.state).toBe('on');
+    expect(h.trackers).toHaveLength(1);
+    expect(h.trackers[0].setVideo).toHaveBeenCalledWith(h.camera.video);
+    expect(h.view.setDevices).toHaveBeenCalled();
+    expect(h.view.states.at(-1)).toMatchObject({ state: 'on' });
+  });
+
+  it('"Not now" turns the setting off again; the next time asks again', async () => {
+    const h = setup();
+    h.set({ camera: { enabled: true } });
+    h.view.consent.onDecline();
+    await h.flush();
+    expect(h.saved).toEqual([{ camera: { enabled: false } }]);
+    expect(h.feat.state).toBe('off');
+    expect(h.camera.start).not.toHaveBeenCalled();
+    h.set({ camera: { enabled: true } });
+    expect(h.feat.state).toBe('consent');
+  });
+
+  it('after the OK once, it starts straight away; turning it off releases camera and tracker', async () => {
+    const h = setup({ consent: true });
+    h.set({ camera: { enabled: true, deviceId: 'cam-2' } });
+    await h.flush();
+    expect(h.camera.start).toHaveBeenCalledWith('cam-2');
+    expect(h.feat.state).toBe('on');
+    h.set({ camera: { deviceId: 'cam-3' } }); // another camera: reopened
+    await h.flush();
+    expect(h.camera.start).toHaveBeenLastCalledWith('cam-3');
+    h.set({ camera: { enabled: false } });
+    expect(h.camera.stop).toHaveBeenCalled();
+    expect(h.trackers[0].dispose).toHaveBeenCalled();
+    expect(h.feat.state).toBe('off');
+    expect(h.gazes.at(-1)).toBeNull();
+    expect(h.controller.gate).toBe(true);
+  });
+
+  it('a blocked camera shows the Windows card; Try again retries, "Turn off" saves the setting', async () => {
+    const h = setup({ consent: true });
+    h.camera.fail.push('NotAllowedError');
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    expect(h.feat.state).toBe('error');
+    expect(h.view.errors[0].m.kind).toBe('denied');
+    expect(h.view.errors[0].m.steps.join(' ')).toMatch(/Let desktop apps access your camera/);
+    h.view.errors[0].cb.onRetry();
+    await h.flush();
+    expect(h.feat.state).toBe('on');
+    h.camera.fail.push('NotReadableError');
+    h.set({ camera: { deviceId: 'other' } });
+    await h.flush();
+    expect(h.view.errors[1].m.kind).toBe('busy');
+    h.view.errors[1].cb.onTurnOff();
+    await h.flush();
+    expect(h.saved.at(-1)).toEqual({ camera: { enabled: false } });
+    expect(h.feat.state).toBe('off');
+  });
+
+  it('a camera that stops by itself (unplugged, taken over) shows the error card', async () => {
+    const h = setup({ consent: true });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    h.camera.emit('ended');
+    expect(h.feat.state).toBe('error');
+    expect(h.view.errors.at(-1).m.kind).toBe('busy');
+  });
+
+  it('face tracking that gives up keeps the camera (snapshots work), opens the listen gate, retries on the next start', async () => {
+    const h = setup({ consent: true, settings: { camera: { lookToTalk: true }, voice: { handsFree: true } } });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    for (let i = 0; i < 6; i++) h.frame(face({ yawDeg: 45 }));
+    expect(h.controller.gate).toBe(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    h.trackers[0].emit('error', Object.assign(new Error('the face tracker stopped answering'), { fatal: true }));
+    warn.mockRestore();
+    expect(h.feat.tracking).toBe('failed');
+    expect(h.feat.state).toBe('on');
+    expect(h.view.toasts.at(-1)).toMatch(/not available \(the face tracker stopped answering\)/);
+    expect(h.controller.gate).toBe(true);
+    expect(h.controller.provider.wants({ hidden: false })).toBe(false);
+    h.feat.toggleShot();
+    expect(h.controller.provider.wants({ hidden: false })).toBe(true); // pictures still work
+    h.feat.setVisible(false);
+    h.feat.setVisible(true);
+    await h.flush();
+    expect(h.trackers[0].dispose).toHaveBeenCalled();
+    expect(h.trackers).toHaveLength(2);
+    expect(h.feat.tracking).toBe('on');
+    expect(h.feat.trackingError).toBe('');
+  });
+
+  it('pauses and releases the camera while the window is hidden, resumes when shown', async () => {
+    const h = setup({ consent: true });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    h.feat.setVisible(false);
+    expect(h.feat.state).toBe('paused');
+    expect(h.camera.stop).toHaveBeenCalled();
+    expect(h.trackers[0].setRate).toHaveBeenLastCalledWith(0);
+    h.feat.setVisible(true);
+    await h.flush();
+    expect(h.feat.state).toBe('on');
+    expect(h.camera.start).toHaveBeenCalledTimes(2);
+    // enabled while hidden: waits
+    const g = setup({ consent: true });
+    g.feat.setVisible(false);
+    g.set({ camera: { enabled: true } });
+    await g.flush();
+    expect(g.feat.state).toBe('paused');
+    expect(g.camera.start).not.toHaveBeenCalled();
+  });
+
+  it('the toolbar button toggles the setting', async () => {
+    const h = setup({ consent: true });
+    await h.feat.toggle();
+    expect(h.saved.at(-1)).toEqual({ camera: { enabled: true } });
+    await h.flush();
+    await h.feat.toggle();
+    expect(h.saved.at(-1)).toEqual({ camera: { enabled: false } });
+  });
+});
+
+async function onWithFace(o = {}) {
+  const h = setup({ consent: true, ...o });
+  h.set({ camera: { enabled: true } });
+  await h.flush();
+  return h;
+}
+
+describe('CameraFeature: behaviours', () => {
+  it('eye contact follows the face (followFace), and is released when off or the face leaves', async () => {
+    const h = await onWithFace();
+    for (let i = 0; i < 4; i++) h.frame(face({ cx: 0.3 }));
+    const g = h.gazes.at(-1);
+    expect(g[0]).toBeGreaterThan(0.05); // mirrored: screen right, small lean
+    expect(g[0]).toBeLessThan(0.3);
+    h.set({ camera: { followFace: false } });
+    expect(h.gazes.at(-1)).toBeNull();
+    h.frame(face({ cx: 0.3 }));
+    expect(h.gazes.at(-1)).toBeNull();
+  });
+
+  it('the detection rate follows presence and sleep', async () => {
+    const h = await onWithFace();
+    const t = h.trackers[0];
+    expect(t.rate).toBe(TRACK_RATES.searching);
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(t.rate).toBe(TRACK_RATES.tracking);
+    h.controller.sleeping = true;
+    h.frame(face());
+    expect(t.rate).toBe(TRACK_RATES.sleeping);
+  });
+
+  it('smiles back while the user smiles (mirrorExpressions)', async () => {
+    const h = await onWithFace();
+    const smiling = face({ blend: { mouthSmileLeft: 0.85, mouthSmileRight: 0.8 } });
+    for (let i = 0; i < 10; i++) h.frame(smiling);
+    expect(h.expressions.at(-1)).toEqual({ smile: MIRROR_SMILE, browUp: 0 });
+    for (let i = 0; i < 12; i++) h.frame(face());
+    expect(h.expressions.at(-1)).toEqual({ smile: 0, browUp: 0 });
+    h.set({ camera: { mirrorExpressions: false } });
+    for (let i = 0; i < 10; i++) h.frame(smiling);
+    expect(h.expressions.at(-1).smile).toBe(0);
+  });
+
+  it('presence: away > 2 min while idle → sleep; back → wake with a brow raise and a smile', async () => {
+    const h = await onWithFace();
+    for (let i = 0; i < 4; i++) h.frame(face());
+    // gone: frames without a face for over two minutes (at the searching rate)
+    for (let i = 0; i < 4 * 125; i++) h.frame(null, 250);
+    expect(h.controller.sleep).toHaveBeenCalledTimes(1);
+    expect(h.controller.sleeping).toBe(true);
+    // back
+    h.frame(face(), 250);
+    h.frame(face(), 250);
+    expect(h.controller.noteActivity).toHaveBeenCalled();
+    expect(h.controller.sleeping).toBe(false);
+    expect(h.expressions.at(-1)).toEqual({ smile: WELCOME.smile, browUp: WELCOME.browUp });
+    h.advance(WELCOME.browMs);
+    expect(h.expressions.at(-1)).toEqual({ smile: WELCOME.smile, browUp: 0 });
+    h.advance(WELCOME.smileMs);
+    expect(h.expressions.at(-1)).toEqual({ smile: 0, browUp: 0 });
+    // presence off: no sleeping
+    h.set({ camera: { presence: false } });
+    for (let i = 0; i < 4 * 125; i++) h.frame(null, 250);
+    expect(h.controller.sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('greets (opt-in) after ≥ 10 min away: a hidden prompt with a transcript note, rate-limited, never when busy', async () => {
+    const h = await onWithFace({ settings: { camera: { greet: true } } });
+    const away = (minutes) => {
+      for (let i = 0; i < 4; i++) h.frame(face());
+      h.frame(null, minutes * MIN);
+      h.frame(null, 250);
+      h.frame(null, 250);
+    };
+    const back = () => {
+      for (let i = 0; i < 4; i++) h.frame(face());
+    };
+    away(12);
+    back();
+    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
+    const [text, opts] = h.controller.sent[0];
+    expect(text).toBe(greetingPrompt(12));
+    expect(opts).toMatchObject({ source: 'camera', hidden: true });
+    expect(opts.note).toMatch(/back after 12 min/);
+    // again 15 min later: rate limit (30 min)
+    away(15);
+    back();
+    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
+    // after the rate limit, but a reply is running: no greeting
+    away(20);
+    h.controller.idle = false;
+    back();
+    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
+    // greet off: nothing
+    h.controller.idle = true;
+    h.set({ camera: { greet: false } });
+    away(40);
+    back();
+    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it('no greeting while the user is typing or Claude has a setup problem', async () => {
+    let typing = true;
+    const h = await onWithFace({ settings: { camera: { greet: true } }, userBusy: () => typing });
+    h.frame(null, 11 * MIN);
+    h.frame(null, 250);
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.sendText).not.toHaveBeenCalled();
+    typing = false;
+    h.controller.claudeProblem = { kind: 'auth' };
+    h.frame(null, 2000);
+    h.frame(null, 31 * MIN);
+    h.frame(null, 250);
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.sendText).not.toHaveBeenCalled();
+  });
+
+  it('look-to-talk (hands-free only): listening waits until the user looks at the screen', async () => {
+    const h = await onWithFace({ settings: { camera: { lookToTalk: true }, voice: { handsFree: true } } });
+    expect(h.controller.gate).toBe(true); // nothing seen yet: not gated
+    for (let i = 0; i < 6; i++) h.frame(face({ yawDeg: 45 }));
+    expect(h.controller.gate).toBe(false);
+    for (let i = 0; i < 6; i++) h.frame(face());
+    expect(h.controller.gate).toBe(true);
+    for (let i = 0; i < 12; i++) h.frame(face({ yawDeg: 45 }));
+    expect(h.controller.gate).toBe(false);
+    h.set({ voice: { handsFree: false } });
+    expect(h.controller.gate).toBe(true);
+    h.set({ voice: { handsFree: true }, camera: { lookToTalk: false } });
+    expect(h.controller.gate).toBe(true);
+    h.set({ camera: { lookToTalk: true } });
+    h.frame(face({ yawDeg: 45 }));
+    expect(h.controller.gate).toBe(false);
+    h.set({ camera: { enabled: false } }); // the camera off never blocks listening
+    expect(h.controller.gate).toBe(true);
+  });
+});
+
+describe('CameraFeature: pictures for Claude', () => {
+  it('nothing without the camera; "Let Claude see me" adds one to every message, hidden ones too', async () => {
+    const h = setup({ consent: true, settings: { camera: { shareWithClaude: true } } });
+    const p = h.controller.provider;
+    expect(p.wants({ source: 'text', hidden: false })).toBe(false); // camera off
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    expect(p.wants({ source: 'text', hidden: false })).toBe(true);
+    expect(p.wants({ source: 'voice', hidden: false })).toBe(true);
+    expect(p.wants({ source: 'camera', hidden: true })).toBe(true);
+    const shots = await p.capture({ source: 'text', hidden: false });
+    expect(shots).toEqual([expect.objectContaining({ mediaType: 'image/jpeg', data: '/9j/AAAA', thumb: expect.stringMatching(/^data:image\/jpeg/) })]);
+    expect(h.capture).toHaveBeenCalledWith(h.camera.video);
+  });
+
+  it('📷 arms one picture for the next (typed or spoken) message only', async () => {
+    const h = setup({ consent: true });
+    const p = h.controller.provider;
+    expect(h.feat.toggleShot()).toBe(false); // camera off: explains instead
+    expect(h.view.toasts.at(-1)).toMatch(/camera on first/);
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    expect(p.wants({ source: 'text', hidden: false })).toBe(false);
+    expect(h.feat.toggleShot()).toBe(true);
+    expect(h.view.states.at(-1).shotArmed).toBe(true);
+    expect(p.wants({ source: 'camera', hidden: true })).toBe(false); // not for the greeting
+    expect(p.wants({ source: 'voice', hidden: false })).toBe(true);
+    await p.capture({ source: 'voice', hidden: false });
+    expect(h.feat.shotArmed).toBe(false);
+    expect(p.wants({ source: 'text', hidden: false })).toBe(false);
+    expect(h.feat.toggleShot()).toBe(true);
+    expect(h.feat.toggleShot()).toBe(false); // pressed again: cancelled
+    h.feat.toggleShot();
+    h.set({ camera: { enabled: false } });
+    expect(h.feat.shotArmed).toBe(false);
+  });
+
+  it('dispose unhooks the snapshot provider', () => {
+    const h = setup();
+    h.feat.dispose();
+    expect(h.controller.provider).toBeNull();
+  });
+});

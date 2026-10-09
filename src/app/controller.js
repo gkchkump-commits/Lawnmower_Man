@@ -168,7 +168,7 @@ export class Controller extends Emitter {
     this._started = true;
     const b = this.bridge;
     this._offs.push(b.claude.onEvent((ev) => this.handleClaudeEvent(ev)));
-    this._offs.push(this.speech.on('playing', () => this._onSpeechPlaying()));
+    this._offs.push(this.speech.on('playing', (item) => this._onSpeechPlaying(item)));
     this._offs.push(this.speech.on('idle', () => this._maybeIdle()));
     this._offs.push(this.speech.on('error', (err) => this._onSpeechError(err)));
     if (this.mic) {
@@ -883,8 +883,15 @@ export class Controller extends Emitter {
     }
   }
 
-  _onSpeechPlaying() {
+  /** @param {any} [item] the SpeechQueue item that started playing */
+  _onSpeechPlaying(item) {
     if (this.listen || this.state === 'transcribing') return;
+    // the avatar's own line (say(): the camera's hello) starting while the hands-free user is
+    // already talking: drop it instead of pausing the mic in the middle of their words
+    if (item?.meta?.kind === 'say' && this.handsFree && this.state === 'listening') {
+      this.speech.clear();
+      return;
+    }
     this._setState('speaking');
   }
 
@@ -971,7 +978,13 @@ export class Controller extends Emitter {
   }
 
   _onMicSpeechStart() {
-    if (this.handsFree && !this.listen && this.state === 'idle') this._setState('listening');
+    if (this.handsFree && !this.listen && this.state === 'idle') {
+      this._setState('listening');
+      // Idle with speech queued can only be a say() line still being synthesized (the camera's
+      // quick hello): the user spoke first, so it is dropped (half-duplex would otherwise pause
+      // the mic as soon as it plays, swallowing what they say).
+      if (this.speech.busy && !this.activeTurnId && this.pendingSends === 0 && !this.permissions.size) this.speech.clear();
+    }
   }
 
   /** @param {{ reason: string }} d */
@@ -1085,6 +1098,8 @@ export class Controller extends Emitter {
 
   _maybeIdle() {
     if (this.listen || this.state === 'transcribing') return;
+    // hands-free: the user is talking (the VAD heard them); the utterance or its discard decides
+    if (this.handsFree && this.state === 'listening') return;
     if (this.activeTurnId || this.pendingSends > 0) {
       // The reply is still running. If the voice has caught up (or was stopped), show
       // "thinking" — after a short delay, so the gap between two sentences doesn't flicker.

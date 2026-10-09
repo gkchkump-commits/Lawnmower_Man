@@ -248,6 +248,42 @@ describe('Controller: look-to-talk gate and sleep()', () => {
     expect(mic.paused).toBe(true); // half-duplex as always
   });
 
+  it('hands-free: the user speaking first drops a say() line still being synthesized (no mic pause)', async () => {
+    const bridge = fakeBridge();
+    const player = fakePlayer({ clipMs: 15 });
+    const tts = fakeTts({ available: true, delayMs: 100 });
+    const mic = fakeMic();
+    const settings = deepMerge(DEFAULT_SETTINGS, { voice: { handsFree: true } });
+    const c = new Controller({ bridge, view: fakeView(), player, tts, stt: fakeStt({ available: true }), mic, avatar: fakeAvatar(), settings, sleepAfterMs: 0 });
+    await c.start();
+    await tick();
+    expect(c.handsFree).toBe(true);
+    mic.log.length = 0;
+    expect(c.say('Hello!')).toBe(true);
+    await tick(10);
+    mic.emit('speechstart'); // before the hello was synthesized
+    expect(c.state).toBe('listening');
+    await tick(300);
+    expect(c.state).toBe('listening');
+    expect(mic.paused).toBe(false);
+    expect(mic.log.filter((x) => x[0] === 'pause')).toEqual([]);
+    expect(player.played).toEqual([]);
+    // the user's words are heard and transcribed as usual
+    mic.emit('utterance', { wav: new ArrayBuffer(8), durationMs: 900, speechMs: 700 });
+    await waitFor(() => sends(bridge).length === 1);
+    expect(sends(bridge)[0][1]).toBe('hello there');
+  });
+
+  it('hands-free: a say() line that starts playing while the user talks is dropped', async () => {
+    const { c, mic } = setup({ settings: { voice: { handsFree: true } } });
+    await c.start();
+    await tick();
+    c.state = 'listening'; // (as if the VAD heard the user just as the clip was handed over)
+    c._onSpeechPlaying({ meta: { kind: 'say' } });
+    expect(c.state).toBe('listening');
+    expect(mic.paused).toBe(false);
+  });
+
   it('a discarded snippet re-applies a gate that closed meanwhile (no listening while looking away)', async () => {
     const { c, mic } = setup({ settings: { voice: { handsFree: true } } });
     await c.start();

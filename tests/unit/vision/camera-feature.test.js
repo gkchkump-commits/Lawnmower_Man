@@ -129,6 +129,7 @@ describe('CameraFeature: turning the camera on and off', () => {
     expect(h.trackers).toHaveLength(1);
     expect(h.trackers[0].setVideo).toHaveBeenCalledWith(h.camera.video);
     expect(h.view.setDevices).toHaveBeenCalled();
+    expect(h.view.setDevices).toHaveBeenLastCalledWith([{ id: 'a', label: 'Fake Cam' }], { known: true });
     expect(h.view.states.at(-1)).toMatchObject({ state: 'on' });
   });
 
@@ -249,6 +250,15 @@ describe('CameraFeature: turning the camera on and off', () => {
     h.feat.setVisible(true);
     await h.flush();
     expect(warnings()).toBe(2);
+  });
+
+  it('the device list says whether a missing saved camera is really unplugged (ids are hidden while off)', async () => {
+    const h = setup({ consent: true });
+    await h.feat.refreshDevices(); // the drawer opened with the camera off
+    expect(h.view.setDevices).toHaveBeenLastCalledWith([{ id: 'a', label: 'Fake Cam' }], { known: false });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    expect(h.view.setDevices).toHaveBeenLastCalledWith([{ id: 'a', label: 'Fake Cam' }], { known: true });
   });
 
   it('pauses and releases the camera while the window is hidden, resumes when shown', async () => {

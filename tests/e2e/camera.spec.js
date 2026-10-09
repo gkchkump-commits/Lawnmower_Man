@@ -212,8 +212,23 @@ test.describe('camera (fake camera, mock bridge)', () => {
       await expect(section.locator('.field-label', { hasText: label }).first()).toBeVisible();
     }
     await expect(section.locator('[data-path="camera.enabled"] .switch')).toHaveAttribute('aria-checked', 'false');
+    await expect(page.locator('#set-camera-deviceId')).toHaveValue('');
     // no camera light in the header while the camera is off
     expect(await page.evaluate(() => getComputedStyle(document.querySelector('.drawer-head h2'), '::after').content)).toBe('none');
-    await expect(page.locator('#set-camera-deviceId')).toHaveValue('');
+  });
+
+  test('a saved camera missing from the list: "Saved camera" while the camera is off, "(not connected)" once it is on', async ({ page }) => {
+    await page.addInitScript((key) => localStorage.setItem(key, 'yes'), CONSENT_KEY);
+    await page.goto(appUrl({}, { camera: { deviceId: 'desk-camera-unplugged' } }));
+    await page.waitForFunction(() => window.__app?.ready);
+    await page.locator('#btn-settings').click();
+    const saved = page.locator('#set-camera-deviceId option[value="desk-camera-unplugged"]');
+    await expect(saved).toHaveText('Saved camera');
+    await expect(page.locator('#set-camera-deviceId')).toHaveValue('desk-camera-unplugged');
+    await page.locator('.drawer-close').click();
+    await page.locator('#btn-camera').click();
+    await expect(page.locator('body')).toHaveAttribute('data-camera', 'on', { timeout: 20_000 });
+    await page.locator('#btn-settings').click();
+    await expect(saved).toHaveText('Saved camera (not connected)');
   });
 });

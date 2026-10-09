@@ -450,7 +450,7 @@ async function boot() {
       onToggle: () => camera?.toggle(),
       onShot: () => camera?.toggleShot(),
       toast: (msg, level) => view.toast(msg, /** @type {any} */ (level)),
-      setDevices: (cams) => drawer.setCameraOptions(cams),
+      setDevices: (cams, o) => drawer.setCameraOptions(cams, o),
       changed: () => refreshCameraInfo(),
     },
   );

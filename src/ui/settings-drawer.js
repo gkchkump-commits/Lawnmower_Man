@@ -224,11 +224,12 @@ export class SettingsDrawer {
   }
 
   /**
-   * Cameras for the camera picker ('' = the system default). A saved camera that is not
-   * connected stays listed as such.
-   * @param {Array<{ id: string, label: string }>} cams
+   * Cameras for the camera picker ('' = the system default). A saved camera that is not in the
+   * list stays listed: "(not connected)" when the list can be trusted, plain "Saved camera"
+   * while the camera is off (the page sees no device ids then).
+   * @param {Array<{ id: string, label: string }>} cams @param {{ known?: boolean }} [o]
    */
-  setCameraOptions(cams) {
+  setCameraOptions(cams, o = {}) {
     const sel = /** @type {HTMLSelectElement|undefined} */ (this.controls.get('camera.deviceId')?.el);
     if (!sel) return;
     const current = this.settings ? String(getPath(this.settings, 'camera.deviceId') ?? '') : sel.value;
@@ -236,7 +237,7 @@ export class SettingsDrawer {
     clear(sel);
     sel.append(h('option', { value: '' }, 'Default camera'));
     for (const c of list) sel.append(h('option', { value: c.id }, c.label));
-    if (current && !list.some((c) => c.id === current)) sel.append(h('option', { value: current }, 'Saved camera (not connected)'));
+    if (current && !list.some((c) => c.id === current)) sel.append(h('option', { value: current }, o.known === false ? 'Saved camera' : 'Saved camera (not connected)'));
     sel.value = current;
     sel.title = list.length ? '' : 'Cameras are listed once the camera has been turned on';
   }

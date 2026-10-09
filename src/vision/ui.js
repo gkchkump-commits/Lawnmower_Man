@@ -30,7 +30,7 @@ export class CameraUi {
    * @param {() => void} cb.onToggle    toolbar button / indicator
    * @param {() => void} cb.onShot      📷
    * @param {(msg: string, level?: string) => void} [cb.toast]
-   * @param {(cams: Array<{ id: string, label: string }>) => void} [cb.setDevices]
+   * @param {(cams: Array<{ id: string, label: string }>, o?: { known?: boolean }) => void} [cb.setDevices]
    * @param {() => void} [cb.changed]
    */
   constructor(dom, cb) {
@@ -134,9 +134,9 @@ export class CameraUi {
     this.cb.toast?.(msg, level);
   }
 
-  /** @param {Array<{ id: string, label: string }>} cams */
-  setDevices(cams) {
-    this.cb.setDevices?.(cams);
+  /** @param {Array<{ id: string, label: string }>} cams @param {{ known?: boolean }} [o] */
+  setDevices(cams, o) {
+    this.cb.setDevices?.(cams, o);
   }
 
   changed() {

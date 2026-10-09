@@ -56,7 +56,9 @@ export function greetingPrompt(minutes) {
  * @property {(m: import('./camera.js').CameraErrorModel, o: { onRetry: () => void, onTurnOff: () => void }) => void} [showError]
  * @property {() => void} [hideError]
  * @property {(msg: string, level?: 'info'|'warn'|'error'|'success') => void} [toast]
- * @property {(cams: Array<{ id: string, label: string }>) => void} [setDevices]
+ * @property {(cams: Array<{ id: string, label: string }>, o: { known: boolean }) => void} [setDevices]
+ *   known: false while the camera is off — the app may not see device ids then, so a saved
+ *   camera missing from the list is not necessarily unplugged
  * @property {() => void} [changed]  something the info panel shows changed
  */
 
@@ -220,7 +222,8 @@ export class CameraFeature extends Emitter {
   /** Re-list the cameras for the device picker (drawer opened, devices changed, camera started). */
   async refreshDevices() {
     try {
-      this.view.setDevices?.(await this._listCameras());
+      // while the camera is off, main's permission policy hides the device ids from the page
+      this.view.setDevices?.(await this._listCameras(), { known: !!this._settings.camera?.enabled });
     } catch { /* no devices API */ }
   }
 

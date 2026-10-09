@@ -548,7 +548,7 @@ export class VoiceFx {
       if (this.mix === 0) {
         this._resetState();
         this.cur = { ...this.target };
-        this.agc = estimateGain(this.target);
+        this.agc = estimateGain(character, amount);
       }
     }
   }
@@ -960,13 +960,17 @@ export function renderVoiceFx(samples, sampleRate, o = {}) {
 }
 
 /**
- * The AGC's starting gain for a character (measured on real Kokoro speech; the AGC refines it
- * within ~0.3 s), so the first syllable after a change is not too loud or too soft.
- * @param {ReturnType<typeof presetParams>} p
+ * The AGC's starting gain for a character: what it converges to on real Kokoro speech
+ * (af_heart and am_michael, measured with tools/voicefx), so the first syllable after a change
+ * is neither too loud nor too soft; the AGC refines it within ~0.3 s. The ring modulation, the
+ * comb and the incoherent sum of the layers all take energy away.
+ * @param {VoiceCharacter} character @param {number} amount
  */
-function estimateGain(p) {
-  const wet = p.dry + 0.8 * p.voc + 0.5 * p.chorus + 0.3 * p.sib;
-  return Math.min(2, Math.max(0.5, 1 / Math.max(0.5, wet)));
+export function estimateGain(character, amount) {
+  if (character === 'synth') return 1.05 + 0.25 * amount;
+  if (character === 'vocoder') return 1.9;
+  if (character === 'robot') return 2.6 + 0.8 * amount;
+  return 1;
 }
 
 /** @param {Float64Array} buf @param {number} mask @param {number} pos */

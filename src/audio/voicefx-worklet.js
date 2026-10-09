@@ -8,7 +8,7 @@
 //                                               `startTime`: its pitch is analysed ahead
 //   { type: 'stats', id }                       → { type: 'stats', id, character, amount,
 //                                                  blocks, clipBlocks, inSq, outSq, diffSq,
-//                                                  pitchSource, failed }
+//                                                  busyMs, workBlocks, pitchSource, failed }
 // A bug in the DSP must never silence the voice: the processor then passes the input through
 // and reports { type: 'error', message } once.
 /* global AudioWorkletProcessor, registerProcessor, sampleRate, currentFrame */
@@ -27,7 +27,9 @@ class LawnmowerVoiceFxProcessor extends AudioWorkletProcessor {
     // what the effect did to the voice (tests and diagnostics): blocks with input, how many of
     // them had the pitch from the clip's look-ahead analysis, and the energy of the input, the
     // output and their difference over those blocks
-    this.stats = { blocks: 0, clipBlocks: 0, inSq: 0, outSq: 0, diffSq: 0 };
+    // `busyMs` / `workBlocks`: time spent in the effect (Date.now() is the clock a worklet has;
+    // ms steps, but unbiased summed over many blocks) and the blocks it did work in
+    this.stats = { blocks: 0, clipBlocks: 0, inSq: 0, outSq: 0, diffSq: 0, busyMs: 0, workBlocks: 0 };
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
 
@@ -58,7 +60,13 @@ class LawnmowerVoiceFxProcessor extends AudioWorkletProcessor {
         this.pendingClip = null;
         this.fx.setClip(c.samples, c.rate, Math.round(c.startTime * sampleRate) - currentFrame);
       }
+      const busy = !this.fx.idle;
+      const t0 = busy ? Date.now() : 0;
       this.fx.process(input, out);
+      if (busy) {
+        this.stats.busyMs += Date.now() - t0;
+        this.stats.workBlocks++;
+      }
     } catch (err) {
       this.failed = true;
       if (input) out.set(input);

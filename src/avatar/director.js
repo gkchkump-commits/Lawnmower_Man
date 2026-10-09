@@ -86,9 +86,10 @@ const MOUTH_OUT = /** @type {const} */ ({
  *   phrase-start / phrase-end  (punct: , ; . ! ? — ; friendly 0..1 at a sentence end; from the
  *               audio also fall / rise: the final pitch movement in semitones, and pause: the
  *               silence that follows, s)
- *   inhale      a breath before speaking on (nostrils, a slight lift, lips part)
+ *   inhale      a breath before speaking on (nostrils, a slight lift, lips part); lead: the time
+ *               until the voice starts (s), the breath is in by then
  * @typedef {{ type: 'accent'|'emphasis'|'phrase-start'|'phrase-end'|'inhale', strength?: number, punct?: string,
- *   friendly?: number, fall?: number, rise?: number, pause?: number }} ProsodyCue
+ *   friendly?: number, fall?: number, rise?: number, pause?: number, lead?: number }} ProsodyCue
  */
 
 /** Impulse response that peaks (1) at x = tau and decays: a nod, a lift. */
@@ -166,7 +167,7 @@ export class Director {
     this._mouth = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, at: -Infinity };
     this._speechTarget = 0;
     // speech prosody (secondary motion): active impulses { at, kind, amp, ... }
-    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number }>} */
+    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number }>} */
     this._kicks = [];
     this._lastAccent = -Infinity;
     this._lastCue = -Infinity;
@@ -295,7 +296,8 @@ export class Director {
       case 'inhale':
         // one breath per pause
         if (this._kicks.some((q) => q.kind === 'inhale' && t - q.at < 0.6)) return;
-        this._kick({ at: t, kind: 'inhale', amp: s });
+        // the breath is in by the time the voice starts (a quick one before a clip's first words)
+        this._kick({ at: t, kind: 'inhale', amp: s, dur: clamp(Number(cue.lead ?? 0.2) - 0.02, 0.06, 0.2) });
         break;
       default:
     }
@@ -319,7 +321,7 @@ export class Director {
     this.expressiveness = Number.isFinite(n) ? clamp(n, 0, EXPRESSIVENESS_MAX) : 1;
   }
 
-  /** @param {{ at: number, kind: string, amp: number, dir?: number }} k */
+  /** @param {{ at: number, kind: string, amp: number, dir?: number, dur?: number }} k */
   _kick(k) {
     this._kicks.push(k);
     if (this._kicks.length > 24) this._kicks.shift();
@@ -426,7 +428,7 @@ export class Director {
         else if (q.kind === 'brow') browK = Math.max(browK, q.amp * envelope(x, 0.12, 0.3, 0.45));
         else if (q.kind === 'smile') smileK = Math.max(smileK, q.amp * envelope(x, 0.3, 0.7, 1.2));
         else if (q.kind === 'lower') lower = Math.max(lower, q.amp * envelope(x, 0.28, 0.45, 0.7));
-        else if (q.kind === 'inhale') inhale = Math.max(inhale, q.amp * envelope(x, 0.16, 0.06, 0.34));
+        else if (q.kind === 'inhale') inhale = Math.max(inhale, q.amp * envelope(x, q.dur ?? 0.16, 0.04, 0.34));
       }
     }
     this._phraseYawS += (this._phraseYaw * w.speaking - this._phraseYawS) * k(0.5);
@@ -467,7 +469,7 @@ export class Director {
     } else {
       o.cheekRaise = lipSmooth(o.cheekRaise, cheekT, dt, 0.06, 0.12);
       o.chinRaise = lipSmooth(o.chinRaise, chinT, dt, 0.025, 0.09);
-      o.nostrilFlare = lipSmooth(o.nostrilFlare, nostrilT, dt, 0.08, 0.25);
+      o.nostrilFlare = lipSmooth(o.nostrilFlare, nostrilT, dt, 0.04, 0.2);
     }
 
     // ---- blinks ----------------------------------------------------------------------------------

@@ -297,7 +297,8 @@ const VOWELS = new Set(['aa', 'E', 'I', 'O', 'U']);
  * @typedef {{ start: number, end: number, rest: number }} Phrase   speech between rests >= 100 ms;
  *   rest: the silence after it (s; Infinity after the last one)
  * @typedef {{ t: number, type: string, strength: number, punct?: string, friendly?: number,
- *   fall?: number, rise?: number, pause?: number }} Cue
+ *   fall?: number, rise?: number, pause?: number, lead?: number }} Cue   lead: an inhale's time
+ *   before the voice starts again (s)
  */
 
 /**
@@ -494,10 +495,11 @@ export class ClipProsody {
     const P = this.phrases;
     P.forEach((p, k) => {
       // a breath before the phrase: in the clip's leading silence, or early in a long pause
-      if (k === 0 && p.start >= 0.05) items.push({ t: 0, need: 0, make: () => ({ t: 0, type: 'inhale', strength: clamp01(0.55 + p.start / 0.4) }) });
+      // (lead: the time it has before the voice starts again)
+      if (k === 0 && p.start >= 0.05) items.push({ t: 0, need: 0, make: () => ({ t: 0, type: 'inhale', strength: clamp01(0.55 + p.start / 0.4), lead: p.start }) });
       if (k > 0 && P[k - 1].rest >= 0.22) {
         const t = P[k - 1].end + 0.04;
-        items.push({ t, need: 0, make: () => ({ t, type: 'inhale', strength: clamp01(P[k - 1].rest / 0.6) }) });
+        items.push({ t, need: 0, make: () => ({ t, type: 'inhale', strength: clamp01(P[k - 1].rest / 0.6), lead: p.start - t }) });
       }
       items.push({ t: p.start, need: 0, make: () => ({ t: p.start, type: 'phrase-start', strength: k === 0 ? 1 : 0.7 }) });
       const vs = tl.filter((s) => s.start >= p.start && s.end <= p.end + 1e-6 && VOWELS.has(s.viseme));

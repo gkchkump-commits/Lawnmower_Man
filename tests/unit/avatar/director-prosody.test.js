@@ -132,6 +132,12 @@ describe('audio prosody', () => {
     d.setProsody({ type: 'inhale', strength: 1 });
     n = d._kicks.filter((k) => k.kind === 'inhale').length;
     expect(n).toBe(2);                                         // one more (the first is 0.7 s old), not two
+    // a quick breath when the voice starts again soon: in by then
+    const q = speaking();
+    q.d.setProsody({ type: 'inhale', strength: 1, lead: 0.1 });
+    let peakAt = 0, peak = 0;
+    run(q.d, 0.5, q.t, (tt) => { if (q.d.out.nostrilFlare > peak) { peak = q.d.out.nostrilFlare; peakAt = tt - q.t; } });
+    expect(peakAt).toBeLessThan(0.2);
     // pressed lips stay closed
     const p = speaking();
     p.d.setMouth({ press: 1 });

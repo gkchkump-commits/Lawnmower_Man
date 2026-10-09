@@ -205,6 +205,10 @@ describe('speech events (ClipProsody)', () => {
     const types = cues.map((c) => `${c.type}@${c.t.toFixed(2)}`);
     expect(types).toContain('inhale@0.00');
     expect(types).toContain('inhale@0.69');
+    // each knows how long it has until the voice starts again
+    const inh = cues.filter((c) => c.type === 'inhale');
+    expect(inh[0].lead).toBeCloseTo(0.15, 6);
+    expect(inh[1].lead).toBeCloseTo(1.1 - 0.69, 6);
     expect(types).toContain('phrase-start@0.15');
     const ends = cues.filter((c) => c.type === 'phrase-end');
     expect(ends.map((c) => [c.punct, c.friendly])).toEqual([[',', 0], ['.', 0.7]]);

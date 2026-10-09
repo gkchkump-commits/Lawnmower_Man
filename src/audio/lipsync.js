@@ -79,9 +79,9 @@ function segmentsFor(tl) {
 export const VISEME_LEAD = 0.05;
 
 /** Seconds of a clip's pitch analysed at once when it starts (its first cues are due at once). */
-export const PRE_ANALYSE = 0.8;
+export const PRE_ANALYSE = 0.4;
 /** Pitch frames analysed per update at most (~25 µs each), and how far ahead of playback. */
-export const FRAMES_PER_UPDATE = 40;
+export const FRAMES_PER_UPDATE = 30;
 export const LOOKAHEAD = 0.8;
 
 /**
@@ -598,7 +598,7 @@ export class LipSync {
         vary: hashText(clip.text || String(tl.length)),
       });
       const prosody = new ClipProsody(a, tl, { ref, ends: textEnds(clip.text || '') });
-      st = { a, tl, segs, prosody, learned: false };
+      st = { a, tl, segs, prosody, learned: false, fresh: true };
     }
     this._clips.set(clip, st);
     return st;
@@ -628,7 +628,9 @@ export class LipSync {
       if (st) {
         // the clip's own analysis: the loudness envelope drives the jaw, the pitch the prosody
         const tt = cur.time + VISEME_LEAD;
-        st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
+        // (not on the clip's first frame: it already paid for the decode and PRE_ANALYSE)
+        if (st.fresh) st.fresh = false;
+        else st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
         if (st.a.complete && !st.learned) {
           st.learned = true;
           this._learnPitch(st.a);

@@ -4,7 +4,9 @@
 // viewer in front of it, wherever they sit (the "Mona Lisa effect"). So eye contact is a gaze of
 // about (0, 0); the face position only adds a small lean toward where the user is, so the eyes
 // visibly follow when they move, and the contact is broken by short natural glances away
-// (people hold eye contact for a few seconds at a time, not continuously).
+// (people hold eye contact for a few seconds at a time, not continuously): a look 8-15 deg to
+// the side or down and aside for 0.5-1.5 s, then back (the director makes both saccades). The
+// contact phases last a log-normal time (median 3.5 s), not a uniform one.
 //
 // Priority: a moving cursor wins for `cursorWinsMs` (then the gaze returns to the user); with no
 // face in view the cursor keeps the gaze for its own hold time, exactly like before the camera;
@@ -17,13 +19,37 @@ export const GAZE_DEFAULTS = Object.freeze({
   cursorHoldMs: 5000,
   faceGainX: 0.35,
   faceGainY: 0.3,
-  contactMinMs: 2500,
-  contactMaxMs: 6500,
-  glanceMinMs: 450,
-  glanceMaxMs: 1200,
+  contactMedianMs: 3500,
+  contactSigma: 0.45,
+  contactMinMs: 1500,
+  contactMaxMs: 9000,
+  glanceMinMs: 500,
+  glanceMaxMs: 1500,
+  /** how far a glance looks away (deg of eye rotation) */
+  glanceMinDeg: 8,
+  glanceMaxDeg: 15,
+  /** targets closer than this to the last one are not sent again (gaze units; the face centre
+   * comes One Euro filtered, so this only drops the repeats) */
+  dedupe: 0.0015,
 });
 
+/** Degrees of eye rotation per lookAt unit (the director's mapping: 0.85 x 17.2 deg, 0.75 x 6.8 deg). */
+const DEG_PER_UNIT = { x: 14.6, y: 5.1 };
+
 const clamp = (/** @type {number} */ v, lo = -1, hi = 1) => Math.min(hi, Math.max(lo, v));
+
+/**
+ * Length (ms) of a contact or glance phase. Contact: log-normal (median contactMedianMs), glance:
+ * uniform; both from `rng` (0..1).
+ * @param {'contact'|'glance'} phase @param {() => number} rng @param {typeof GAZE_DEFAULTS} o
+ */
+export function phaseLength(phase, rng, o = GAZE_DEFAULTS) {
+  if (phase === 'glance') return o.glanceMinMs + rng() * (o.glanceMaxMs - o.glanceMinMs);
+  // a standard normal from one uniform (the logistic approximation of its inverse CDF)
+  const u = Math.min(1 - 1e-6, Math.max(1e-6, rng()));
+  const z = 0.5513 * Math.log(u / (1 - u));
+  return clamp(o.contactMedianMs * Math.exp(o.contactSigma * z), o.contactMinMs, o.contactMaxMs);
+}
 
 /**
  * Eye-contact gaze for a face at (x, y) (AttentionState: mirrored like a selfie, -1..1, y up).
@@ -60,6 +86,8 @@ export class GazeArbiter {
     /** contact / glance phases while the face is the target */
     this._phase = /** @type {'contact'|'glance'} */ ('contact');
     this._phaseUntil = 0;
+    /** where the current glance looks, relative to the face (gaze units) */
+    this._glance = /** @type {[number, number]} */ ([0, 0]);
     /** @type {[number, number]|null} what was applied last */
     this.target = null;
     /** @type {'cursor'|'face'|'glance'|null} */
@@ -109,11 +137,13 @@ export class GazeArbiter {
         target = this._face;
         source = 'face';
       } else {
+        // an explicit look away (a saccade there and one back), not the idle wandering
+        target = [clamp(this._face[0] + this._glance[0]), clamp(this._face[1] + this._glance[1])];
         source = 'glance';
       }
     }
     this.source = source;
-    if (!sameTarget(target, this.target)) {
+    if (!sameTarget(target, this.target, this.o.dedupe)) {
       this.target = target ? [target[0], target[1]] : null;
       this._apply(this.target);
     }
@@ -134,9 +164,20 @@ export class GazeArbiter {
 
   /** @param {'contact'|'glance'} phase @param {number} from */
   _startPhase(phase, from) {
-    const [lo, hi] = phase === 'contact' ? [this.o.contactMinMs, this.o.contactMaxMs] : [this.o.glanceMinMs, this.o.glanceMaxMs];
     this._phase = phase;
-    this._phaseUntil = Math.max(from, this._now() - 60_000) + lo + this._rng() * (hi - lo);
+    this._phaseUntil = Math.max(from, this._now() - 60_000) + phaseLength(phase, this._rng, this.o);
+    if (phase === 'glance') {
+      // 8-15 deg to the side (a little up or down), or down and aside
+      const r = this._rng;
+      const side = r() < 0.5 ? -1 : 1;
+      const a = this.o.glanceMinDeg + r() * (this.o.glanceMaxDeg - this.o.glanceMinDeg);
+      if (r() < 0.65) {
+        this._glance = [(side * a) / DEG_PER_UNIT.x, ((r() * 2 - 1) * 1.5) / DEG_PER_UNIT.y];
+      } else {
+        const down = 0.55 + 0.25 * r();
+        this._glance = [(side * a * Math.sqrt(1 - down * down)) / DEG_PER_UNIT.x, (-a * down * 0.6) / DEG_PER_UNIT.y];
+      }
+    }
   }
 
   /** Wake up when the decision can change by itself (a cursor hold or a phase ends). @param {number} now */
@@ -159,8 +200,8 @@ export class GazeArbiter {
   }
 }
 
-/** @param {[number, number]|null} a @param {[number, number]|null} b */
-function sameTarget(a, b) {
+/** @param {[number, number]|null} a @param {[number, number]|null} b @param {number} eps */
+function sameTarget(a, b, eps) {
   if (!a || !b) return a === b;
-  return Math.abs(a[0] - b[0]) < 0.005 && Math.abs(a[1] - b[1]) < 0.005;
+  return Math.abs(a[0] - b[0]) < eps && Math.abs(a[1] - b[1]) < eps;
 }

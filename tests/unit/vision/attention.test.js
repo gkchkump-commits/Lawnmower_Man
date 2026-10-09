@@ -133,7 +133,7 @@ describe('AttentionTracker', () => {
     // the face is on the image's left = the screen's right in a mirror view; up is +y
     expect(tr.state.x).toBeCloseTo(0.6, 1);
     expect(tr.state.y).toBeGreaterThan(0.3);
-    // a jump to the other side is smoothed (time constant ~150 ms)
+    // a jump to the other side is smoothed (One Euro: most of the way in a frame, not all)
     tr.update(obs({ cx: 0.8, cy: 0.3 }), 300);
     expect(tr.state.x).toBeGreaterThan(-0.6);
     expect(tr.state.x).toBeLessThan(0.6);

@@ -11,6 +11,8 @@
 //
 // Pure (no DOM, no MediaPipe import): unit-tested on synthetic landmarker results.
 
+import { OneEuro } from '../avatar/motion.js';
+
 /** Landmark indices we keep (MediaPipe Face Mesh topology, 478 points with irises). */
 export const KEY_POINTS = Object.freeze({
   noseTip: 1,
@@ -143,7 +145,12 @@ export function estimateDistanceCm(size, o = {}) {
 export const ATTENTION_DEFAULTS = Object.freeze({
   presentAfterMs: 200, // a face this long (and at least 2 frames) → present
   absentAfterMs: 1500, // no face this long (and at least 2 frames) → absent
-  smoothMs: 150, // time constant of the centre / pose smoothing
+  smoothMs: 150, // time constant of the pose / size smoothing
+  // the face centre (what the eyes follow): a One Euro filter, so a still face gives still eyes
+  // and a moving one is followed with little lag
+  centreMinCutoff: 0.5, // Hz
+  centreBeta: 8,
+  centreDCutoff: 1, // Hz
   // looking at the screen: the camera sits above (or beside) it, so allow a cone around it
   lookYawDeg: 24,
   lookPitchUpDeg: 18,
@@ -177,6 +184,9 @@ export class AttentionTracker {
     this._firstHit = 0;
     this._misses = 0;
     this._lastT = null;
+    const o = this.o;
+    this._fx = new OneEuro(o.centreMinCutoff, o.centreBeta, o.centreDCutoff);
+    this._fy = new OneEuro(o.centreMinCutoff, o.centreBeta, o.centreDCutoff);
     this._lookSince = null;
     this._unlookSince = null;
     this._smileSince = null;
@@ -228,8 +238,9 @@ export class AttentionTracker {
     // selfie view: the user's right appears on the screen's right
     const x = clamp(1 - 2 * g.cx, -1, 1);
     const y = clamp(1 - 2 * g.cy, -1, 1);
-    s.x += (x - s.x) * k;
-    s.y += (y - s.y) * k;
+    if (fresh) { this._fx.reset(); this._fy.reset(); }
+    s.x = this._fx.filter(x, now / 1000);
+    s.y = this._fy.filter(y, now / 1000);
     s.size += (g.size - s.size) * k;
     s.yaw += (-g.yaw - s.yaw) * k;
     s.pitch += (g.pitch - s.pitch) * k;

@@ -1,7 +1,7 @@
 // Presence state machine, eye-contact gaze and cursor priority, snapshot sizing, camera errors.
 import { describe, expect, it, vi } from 'vitest';
 import { PRESENCE_DEFAULTS, PresenceMachine } from '../../../src/vision/presence.js';
-import { GAZE_DEFAULTS, GazeArbiter, faceGaze } from '../../../src/vision/gaze.js';
+import { GAZE_DEFAULTS, GazeArbiter, faceGaze, phaseLength } from '../../../src/vision/gaze.js';
 import { SNAPSHOT_MAX_SIDE, base64Of, fitSize } from '../../../src/vision/snapshot.js';
 import { CameraCapture, cameraConstraints, describeCameraError, listCameras } from '../../../src/vision/camera.js';
 import { detectSize, visionAssetUrls } from '../../../src/vision/face-tracker.js';
@@ -217,24 +217,47 @@ describe('GazeArbiter: cursor priority and eye contact', () => {
     expect(applied.at(-1)).toBeNull();
   });
 
-  it('eye contact is held for a few seconds, then broken by a short glance away, and so on', () => {
+  it('eye contact is held for a few seconds, then broken by a clear glance away, and so on', () => {
     const { a, applied, run } = arbiter();
     a.setFace([0, 0]);
     expect(a.source).toBe('face');
-    const contact = GAZE_DEFAULTS.contactMinMs + 0.5 * (GAZE_DEFAULTS.contactMaxMs - GAZE_DEFAULTS.contactMinMs);
-    const glance = GAZE_DEFAULTS.glanceMinMs + 0.5 * (GAZE_DEFAULTS.glanceMaxMs - GAZE_DEFAULTS.glanceMinMs);
+    const half = () => 0.5;
+    const contact = phaseLength('contact', half);
+    const glance = phaseLength('glance', half);
+    expect(contact).toBeGreaterThanOrEqual(GAZE_DEFAULTS.contactMinMs);
+    expect(contact).toBeLessThanOrEqual(GAZE_DEFAULTS.contactMaxMs);
     run(contact - 10);
     expect(a.source).toBe('face');
     run(20);
     expect(a.source).toBe('glance');
-    expect(applied.at(-1)).toBeNull(); // the director's own small saccades meanwhile
+    // an explicit look away, 8-15 deg (x 14.6 deg, y 5.1 deg per unit), not a tiny wander
+    const g = applied.at(-1);
+    expect(g).not.toBeNull();
+    const deg = Math.hypot(g[0] * 14.6, g[1] * 5.1);
+    expect(deg).toBeGreaterThanOrEqual(GAZE_DEFAULTS.glanceMinDeg - 0.5);
+    expect(deg).toBeLessThanOrEqual(GAZE_DEFAULTS.glanceMaxDeg + 0.5);
     run(glance);
     expect(a.source).toBe('face');
     expect(applied.at(-1)).toEqual([0, 0]);
-    // face updates within the contact phase are applied; tiny changes are not
+    // face updates within the contact phase are applied; repeats (below the dedupe) are not
+    const near = () => applied.filter((t) => t && t[0] > 0.04 && t[0] < 0.1);
     a.setFace([0.05, 0]);
-    a.setFace([0.052, 0.001]);
-    expect(applied.filter((t) => t && t[0] > 0.04)).toHaveLength(1);
+    a.setFace([0.05 + GAZE_DEFAULTS.dedupe / 2, 0.0005]);
+    expect(near()).toHaveLength(1);
+    a.setFace([0.053, 0]); // (a real, filtered move of 0.003 is)
+    expect(near()).toHaveLength(2);
+  });
+
+  it('contact phases are log-normal (median ~3.5 s, varied), glances 0.5-1.5 s', () => {
+    let seed = 7;
+    const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    const c = Array.from({ length: 400 }, () => phaseLength('contact', rng)).sort((x, y) => x - y);
+    expect(c[200]).toBeGreaterThan(3000);
+    expect(c[200]).toBeLessThan(4000);
+    expect(c[360] / c[40]).toBeGreaterThan(2); // not a narrow uniform band
+    const gl = Array.from({ length: 50 }, () => phaseLength('glance', rng));
+    expect(Math.min(...gl)).toBeGreaterThanOrEqual(500);
+    expect(Math.max(...gl)).toBeLessThanOrEqual(1500);
   });
 
   it('reapply sends the current target again (a re-created avatar)', () => {

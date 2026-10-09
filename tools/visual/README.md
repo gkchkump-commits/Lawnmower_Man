@@ -57,16 +57,38 @@ mean absolute RGB error.
 | `vis=<sil\|PP\|FF\|TH\|DD\|kk\|CH\|SS\|RR\|aa\|E\|I\|O\|U>` | one viseme's mouth shape (explicit sliders still win) |
 | `say=<text>&t=<s>` | the system-voice lip-sync path run deterministically to `t` seconds (a scripted voice with word boundaries); `bounds=0`, `rate`, `voiceTempo` (1.1), `jitter` (0.15), `latency` (0.06), `caption=1` (shows the word being said) |
 
+| `clip=<url>[,<url>...]&t=<s>` | the local-voice path on REAL voice-server clips (the `/tts` JSON: `text`, `visemes`, `audioB64` or `wav=<url>`), played back to back through the real LipSync, director and head at 60 Hz; `gap` (s between clips, 0.06), `latency` (analyser lead, 0.02), `pre` (s of thinking first, 0.8), `caption=1` |
+
 `window.__avatar` is the avatar API; `window.__ready` turns true after the first frames. In `say`
-mode `window.__seek(t)` steps the simulation to `t` and renders.
+and `clip` mode `window.__seek(t)` steps the simulation to `t` and renders (`window.__schedule`
+lists the clips' start / end times).
 
 ## film.mjs — speech videos
 
 ```bash
+# system voice (scripted word boundaries)
 node tools/visual/film.mjs --url "http://127.0.0.1:5173/dev/avatar.html?ui=0&idle=0&caption=1" \
      --say "Hello! I'm Claude. How are you feeling today?" --fps 30 --dur 4 --out out/film
 ffmpeg -framerate 30 -i out/film/%04d.png -pix_fmt yuv420p out/film.mp4
+
+# local voice: real Kokoro clips (name.json = the /tts response, name.wav next to it), with sound
+node tools/visual/film.mjs --url "http://127.0.0.1:5173/dev/avatar.html?ui=0&caption=1" \
+     --clip out/hello.json,out/maybe.json --fps 30 --t0 -0.6 --out out/film --mp4 out/film.mp4
 ```
 
-Loads the harness once in `say` mode and saves one PNG per `__seek` step (`--t0`, `--w`, `--h`,
-`--selector`).
+Loads the harness once and saves one PNG per `__seek` step (`--t0`, `--w`, `--h`, `--selector`;
+`--dur` defaults to the clips' length). `--clip` hands the files to the page itself (nothing is
+copied into `public/`); `--mp4` encodes the frames with the clips' audio muxed in at the times the
+harness played them (ffmpeg).
+
+## lipsync-align.mjs — lip-sync timing on real speech
+
+```bash
+node tools/visual/lipsync-align.mjs out/clips [--latency 0.02]
+```
+
+Plays every clip of a folder (`name.wav` + `name.json`) through the real LipSync and Director at
+60 Hz in Node and compares the mouth with the sound: the fullest closure of m / b / p between
+vowels vs the level dip in the audio, the jaw opening after a pause vs the acoustic onset, and
+the lag of the best jaw / level correlation (negative = the mouth leads). Use it after changing
+the timeline, the lead or the smoothing.

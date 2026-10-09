@@ -577,13 +577,14 @@ export class Director {
     const faceK = 0.4 + 0.6 * Math.min(ex, 1.5);
     // spread vowels and smiles lift the cheeks (a wide-open jaw pulls them down instead)
     const cheekT = clamp01((0.55 * o.mouthWide * (1 - 0.6 * o.jawOpen) + 0.3 * o.mouthTeeth) * faceK * w.speaking + 0.9 * o.smile);
-    // pressed lips bunch the chin up a little (mentalis); tucks and puckers less. It rises over
-    // ~60 ms, so it does not pump with every m / b / p.
-    const chinT = clamp01((0.58 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
+    // pressed lips bunch the chin up a little (mentalis); tucks and puckers less. It goes with the
+    // lips' target (not the sprung lips, which would put a second lag on it), rising in ~100 ms
+    // and falling as the lips part: in step with the closure, not after it.
+    const chinT = clamp01((0.58 * mt.press + 0.2 * mt.tuck + 0.12 * mt.round) * faceK);
     const nostrilT = clamp01(inhale * faceK);
     const cS = this._s.cheek, chS = this._s.chin, nS = this._s.nostril;
     o.cheekRaise = clamp01(sp(cS, cheekT, cheekT > cS.x ? 26 : 18));
-    o.chinRaise = clamp01(sp(chS, chinT, chinT > chS.x ? 25 : 16));
+    o.chinRaise = clamp01(sp(chS, chinT, chinT > chS.x ? 40 : 26));
     o.nostrilFlare = clamp01(sp(nS, nostrilT, nostrilT > nS.x ? 60 : 14));
 
     // ---- gaze ------------------------------------------------------------------------------------

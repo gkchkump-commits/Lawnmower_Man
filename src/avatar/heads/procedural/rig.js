@@ -175,10 +175,12 @@ export function procRigUniforms(rig, a, u) {
   u.cornerR[0] = out; u.cornerR[1] = up - tilt; u.cornerR[2] = back;
   u.lips = u.lips || [0, 0, 0, 0];
   // pressing / tucking lips stay closed over a slightly open jaw (the lower lip comes back up);
-  // the upper lip rises a little with the jaw too (open vowels)
+  // the upper lip rises a little with the jaw too (open vowels). The shapes' parting fades with
+  // the square of the press (as on the relief head: a half-released press still seals).
   const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth + L.jawUpperLipFh * jaw) * fh;
-  u.lips[0] = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;      // upper lift
-  u.lips[1] = L.wideLipFh * 1.2 * wide * fh * (1 - press - tuck)    // lower drop
+  const openK = (1 - press) * (1 - press);
+  u.lips[0] = lift0 * openK + L.tuckLiftFh * tuck * fh;      // upper lift
+  u.lips[1] = L.wideLipFh * 1.2 * wide * fh * Math.max(0, openK - tuck)    // lower drop
     - (press + tuck) * L.jawLipK * u.jawAngle - L.tuckRaiseFh * tuck * fh;
   u.lips[2] = L.roundPushFh * round * fh;                         // push forward
   // cheek raise: smiles, and the spread vowels of speech (the director's cheekRaise)

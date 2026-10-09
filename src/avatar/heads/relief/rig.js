@@ -187,9 +187,12 @@ export function rigUniforms(rig, a, u) {
     + L.jawUpperLipFh * clamp01(a.jawOpen)) * fh;
   const drop0 = (L.wideLipFh * 1.2 * wide + L.roundLipFh * round + L.teethDropFh * teeth) * fh;
   // Pressing / tucking lips close the slit whatever the jaw does: the lower lip comes back up
-  // over a slightly open jaw (the chin stays down), so a closure never leaks a dark line.
-  u.upperLift = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;
-  u.lowerDrop = drop0 * (1 - press - tuck) - (press + tuck) * u.jawDrop - L.tuckRaiseFh * tuck * fh;
+  // over a slightly open jaw (the chin stays down), so a closure never leaks a dark line. The
+  // parting the shapes add fades out with the square of the press: a press that is only half
+  // released still holds the lips nearly together (short m / b / p stay sealed for their length).
+  const openK = (1 - press) * (1 - press);
+  u.upperLift = lift0 * openK + L.tuckLiftFh * tuck * fh;
+  u.lowerDrop = drop0 * Math.max(0, openK - tuck) - (press + tuck) * u.jawDrop - L.tuckRaiseFh * tuck * fh;
   // (the part of it that closes the lips over the jaw: at the corners it cancels the jaw's share)
   u.lowerClose = (press + tuck) * u.jawDrop;
   u.lipPush = L.roundPushFh * round * fh;
@@ -228,7 +231,7 @@ export function rigUniforms(rig, a, u) {
   u.tongue = clamp01(a.mouthTongue ?? 0) * (1 - press);
   // the upper incisors follow a lifted upper lip part of the way (world units); in a tuck they
   // fill the small opening down to the lower lip that touches them
-  u.teethShift = L.teethShift * lift0 * (1 - press) + 1.1 * L.tuckLiftFh * tuck * fh;
+  u.teethShift = L.teethShift * lift0 * openK + 1.1 * L.tuckLiftFh * tuck * fh;
   // eyelids (world units, + = toward closing); the upper lid follows a downward gaze part of the
   // way (lidGaze of its travel at gazeY = -1; nothing at rest)
   const lidG = L.lidGaze * clamp01(-(a.gazeY ?? 0));

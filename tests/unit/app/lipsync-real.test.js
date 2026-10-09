@@ -11,6 +11,7 @@ import { Emitter } from '../../../src/app/emitter.js';
 import { LipSync } from '../../../src/audio/lipsync.js';
 import { bytesToBase64, decodeWav } from '../../../src/audio/wav.js';
 import { Director } from '../../../src/avatar/director.js';
+import { rigUniforms } from '../../../src/avatar/heads/relief/rig.js';
 
 const dir = fileURLToPath(new URL('../../fixtures/kokoro/', import.meta.url));
 const meta = JSON.parse(readFileSync(`${dir}maybe_af_heart.json`, 'utf8'));
@@ -37,9 +38,20 @@ function play() {
     if (m.cues) dr.setProsody(m.cues);
     dr.setIntonation(m.intonation);
     const a = dr.update(dt, now);
-    rec.push({ t: now, jaw: a.jawOpen, press: a.mouthPress, pitch: m.intonation.pitch });
+    rec.push({ t: now, jaw: a.jawOpen, press: a.mouthPress, chin: a.chinRaise, pitch: m.intonation.pitch, ap: aperturePx(a) });
   }
   return { rec, cues, ls };
+}
+
+// the reference pack's relief rig (plate 1168 px tall, face 652 px): the lip opening at the mouth's
+// centre in plate px
+const RIG = { faceH: 651.945 / 1168, mouthHalfW: 100.261 / 1168, px: 1 / 1168, plateW: 784 / 1168, lidTravel: 0,
+  eyes: { L: { height: 0.02, irisR: 0.02 }, R: { height: 0.02, irisR: 0.02 } } };
+const U = {};
+/** @param {any} a */
+function aperturePx(a) {
+  rigUniforms(RIG, a, U);
+  return (Math.max(0, U.upperLift) + Math.max(0, U.jawDrop + U.lowerDrop)) / RIG.px;
 }
 
 /** dB level of the clip in 20 ms windows, every 5 ms (0 dB = its loudest). */
@@ -82,6 +94,42 @@ describe('lip-sync on a real Kokoro clip', () => {
     expect(median).toBeLessThan(0.005);
     expect(median).toBeGreaterThan(-0.07);
     for (const o of offsets) expect(o).toBeLessThan(0.03);
+  });
+
+  it('the relief lips stay sealed through each m / b / p for at least 50 ms; the chin moves with them', () => {
+    let n = 0;
+    for (let i = 1; i + 1 < tl.length; i++) {
+      const s = tl[i];
+      if (s.viseme !== 'PP' || tl[i - 1].viseme === 'sil' || tl[i + 1].viseme === 'sil' || s.start < 0.08) continue;
+      // the longest run of frames near the segment where the lip opening is under 1 plate px
+      let run = 0, best = 0;
+      for (const q of rec) {
+        if (q.t < s.start - 0.1 || q.t > s.end + 0.1) continue;
+        run = q.ap < 1 ? run + 1 : 0;
+        best = Math.max(best, run);
+      }
+      expect(best, `closure at ${s.start}`).toBeGreaterThanOrEqual(3);
+      n++;
+    }
+    expect(n).toBeGreaterThanOrEqual(4);
+    // the mentalis follows the press closely (it used to trail the lips by ~70 ms and was still
+    // rising when they reopened)
+    const z = (k) => {
+      const x = rec.map((q) => q[k]);
+      const m = x.reduce((a, b) => a + b, 0) / x.length;
+      const sd = Math.sqrt(x.reduce((a, b) => a + (b - m) ** 2, 0) / x.length);
+      return x.map((v) => (v - m) / sd);
+    };
+    const zp = z('press'), zc = z('chin');
+    let lag = 0, r = -1;
+    for (let L = 0; L < 12; L++) {
+      let c = 0;
+      for (let k = L; k < zc.length; k++) c += zc[k] * zp[k - L];
+      c /= zc.length - L;
+      if (c > r) { r = c; lag = L; }
+    }
+    expect(r).toBeGreaterThan(0.7);
+    expect(lag / 60).toBeLessThanOrEqual(0.05);
   });
 
   it('the jaw opens with the syllables and rests in the silence after the voice', () => {

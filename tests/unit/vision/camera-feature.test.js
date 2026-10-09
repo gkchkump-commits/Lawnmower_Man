@@ -216,6 +216,41 @@ describe('CameraFeature: turning the camera on and off', () => {
     expect(h.feat.trackingError).toBe('');
   });
 
+  it('warns once that the chosen camera is missing, not on every restore; again after it worked', async () => {
+    const h = setup({ consent: true, settings: { camera: { deviceId: 'desk' } } });
+    let plugged = false;
+    h.camera.start.mockImplementation(async (id) => {
+      if (id === 'desk' && !plugged) {
+        h.camera.emit('device-fallback', id); // CameraCapture opened the default camera instead
+        h.camera.deviceId = 'laptop';
+      } else {
+        h.camera.deviceId = id || 'laptop';
+      }
+      h.camera.video = { readyState: 4, videoWidth: 640, videoHeight: 480 };
+    });
+    const warnings = () => h.view.toasts.filter((t) => /not connected/.test(t)).length;
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    expect(warnings()).toBe(1);
+    for (let i = 0; i < 2; i++) {
+      h.feat.setVisible(false); // minimized / hidden to the tray
+      h.feat.setVisible(true);
+      await h.flush();
+    }
+    expect(h.camera.start).toHaveBeenCalledTimes(3);
+    expect(warnings()).toBe(1);
+    // back at the desk: it opens; unplugged again later: one new warning
+    plugged = true;
+    h.feat.setVisible(false);
+    h.feat.setVisible(true);
+    await h.flush();
+    plugged = false;
+    h.feat.setVisible(false);
+    h.feat.setVisible(true);
+    await h.flush();
+    expect(warnings()).toBe(2);
+  });
+
   it('pauses and releases the camera while the window is hidden, resumes when shown', async () => {
     const h = setup({ consent: true });
     h.set({ camera: { enabled: true } });

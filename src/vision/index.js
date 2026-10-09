@@ -126,7 +126,11 @@ export class CameraFeature extends Emitter {
       capture: (/** @type {{ hidden: boolean }} */ o) => this._takeSnapshot(o),
     });
     this._offs.push(this.camera.on('ended', () => this._onCameraEnded()));
-    this._offs.push(this.camera.on('device-fallback', () => {
+    // once per missing camera, not on every start (each restore of the window starts it again)
+    this._fallbackWarned = '';
+    this._offs.push(this.camera.on('device-fallback', (/** @type {string} */ id) => {
+      if (id === this._fallbackWarned) return;
+      this._fallbackWarned = id;
       this.view.toast?.('The chosen camera is not connected; using the default camera.', 'warn');
     }));
   }
@@ -282,6 +286,8 @@ export class CameraFeature extends Emitter {
       return;
     }
     if (gen !== this._startGen) return;
+    // the chosen camera works (again): warn again if it goes missing later
+    if (this.camera.deviceId && this.camera.deviceId === this._settings.camera?.deviceId) this._fallbackWarned = '';
     this.state = 'on';
     this.attention.reset(this._now());
     this.presence.reset(this._now());

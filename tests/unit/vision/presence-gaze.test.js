@@ -66,22 +66,40 @@ describe('PresenceMachine', () => {
     const p = new PresenceMachine({}, 0);
     p.update(true, 0);
     p.markGreeted(0); // the first sight was greeted
-    p.update(false, 1000);
+    // (the tracker reports the absence several times a second; an idle app: nothing going on)
+    const away = (from, to) => { for (let t = from; t <= to; t += 30_000) p.update(false, t, { idle: true }); };
+    away(1000, 1000 + 11 * MIN);
     const b1 = p.update(true, 1000 + 12 * MIN)[0];
     expect(b1).toMatchObject({ type: 'back', first: false, greet: true, welcome: true });
     p.markGreeted(1000 + 12 * MIN);
-    p.update(false, 1000 + 13 * MIN);
+    away(1000 + 13 * MIN, 1000 + 15.9 * MIN);
     expect(p.update(true, 1000 + 16 * MIN)[0].greet).toBe(false); // rate limit
-    p.update(false, 1000 + 16 * MIN + 1);
+    away(1000 + 16 * MIN + 1, 1000 + 18.9 * MIN);
     expect(p.update(true, 1000 + 19 * MIN)[0].greet).toBe(true);
     // the 2-minute threshold itself
     const q = new PresenceMachine({}, 0);
     q.update(true, 0);
     q.markGreeted(-PRESENCE_DEFAULTS.greetEveryMs);
-    q.update(false, 0);
+    q.update(false, 0, { idle: true });
+    q.update(false, PRESENCE_DEFAULTS.greetAfterMs - 2, { idle: true });
     expect(q.update(true, PRESENCE_DEFAULTS.greetAfterMs - 1)[0].greet).toBe(false);
-    q.update(false, PRESENCE_DEFAULTS.greetAfterMs);
-    expect(q.update(true, 2 * PRESENCE_DEFAULTS.greetAfterMs)[0].greet).toBe(true);
+    q.update(false, PRESENCE_DEFAULTS.greetAfterMs, { idle: true });
+    q.update(false, 2 * PRESENCE_DEFAULTS.greetAfterMs, { idle: true });
+    expect(q.update(true, 2 * PRESENCE_DEFAULTS.greetAfterMs + 1)[0].greet).toBe(true);
+  });
+
+  it('a face out of view while the user keeps using the app is no absence: no welcome, no greeting', () => {
+    const p = new PresenceMachine({}, 0);
+    p.update(true, 0);
+    p.markGreeted(0);
+    // 5.5 minutes out of view (a side camera, a dark room) while typing and using the mouse
+    for (let t = 1000; t <= 1000 + 5.5 * MIN; t += 1000) expect(p.update(false, t, { idle: false })).toEqual([]);
+    const back = p.update(true, 1000 + 5.5 * MIN + 500)[0];
+    expect(back).toMatchObject({ type: 'back', first: false, greet: false, welcome: false });
+    // a real absence afterwards still greets (and the activity just before the face returns
+    // does not undo it: the avatar had already dozed off)
+    for (let t = 7 * MIN; t <= 9.5 * MIN; t += 1000) p.update(false, t, { idle: t < 9.4 * MIN });
+    expect(p.update(true, 9.6 * MIN)[0]).toMatchObject({ greet: true, welcome: true });
   });
 
   it('the absence starts when the face was last seen, not when the tracker gave up on it', () => {

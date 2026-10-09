@@ -6,8 +6,9 @@
 //   back  the user is in view: the first time since the camera started (`first`), or again
 //         after an absence. `welcome`: the avatar dozed off (or was asleep anyway), or it is the
 //         first sight → wake up with a brow raise and a smile. `greet`: the first sight, or
-//         back after ≥ greetAfterMs, and no greeting for greetEveryMs → (camera.greeting)
-//         the avatar says hello.
+//         back after a real absence (the one that made it doze: away ≥ sleepAfterMs while
+//         nothing was going on), and no greeting for greetEveryMs → (camera.greeting) the
+//         avatar says hello.
 //
 // Pure: time is passed in; unit-tested.
 
@@ -59,8 +60,11 @@ export class PresenceMachine {
       if (this.absentSince !== null) {
         const awayMs = Math.max(0, now - this.absentSince);
         const first = this._first;
-        const welcome = first || this._slept || !!ctx.sleeping || awayMs >= this.o.sleepAfterMs;
-        const greet = (first || awayMs >= this.o.greetAfterMs) && now - this.lastGreetAt >= this.o.greetEveryMs;
+        // A real absence is the one that made the avatar doze off (sleepAfterMs with nothing
+        // going on: no reply, no typing or mouse use). A face out of view while the user keeps
+        // using the app (a side camera, a dark room) is no absence: no "Welcome back!".
+        const welcome = first || this._slept || !!ctx.sleeping;
+        const greet = (first || this._slept) && now - this.lastGreetAt >= this.o.greetEveryMs;
         out.push({ type: 'back', awayMs, first, welcome, greet });
       }
       this.absentSince = null;

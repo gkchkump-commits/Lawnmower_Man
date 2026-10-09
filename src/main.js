@@ -635,17 +635,21 @@ async function boot() {
     bridge.window.setSizePreset(next);
   }, { passive: false });
 
+  const stageEl = document.getElementById('stage');
   window.addEventListener('pointermove', (e) => {
-    view.notePointer();
+    const t = /** @type {HTMLElement} */ (e.target);
+    // (a folded panel has pointer-events: none, so it is never the target)
+    const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, button, input, textarea, select, a');
+    // Minimal mode: only the avatar area (or UI that is showing) unfolds the panel. The folded
+    // strip below the face is transparent and click-through: a pointer passing over it on the
+    // way to the desktop must not drop the chat down and catch the click.
+    const bottom = stageEl ? stageEl.getBoundingClientRect().bottom : window.innerWidth * 1.5;
+    if (e.clientY < bottom || body.dataset.panel === 'shown' || overUi) view.notePointer();
     controller.noteActivity();
     const av = avatarHost.avatar;
     if (!windowDrag.active) body.dataset.overHead = overHeadAt(e) ? '1' : '';
     if (!globalCursor) lookAtPoint(e.clientX, e.clientY);
-    if (gate.enabled) {
-      const t = /** @type {HTMLElement} */ (e.target);
-      const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, button, input, textarea, select, a');
-      gate.update(overUi || probeAvatar((x, y) => av.hitTest(x, y), e.clientX, e.clientY, gate.interactive));
-    }
+    if (gate.enabled) gate.update(overUi || probeAvatar((x, y) => av.hitTest(x, y), e.clientX, e.clientY, gate.interactive));
   }, { passive: true });
   document.documentElement.addEventListener('pointerleave', () => {
     view.pointerLeft();

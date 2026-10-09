@@ -158,6 +158,30 @@ test.describe('app (mock bridge)', () => {
     await expect(page.locator('body')).toHaveAttribute('data-chat', 'full');
   });
 
+  test('minimal mode: the folded strip below the face stays click-through (no unfolding, no click trap)', async ({ page }) => {
+    await page.setViewportSize({ width: 400, height: 840 });
+    await boot(page, { clickThrough: 1, layout: 'electron' }, { window: { showChat: false } });
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden', { timeout: 10_000 });
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    // empty space beside the head first: click-through
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5);
+    await page.mouse.move(box.x + 8, box.y + box.height * 0.5);
+    await expect.poll(async () => (await ignores()).at(-1)).toBe(true);
+    // (the pointer near the face unfolded the panel: it folds again after its grace period)
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden', { timeout: 10_000 });
+    const n = (await ignores()).length;
+    // 60 px below the chin, over what looks like empty desktop
+    for (let i = 0; i < 4; i++) await page.mouse.move(200 + i * 4, box.y + box.height + 60);
+    await page.waitForTimeout(400);
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden');
+    expect((await ignores()).slice(n)).not.toContain(false);
+    // over the face the panel drops down as before
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4);
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'shown');
+  });
+
   test('hotkeys from main: toggleChat and stopSpeaking', async ({ page }) => {
     await boot(page);
     await page.evaluate(() => window.__app.bridge.__mock.hotkey('toggleChat'));

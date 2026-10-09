@@ -248,6 +248,63 @@ When the local voice is not running, the system voice speaks and there is no tim
 renderer predicts one from the words (`src/audio/g2p.js`) and anchors it on the voice's word
 boundary events (details in [RENDERER.md](RENDERER.md#lip-sync)).
 
+### 2.4 Voice character
+
+The renderer gives the local voice a synthetic "hologram" timbre (*Settings → Voice → Character*
+and *Settings → Voice → Intensity*, saved as `voice.character` and `voice.fxAmount`):
+
+| Character | What it does |
+|---|---|
+| **Synth** (default) | The voice stays the strongest layer. Under it: a vocoder copy exactly at the voice's own pitch (a perfectly periodic, buzz-bright double), a doubler (two slowly drifting 11/17 ms copies), a short metallic comb resonance and a high shelf for digital air. Clearly synthetic, still easy to understand. |
+| **Vocoder** | Everything is vocoded (28 bands); the pitch snaps to semitones, a classic synth voice. Noise excites the consonants and the dry sibilance is mixed back so *s*, *sh* and *t* stay crisp. |
+| **Robot** | A monotone vocoder (one note per sentence: the sentence's median pitch, plus a sub-octave), 55 Hz ring modulation, a little bit-crush grit and a low metallic comb. |
+| **Natural** | The voice exactly as Kokoro made it (the effect is bypassed bit-exactly). |
+
+*Intensity* (0–100 %, default 60 %) scales the wet layers and their strength. All characters keep
+the loudness of the dry voice (a gated AGC, measured starting points per character) and a peak
+limiter keeps every sample under 0.95.
+
+It applies to the **local voice only**: the system voice (Web Speech) plays outside the page's
+audio graph and cannot be processed; the drawer says so while it is the one speaking.
+
+**How it runs.** `src/audio/voicefx.js` is pure JS (no imports, unit-tested in Node);
+`src/audio/voicefx-worklet.js` runs it in an AudioWorklet on the audio thread, one node for the
+whole session. The player routes each clip through it (or straight to the speakers for Natural)
+and keeps its AnalyserNode on the **dry** voice, so the lip-sync and `current.time` are exactly
+what they were. The effect has no latency (one 128-sample block); tails (comb, doubler) ring out in
+the shared node after a clip has ended instead of delaying the next one. The player hands every
+clip's samples to the worklet before it plays, so the carrier's pitch comes from a YIN analysis
+of the clip itself with windows centred on each instant: no tracking lag and no octave slips
+(median error 0.6 % against librosa's pYIN on real Kokoro speech; a live tracker lagged by ~25 ms).
+The worklet module loads in the background at start-up; only a very first clip may wait for it,
+at most 30 ms. Without AudioWorklet, when the module cannot load or when the processor fails, the
+voice plays unprocessed and the console says why.
+
+**Measured** on 24 real Kokoro sentences (af_heart and am_michael: 10 Harvard sentences, a greeting
+and a question), at 48 kHz:
+
+| | STOI vs the dry voice | recogniser word error rate | loudness vs dry |
+|---|---|---|---|
+| Natural | 1.00 | 22.9 % | 0 dB |
+| Synth 40 % / **60 %** / 90 % | 0.97 / **0.94** / 0.87 | 24.8 / **30.3** / 51.1 % | 0.0 / 0.0 / +0.1 dB |
+| Vocoder 60 % | 0.74 | 79 % | +0.3 dB |
+| Robot 60 % | 0.65 | 90 % | +0.6 dB |
+
+STOI (short-time objective intelligibility, `pystoi`) predicts intelligibility from the band
+envelopes; the word error rates come from pocketsphinx, an old recogniser trained on natural speech
+that is far harsher on vocoded timbres than people are (16–20-channel vocoded sentences are close to
+fully intelligible to listeners: Shannon et al. 1995, Friesen et al. 2001), so treat them as a
+relative measure. The synth default was tuned
+on these numbers: a louder vocoder layer, or 20 bands instead of 28, smears the formants enough to
+cost ~10 points of recogniser accuracy. Cost: 1.9 % of the audio thread in Chromium (~0.05 ms per
+2.7 ms block); the main thread only hands the clip over (~0.1 ms). A clip start (decode + graph) takes
+p50 1.6 ms / max 6.1 ms for a 7-second sentence, with the native base64 decoder and a typed 16-bit
+WAV path in `src/audio/wav.js`.
+
+**Tuning or demos:** `node tools/voicefx/render.mjs --dry --out DIR clip.wav …` renders every
+character at 40/60/90 % with the app's own DSP (resampled to 48 kHz like the AudioContext); the
+preset parameters are `presetParams()` in `src/audio/voicefx.js`.
+
 ---
 
 ## 3. Research and decision (October 2026)
@@ -410,6 +467,8 @@ Start with `voice\.venv\Scripts\python -m lawnmower_voice.doctor --smoke --human
 | Model download fails (proxy or offline) | Re-run the setup script later. The server reports `Whisper model '…' is not downloaded` with a 503 until then; Kokoro has the same behaviour. Copy model folders from another machine into `voice/models/whisper` (Hugging Face cache layout) and `voice/models/kokoro/`. `--no-download` forbids network access at runtime. |
 | Everything works but runs on the CPU | Read `stt.note` and `tts.note` in `/health`; they quote the GPU error. The CPU fallback is deliberate, so the avatar keeps talking. |
 | Port or start-up problems | The server prints `{"event":"ready",...}` only after binding, and exits non-zero if the port is taken. The app chooses a free port. Logs go to stderr, and the Electron log keeps the tail. |
+| The voice sounds unprocessed although *Character* is Synth, Vocoder or Robot | The system voice is speaking (only the local voice can be processed), or the effect could not start: the renderer then logs `[player] the voice character effect is unavailable (…)` (DevTools with F12 in a dev build, or `main.log` with `LAWNMOWER_DEBUG=1`). The voice keeps working unprocessed; restart the app. |
+| The synthetic voice is too much, or not enough | *Settings → Voice → Intensity*, or another *Character*; Natural turns it off. |
 | *Server: disabled* — "Local voice is not fully installed (missing: uvicorn)" | The venv exists but the setup stopped before the packages were installed (the server reports `{"event":"not-installed","missing":[…]}` and exits with code 2). The app does not restart it in a loop; it waits for *Set up local voice again…*, *Restart voice* or a changed setting. Find out why the setup stopped in its log (5.1), fix that, run the setup again. |
 
 ### 5.1 When the setup fails
@@ -480,4 +539,5 @@ The tests never download models and need no GPU. They cover:
 | **Verified here** | `pip --dry-run` resolution of the `[gpu]` extra for Linux and Windows (cp312). |
 | **Verified here** | Kokoro v1.0 TTS with the **real model on the CPU**: 54 voices, `duration` output present, visemes aligned with the audio, RTF 0.26. |
 | **Verified here, by binary inspection** | sm_120 kernels in onnxruntime-gpu 1.30.0; PTX-only Blackwell support in CTranslate2 4.8.2; the DLL names and wheel layouts above. |
+| **Verified here** (2026-10) | The voice character on real Kokoro speech: the 24 sentences above offline, and end to end with the real voice server (CPU) → the browser app → the AudioWorklet, capturing what the app outputs (it matches the offline DSP: spectrogram correlation 0.94 for Synth; 99.9 % of the processed blocks used the look-ahead pitch; Natural bypassed). In Chromium at 44.1 kHz and offline at 48 kHz; in the Electron app the worklet loads over `app://` under the CSP and processes a clip (smoke test). Not heard by a person here: the demo files are for that. |
 | **Not verifiable here** | Anything on an actual RTX 5070 or Windows: CUDA inference, the DLL pre-load order on Windows, VRAM use, GPU latency, Windows PowerShell 5.1 itself, NVML on a real driver. Real Whisper inference was also not possible, because Hugging Face is blocked in the build environment; STT is covered by mocked tests plus a signature check against the real faster-whisper API. |

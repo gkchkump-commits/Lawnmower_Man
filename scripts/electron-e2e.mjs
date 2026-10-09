@@ -292,6 +292,31 @@ try {
   report.voice = voice;
   check('voice status reported', ['disabled', 'starting', 'ready', 'error'].includes(voice.status), voice);
 
+  // The local voice's character (default synth) is an AudioWorklet module loaded over app:// under
+  // the CSP; a refused module would only leave a warning and an unprocessed voice. A short clip
+  // through the real player must come out processed by the audio thread.
+  const fx = await page.waitForFunction(() => {
+    const v = /** @type {any} */ (window).__app?.player?.voiceFx;
+    return v && v.state !== 'loading' ? v : null;
+  }, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+  report.voiceFx = fx;
+  check('voice character effect loaded (AudioWorklet over app:// under the CSP)', fx?.state === 'ready' && fx.character === 'synth' && fx.active, fx);
+  const fxRun = await page.evaluate(async () => {
+    const p = /** @type {any} */ (window).__app.player;
+    const rate = 24000;
+    const samples = new Float32Array(rate * 0.6);
+    for (let i = 0; i < samples.length; i++) {
+      const t = i / rate;
+      samples[i] = 0.25 * Math.sin(2 * Math.PI * 160 * t) + 0.12 * Math.sin(2 * Math.PI * 320 * t) + 0.06 * Math.sin(2 * Math.PI * 640 * t);
+    }
+    const before = await p.fxStats();
+    const res = await Promise.race([p.enqueue({ kind: 'audio', samples, sampleRate: rate, text: 'e2e' }), new Promise((r) => setTimeout(() => r({ timeout: true }), 5000))]);
+    const after = await p.fxStats();
+    return { res, blocks: after ? after.blocks - before.blocks : -1, changed: after ? (after.diffSq - before.diffSq) / Math.max(1e-9, after.inSq - before.inSq) : -1, failed: after?.failed };
+  });
+  report.voiceFxRun = fxRun;
+  check('a clip is processed on the audio thread', fxRun.res?.stopped === false && fxRun.blocks > 50 && fxRun.changed > 0.01 && fxRun.failed === false, fxRun);
+
   if (packaged) await packagedChecks(app);
 
   // The renderer booted completely (UI wired, hologram created) and logged no errors on the way.

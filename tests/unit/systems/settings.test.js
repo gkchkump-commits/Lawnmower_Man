@@ -14,6 +14,8 @@ import {
   normalizeAccelerator,
   sanitizeSettings,
 } from '../../../electron/settings.js';
+import { DEFAULT_SETTINGS as RENDERER_DEFAULTS } from '../../../src/app/settings-defaults.js';
+import { DEFAULT_CHARACTER, DEFAULT_FX_AMOUNT, VOICE_CHARACTERS } from '../../../src/audio/voicefx.js';
 
 let dir;
 beforeEach(() => {
@@ -93,6 +95,32 @@ describe('applyPatch validation', () => {
       expect(r.settings.voice.systemVoice, JSON.stringify(bad)).toBe('');
       expect(r.warnings.length).toBe(1);
     }
+  });
+
+  it('voice.character: one of the voice characters (default synth); voice.fxAmount clamped to 0..1', () => {
+    expect(base.voice.character).toBe('synth');
+    expect(base.voice.fxAmount).toBeCloseTo(0.6, 5);
+    for (const c of VOICE_CHARACTERS) expect(applyPatch(base, { voice: { character: c } }).settings.voice.character).toBe(c);
+    for (const bad of ['Robot', 'chipmunk', '', 3, null, true]) {
+      const r = applyPatch(base, { voice: { character: bad } });
+      expect(r.settings.voice.character, JSON.stringify(bad)).toBe('synth');
+      expect(r.warnings.length).toBe(1);
+    }
+    expect(applyPatch(base, { voice: { fxAmount: 0.25 } }).settings.voice.fxAmount).toBe(0.25);
+    expect(applyPatch(base, { voice: { fxAmount: 7 } }).settings.voice.fxAmount).toBe(1);
+    expect(applyPatch(base, { voice: { fxAmount: -1 } }).settings.voice.fxAmount).toBe(0);
+    for (const bad of ['0.5', Number.NaN, null]) {
+      const r = applyPatch(base, { voice: { fxAmount: bad } });
+      expect(r.settings.voice.fxAmount, String(bad)).toBeCloseTo(0.6, 5);
+      expect(r.warnings.length).toBe(1);
+    }
+    // a settings file from before the voice characters gets the defaults
+    expect(sanitizeSettings({ voice: { ttsVoice: 'am_michael' } }).settings.voice).toMatchObject({ ttsVoice: 'am_michael', character: 'synth', fxAmount: 0.6 });
+    // main, the renderer copy and the DSP agree
+    expect(RENDERER_DEFAULTS.voice.character).toBe(base.voice.character);
+    expect(RENDERER_DEFAULTS.voice.fxAmount).toBe(base.voice.fxAmount);
+    expect(DEFAULT_CHARACTER).toBe(base.voice.character);
+    expect(DEFAULT_FX_AMOUNT).toBe(base.voice.fxAmount);
   });
 
   it('allows position null and rejects garbage positions', () => {

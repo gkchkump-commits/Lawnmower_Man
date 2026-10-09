@@ -30,6 +30,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
     device: 'auto', // 'auto' | 'cuda' | 'cpu'
     handsFree: false,
     speakReplies: true,
+    // the local voice's character (src/audio/voicefx.js; the system voice cannot be processed):
+    // 'synth' (default) | 'vocoder' | 'robot' | 'natural' (unprocessed); fxAmount 0..1
+    character: 'synth',
+    fxAmount: 0.6,
   },
   avatar: {
     renderer: 'relief', // 'relief' | 'procedural' | 'placeholder'
@@ -248,6 +252,8 @@ const SCHEMA = {
     device: oneOf(['auto', 'cuda', 'cpu']),
     handsFree: bool(),
     speakReplies: bool(),
+    character: oneOf(['natural', 'synth', 'vocoder', 'robot']),
+    fxAmount: num(0, 1),
   },
   avatar: {
     renderer: oneOf(['relief', 'procedural', 'placeholder']),

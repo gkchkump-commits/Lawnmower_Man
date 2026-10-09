@@ -1087,6 +1087,9 @@ body[data-lock="1"] .drawer-head { cursor: default; }
 .field.disabled { opacity: 0.55; }
 .field-label { color: var(--text-2); flex: none; }
 .field-text { min-width: 0; }
+/* a select or slider with a hint keeps its width; the label and hint wrap beside it */
+.field-select .field-text,
+.field-range .field-text { flex: 1 1 0; }
 .field-hint { color: var(--muted); font-size: 10.5px; line-height: 1.3; }
 .field select,
 .field input[type="text"] {

@@ -57,7 +57,9 @@ async function boot() {
   // ---------------------------------------------------------------- speech & audio
   const webSpeech = new WebSpeechTTS();
   const voiceClient = new VoiceClient(bridge.__mock?.voiceFetch ? { fetch: bridge.__mock.voiceFetch } : {});
-  const player = new AudioPlayer({ speech: webSpeech });
+  // the local voice's character (settings voice.character / fxAmount; later changes arrive
+  // through controller.applySettings); the effect starts loading now, off the critical path
+  const player = new AudioPlayer({ speech: webSpeech, voiceFx: { character: settings.voice.character, amount: settings.voice.fxAmount } });
   const mic = new Mic();
   /** @type {AppView} */
   let view;

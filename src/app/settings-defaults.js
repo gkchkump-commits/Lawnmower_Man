@@ -28,6 +28,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     device: 'auto',
     handsFree: false,
     speakReplies: true,
+    character: 'synth', // the local voice's character: 'natural' | 'synth' | 'vocoder' | 'robot'
+    fxAmount: 0.6,
   },
   avatar: {
     renderer: 'relief',

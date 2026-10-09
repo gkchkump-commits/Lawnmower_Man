@@ -16,7 +16,8 @@ src/app/                 controller.js      conversation state machine (contract
                          gaze.js            cursor position (desktop-wide in Electron) → avatar.lookAt
                          settings-defaults.js renderer copy of the §4 defaults, getPath/patchFor
                          emitter.js         tiny event emitter
-src/audio/               player.js (Web Audio queue + analyser), lipsync.js (drivers), articulation.js
+src/audio/               player.js (Web Audio queue + dry analyser), voicefx.js (+ voicefx-worklet.js: the
+                         voice character on the audio thread), lipsync.js (drivers), articulation.js
                          (coarticulation model, speech plans), g2p.js (text → phonemes), mic.js
                          (+ mic-worklet.js), vad.js, dsp.js (resampler), wav.js
 src/speech/              voice-client.js (voice server §6), web-speech.js (browser voice), index.js (tts/stt routing)
@@ -39,7 +40,9 @@ src/styles/app.css       the glass UI
   the system's speech synthesis (Web Speech: the voice chosen in *Settings › Voice*, saved as
   `voice.systemVoice`, or the most natural English one; the list refreshes on `voiceschanged`),
   otherwise text only. Up to two sentences
-  are synthesized ahead of the one playing.
+  are synthesized ahead of the one playing. The local voice plays through the voice character
+  (*Settings › Voice › Character*: Synth by default; `src/audio/voicefx.js` in an AudioWorklet, see
+  [VOICE.md](VOICE.md#24-voice-character)); the lip-sync analyser taps the dry voice before it.
 * Lip-sync each frame (see [Lip-sync](#lip-sync) below) → `avatar.setMouth` (jaw, wide, round,
   press, tuck, teeth, tongue), loudness → `avatar.setSpeechLevel`, prosody cues → `avatar.setProsody`.
 * Tool calls show as chips; if Claude goes straight to a tool the avatar says a short cue.

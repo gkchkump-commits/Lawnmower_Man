@@ -273,6 +273,8 @@ command line — user text only ever travels over stdin; long prompts go in file
     device: 'auto',              // 'auto' | 'cuda' | 'cpu'
     handsFree: false,            // continuous VAD listening (half-duplex)
     speakReplies: true,
+    character: 'synth',          // the local voice's character: 'synth' | 'vocoder' | 'robot' | 'natural' (VOICE.md §2.4)
+    fxAmount: 0.6,               // its intensity 0..1
   },
   avatar: {
     renderer: 'relief',          // 'relief' (from the reference video) | 'procedural'
@@ -398,7 +400,7 @@ Viseme ids (shared with the renderer's lip-sync): `sil, PP (m b p), FF (f v), TH
 
 `idle → listening (mic, VAD) → transcribing (/stt) → thinking (claude turn, no text yet) →
 speaking (text streams → sentence chunker → /tts per sentence → ordered playback queue →
-lip-sync) → idle`. Lip-sync (`src/audio/lipsync.js`): the voice server's viseme timeline, or for the
+voice character (AudioWorklet; the lip-sync reads the dry voice) → lip-sync) → idle`. Lip-sync (`src/audio/lipsync.js`): the voice server's viseme timeline, or for the
 system voice the utterance's own words (`g2p.js` → an `articulation.js` plan, anchored by the voice's
 word-boundary events), blended by a coarticulation model into the `setMouth` channels, plus
 prosody cues for `setProsody`. Barge-in: hotkey/click while speaking stops playback, interrupts the

@@ -19,7 +19,7 @@ from lawnmower_voice.tts import (
     phoneme_timings,
     voice_info,
 )
-from lawnmower_voice.visemes import VISEMES
+from lawnmower_voice.visemes import VISEMES, kokoro_audio_lead
 
 GPU = DeviceReport(cuda=True, gpus=[GpuInfo(0, "RTX 5070", "12.0", 8151, 7000)])
 
@@ -39,9 +39,12 @@ class FakeKokoro:
         self.fail = fail
         self.calls = []
         self.tokenizer = types.SimpleNamespace(phonemize=lambda text, lang: "həlˈoʊ")
-        if not timed:
-            self.create_timed = None
-            del self.create_timed
+
+    def __getattribute__(self, name):
+        # an untimed Kokoro (older kokoro-onnx) has no create_timed at all: hasattr() is False
+        if name == "create_timed" and not object.__getattribute__(self, "timed"):
+            raise AttributeError(name)
+        return object.__getattribute__(self, name)
 
     def get_voices(self):
         return ["af_heart", "am_michael", "bf_emma"]
@@ -114,6 +117,8 @@ def test_synthesize_with_timings(tmp_path):
     vis = [s["viseme"] for s in res.visemes]
     assert vis[:5] == ["sil", "kk", "E", "DD", "O"]
     assert res.visemes[-1]["end"] == pytest.approx(0.6)
+    # the timeline is moved onto the audio: Kokoro speaks ~50 ms before its durations say ("h" at 0.1)
+    assert res.visemes[1]["start"] == pytest.approx(0.1 - kokoro_audio_lead(1.25), abs=0.001)
     st = tts.status()
     assert st["loaded"] and st["device"] == "cuda" and st["voices"] == ["af_heart", "am_michael", "bf_emma"]
 
@@ -301,7 +306,7 @@ def test_torch_backend_with_fake_modules(monkeypatch, tmp_path):
 
         def __call__(self, text, voice, speed, split_pattern):
             ps = "həlˈoʊ"
-            dur = np.array([2] + [4] * len(ps) + [2])
+            dur = np.array([4] + [4] * len(ps) + [2])  # the leading pad: 0.1 s of silence
             n = int(dur.sum()) * 600
             yield types.SimpleNamespace(audio=FakeTensor(0.3 * np.ones(n, np.float32)), phonemes=ps, pred_dur=FakeTensor(dur))
 
@@ -315,6 +320,7 @@ def test_torch_backend_with_fake_modules(monkeypatch, tmp_path):
     st = tts.status()
     assert st["device"] == "cpu" and "not available" in st["note"]
     assert [s["viseme"] for s in res.visemes][:4] == ["sil", "kk", "E", "DD"]
+    assert res.visemes[1]["start"] == pytest.approx(0.1 - kokoro_audio_lead(1.0), abs=1e-3)
     assert res.visemes[-1]["end"] == pytest.approx(len(res.audio) / 24000, abs=1e-3)
 
 

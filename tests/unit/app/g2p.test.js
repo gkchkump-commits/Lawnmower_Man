@@ -171,6 +171,13 @@ describe('numbers and acronyms', () => {
     expect(by.NASA.startsWith('N')).toBe(true);
     expect(words.find((w) => w.text === 'FAST').emphasis).toBe(true);
   });
+
+  it('technical capitals and parts of names are words, not shouted emphasis', () => {
+    const w = textToWords('Check the README and CLAUDE.md, add a TODO, use JSON or YAML for the REST API, set NODE_ENV and MAX_RETRIES, it is REALLY FAST.');
+    expect(w.filter((x) => x.emphasis).map((x) => x.text)).toEqual(['REALLY', 'FAST']);
+    expect(w.find((x) => x.text === 'JSON').phones.length).toBeGreaterThan(0); // still said
+    expect(textToWords('That is NEVER a good idea.').find((x) => x.text === 'NEVER').emphasis).toBe(true);
+  });
 });
 
 describe('textToWords', () => {

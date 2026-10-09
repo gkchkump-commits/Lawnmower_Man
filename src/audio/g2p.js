@@ -470,6 +470,13 @@ export function wordToPhones(raw) {
   return assignStress(word, dedup);
 }
 
+/**
+ * Capitalised technical terms and names that are read as words, not shouted: in a coding
+ * assistant's replies they are not emphasis.
+ */
+const CAPS_TERMS = new Set(('README TODO FIXME NOTE JSON YAML TOML REST CRUD CORS AJAX ASCII UNICODE UUID GUID JPEG MIME '
+  + 'OAUTH PATH HOME NODE NULL TRUE FALSE NASA LINUX UNIX WASM SELECT FROM WHERE INSERT UPDATE DELETE').split(' '));
+
 /** A token is an acronym the voice spells: all capitals, 2-5 letters, or no vowel at all. */
 function isAcronym(tok) {
   if (!/^[A-Z]{2,5}s?$/.test(tok)) return false;
@@ -526,8 +533,10 @@ export function textToWords(text) {
     }
     if (!phones.length) continue;
     const lower = tok.toLowerCase().replace(/’/g, "'");
-    // a shouted word ("REALLY") in normal text is emphasis (an all-caps text is not)
-    const caps = /^[A-Z]{3,}$/.test(tok) && !isAcronym(tok) && !shouting;
+    // a shouted word ("REALLY") in normal text is emphasis (an all-caps text is not); technical
+    // capitals ("JSON", "README") and parts of names ("CLAUDE.md", "NODE_ENV") are not
+    const identifier = /^(\.[A-Za-z]|_)/.test(s.slice(m.index + tok.length)) || s[m.index - 1] === '_';
+    const caps = /^[A-Z]{3,}$/.test(tok) && !isAcronym(tok) && !shouting && !CAPS_TERMS.has(tok) && !identifier;
     words.push({
       text: tok, start: m.index, end: m.index + tok.length, phones, punct: '',
       content: !FUNCTION_WORDS.has(lower) && !/^\d/.test(tok),

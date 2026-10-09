@@ -118,8 +118,18 @@ export async function createAvatar(canvas, options = {}) {
 
   // advance(): a scripted clock (deterministic speech renders); its frames must not settle
   let live = false;
+  /** @type {((dt: number, time: number) => void)|null} runs first in every live frame (the lip-sync) */
+  let frameHook = null;
   /** @param {number} dt @param {number} time @param {boolean} settle */
   function update(dt, time, settle) {
+    // one frame loop: the lip-sync's targets of THIS frame, then the director, then the render
+    if (frameHook && !settle && dt > 0) {
+      try {
+        frameHook(dt, time);
+      } catch (e) {
+        console.warn('[avatar] frame hook failed', e);
+      }
+    }
     const a = limitHeadMotion(director.update(dt, time, { settle }), motionLimits);
     for (const k in overrides) a[k] = overrides[k];
     if (opts.autoQuality && !settle && dt > 0) {
@@ -334,6 +344,12 @@ export async function createAvatar(canvas, options = {}) {
     blink() { director.blink(); stage.requestRender(); },
     /** @param {number|null} x @param {number} [y] */
     lookAt(x, y) { director.lookAt(x, y); stage.requestRender(); },
+    /**
+     * Run `fn(dt, time)` at the start of every live frame, before the director (the app's
+     * lip-sync tick), so mouth targets, the director and the render share one loop and one dt.
+     * null removes it. @param {((dt: number, time: number) => void)|null} fn
+     */
+    setFrameHook(fn) { frameHook = typeof fn === 'function' ? fn : null; },
     /** @param {Partial<AvatarOptions>} p */
     setOptions(p = {}) {
       if (p.quality !== undefined) applyQuality(p.quality);

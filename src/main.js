@@ -145,6 +145,16 @@ async function boot() {
   }
 
   // ---------------------------------------------------------------- avatar
+  /** when the avatar's frame last ran the controller tick (performance.now ms) */
+  let hookTickAt = -Infinity;
+  /** @param {number} dt */
+  const tickController = (dt) => {
+    try {
+      controller?.tick(dt, performance.now() / 1000);
+    } catch (err) {
+      console.warn('[app] tick failed', err);
+    }
+  };
   const app = /** @type {any} */ ({ bridge, isMock, view, drawer, player, mic, voiceClient, webSpeech, services, avatarReady: false, ready: false });
   window.__app = app;
   const avatarHost = new AvatarHost($('stage'), {
@@ -154,6 +164,11 @@ async function boot() {
     },
     onCreated: (a) => {
       controller?.setAvatar(a);
+      // one frame loop: the lip-sync runs inside the avatar's frame, right before the director
+      a.setFrameHook?.((dt) => {
+        hookTickAt = performance.now();
+        tickController(dt);
+      });
       gaze.reapply(); // the new avatar starts without a gaze target
       app.avatarReady = true;
       body.dataset.avatar = a.renderer || 'none';
@@ -669,15 +684,14 @@ async function boot() {
   $('input').addEventListener('blur', () => view.refreshPanel());
 
   // ---------------------------------------------------------------- frame loop (lip-sync)
+  // The avatar's frame runs the tick (see setFrameHook above: lip-sync, then the director, then
+  // the render, with one dt). This loop only takes over while the avatar does not render: before
+  // it is loaded, without WebGL, after a lost context.
   let last = performance.now();
   const frame = (t) => {
     const dt = clamp((t - last) / 1000, 0, 0.1);
     last = t;
-    try {
-      controller.tick(dt, t / 1000);
-    } catch (err) {
-      console.warn('[app] tick failed', err);
-    }
+    if (performance.now() - hookTickAt > 100) tickController(dt);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

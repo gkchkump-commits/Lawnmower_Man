@@ -134,7 +134,11 @@ export function createAppProtocolHandler(o) {
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'no-cache',
     };
-    if (o.csp && /\.html?$/i.test(file)) headers['Content-Security-Policy'] = o.csp;
+    // Pages and scripts carry the CSP. A dedicated/module worker (the face tracker) takes its
+    // policy from its own script's response, not from the page: without it the worker could
+    // fetch anything (MediaPipe's built-in usage metrics to Google, for one). Scripts loaded by
+    // the page ignore the header.
+    if (o.csp && /\.(html?|m?js)$/i.test(file)) headers['Content-Security-Policy'] = o.csp;
     try {
       if (method === 'HEAD') {
         const st = await fs.stat(file);

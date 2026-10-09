@@ -55,8 +55,10 @@ import {
   APP_SCHEME,
   buildCsp,
   decidePermission,
+  isAllowedRequestUrl,
   isSafeExternalUrl,
   isTrustedUrl,
+  NETWORK_URL_PATTERNS,
   validateDevServerUrl,
   withCspHeader,
 } from './security.js';
@@ -112,6 +114,9 @@ const state = {
   claudeDetail: '',
   /** @type {{ kind: string, detail: string }|null} */ claudeProblem: null,
   /** @type {Record<string, any>|null} */ gpu: null,
+  /** Network requests the session refused (see setupSessionSecurity), the first 50. @type {string[]} */
+  blockedRequests: [],
+  /** @type {Set<string>} */ blockedOrigins: new Set(),
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -321,13 +326,21 @@ async function shutdown() {
 
 /** @param {import('electron').Session} ses */
 function setupSessionSecurity(ses) {
-  // CSP for documents served over http (dev server); app:// responses carry it themselves.
+  // CSP for documents served over http (dev server) and for everything our own origin serves:
+  // a worker takes its policy from its script's response (app:// responses carry it themselves).
   ses.webRequest.onHeadersReceived((details, callback) => {
-    if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') {
+    if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame' || isTrustedUrl(details.url, trust)) {
       callback({ responseHeaders: withCspHeader(details.responseHeaders, csp) });
     } else {
       callback({ responseHeaders: details.responseHeaders });
     }
+  });
+  // No request leaves the PC: network requests go to loopback only (the voice server, the dev
+  // server). Behind the CSP, this also stops a context without one (a library's telemetry).
+  ses.webRequest.onBeforeRequest({ urls: [...NETWORK_URL_PATTERNS] }, (details, callback) => {
+    const ok = isAllowedRequestUrl(details.url);
+    if (!ok) noteBlockedRequest(details.url);
+    callback({ cancel: !ok });
   });
   // The camera (media with video) is allowed only while settings.camera.enabled is on.
   const policy = () => ({ ...trust, camera: !!state.settings?.get().camera?.enabled });
@@ -342,6 +355,18 @@ function setupSessionSecurity(ses) {
     return decidePermission(permission, { url: requestingOrigin || d.requestingUrl, mediaType: d.mediaType }, policy());
   });
   if (typeof ses.setDevicePermissionHandler === 'function') ses.setDevicePermissionHandler(() => false);
+}
+
+/** Remember (bounded) and log, once per origin, a request the session refused. @param {string} url */
+function noteBlockedRequest(url) {
+  let origin = url;
+  try {
+    origin = new URL(url).origin;
+  } catch { /* keep the raw string */ }
+  if (state.blockedRequests.length < 50) state.blockedRequests.push(url.slice(0, 300));
+  if (state.blockedOrigins.has(origin)) return;
+  state.blockedOrigins.add(origin);
+  state.log('warn', `[security] blocked a network request to ${origin}`);
 }
 
 /** Block navigation away from the app, new windows and webviews. @param {import('electron').WebContents} contents */
@@ -976,5 +1001,6 @@ if (process.env.LAWNMOWER_E2E === '1') {
     voiceSetup: (/** @type {{ cpu?: boolean }} */ o) => runVoiceSetup({ cpu: !!(o && o.cpu) }),
     voiceInfo: () => voiceInfo(),
     voiceSetupState: () => (state.setup ? state.setup.state : null),
+    blockedRequests: () => state.blockedRequests.slice(),
   };
 }

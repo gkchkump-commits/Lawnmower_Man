@@ -50,7 +50,9 @@ webcam snapshots and should react naturally rather than describe them.
 * The camera is off until you turn it on, and the first use asks first.
 * **Face tracking runs locally**, inside the app, with Google's MediaPipe Face Landmarker. No video
   is recorded, stored or uploaded. It works offline: the model and its runtime are part of the app
-  (no download, no CDN).
+  (no download, no CDN). MediaPipe's built-in usage statistics, which it would send to Google once
+  a minute, are blocked: the tracker's worker runs under the app's Content-Security-Policy, and the
+  main process cancels every network request that does not go to this PC.
 * **Claude sees a picture only** when *Let Claude see me* is on or you pressed the camera button
   for one message. The picture goes into that message to your Claude CLI, the same way as your
   text, and from there to Anthropic like the rest of the conversation. The app keeps no copy
@@ -123,7 +125,12 @@ snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► 
   `scripts/vite-vision-wasm.mjs` serves it from `node_modules` in development and copies it into
   `dist/assets/vision/wasm/` for the build and the installer. The model
   (`public/assets/vision/face_landmarker.task`, 3.7 MB) is committed. Both load from `app://` and
-  work under the app's Content-Security-Policy (`script-src 'self' 'wasm-unsafe-eval'`).
+  work under the app's Content-Security-Policy (`script-src 'self' 'wasm-unsafe-eval'`). A worker
+  takes its policy from its own script's response, so `app://` sends the CSP header with scripts
+  too (`electron/app-protocol.js`); `@mediapipe/tasks-vision` always starts a usage logger that
+  POSTs to `odml.pa.googleapis.com`, and `connect-src` refuses it. Behind that, the session's
+  `onBeforeRequest` cancels any http/https/ws request to a host other than 127.0.0.1/localhost
+  (`isAllowedRequestUrl` in `electron/security.js`). `scripts/electron-e2e.mjs` checks both.
 * Main process: `decidePermission` allows `media` with video only for the app's own origin and only
   while `camera.enabled` is on; `lm:claude:send` validates images (at most 2; JPEG, PNG or WebP
   whose bytes match the type; base64 without a `data:` prefix; ≤ 1.5 MB) before ClaudeSession puts

@@ -264,9 +264,29 @@ try {
   }, null, { timeout: 60000 }).then((h) => h.jsonValue(), async () => page.evaluate(() => /** @type {any} */ (window).__app?.camera?.status));
   report.camera = cam && { state: cam.state, tracking: cam.tracking, mode: cam.mode, delegate: cam.delegate, frames: cam.frames, lastMs: cam.lastMs, error: cam.error?.kind, trackingError: cam.trackingError };
   check('camera on: face tracking runs in a worker (wasm + model over app://)', cam?.state === 'on' && cam?.tracking === 'on' && cam?.mode === 'worker' && cam?.frames >= 3, report.camera);
+  // Offline means offline: the face-tracker worker runs under the CSP too (a worker takes it from
+  // its script's response, not from the page), so MediaPipe's built-in usage metrics — sent at
+  // once when the landmarker closes — and any other remote request never reach the network.
+  const trackerWorker = page.workers().find((w) => /face-worker/.test(w.url()));
+  const workerFetch = trackerWorker
+    ? await trackerWorker.evaluate(() => new Promise((resolve) => {
+      let violated = '';
+      const onViolation = (/** @type {any} */ e) => { violated = e.violatedDirective; };
+      globalThis.addEventListener('securitypolicyviolation', onViolation);
+      const done = (/** @type {string} */ how) => setTimeout(() => {
+        globalThis.removeEventListener('securitypolicyviolation', onViolation);
+        resolve(violated ? `blocked by CSP (${violated})` : how);
+      }, 100);
+      fetch('https://example.com/').then(() => done('allowed'), () => done('failed without a CSP violation'));
+    })).catch((err) => `error: ${err.message}`)
+    : 'no face-tracker worker';
+  check('the face-tracker worker runs under the CSP (no remote fetch)', /^blocked by CSP \(connect-src/.test(workerFetch), workerFetch);
   await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ camera: { enabled: false } }));
   const released = await page.waitForFunction(() => document.body.dataset.camera === 'off' && !(/** @type {any} */ (window).__app.camera.camera.running), null, { timeout: 10000 }).then(() => true, () => false);
   check('camera off releases the device', released);
+  await new Promise((r) => setTimeout(r, 1500)); // the landmarker's close() flushes its metrics now
+  const leaked = await app.evaluate(() => /** @type {any} */ (globalThis).__lawnmowerE2E.blockedRequests());
+  check('no request left the app (CSP stopped them before the network)', Array.isArray(leaked) && leaked.length === 0, leaked);
 
   const voice = await page.evaluate(() => /** @type {any} */ (window).lawnmower.voice.info());
   report.voice = voice;

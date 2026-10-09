@@ -7,8 +7,10 @@ import {
   APP_ORIGIN,
   buildCsp,
   decidePermission,
+  isAllowedRequestUrl,
   isSafeExternalUrl,
   isTrustedUrl,
+  NETWORK_URL_PATTERNS,
   validateDevServerUrl,
   withCspHeader,
 } from '../../../electron/security.js';
@@ -64,6 +66,17 @@ describe('origins and permissions', () => {
       expect(decidePermission(p, { url })).toBe(false);
     }
   });
+  it('lets network requests go to loopback only (voice server, dev server), never the internet', () => {
+    for (const url of [
+      'http://127.0.0.1:8765/health', 'http://localhost:5173/src/main.js', 'ws://127.0.0.1:5173/', 'wss://localhost:5173/', 'http://[::1]:5173/',
+      'app://lawnmower/assets/face-worker-x.js', 'blob:app://lawnmower/1234', 'data:text/plain,x', 'devtools://devtools/bundled/x.html',
+    ]) expect(isAllowedRequestUrl(url), url).toBe(true);
+    for (const url of [
+      'https://odml.pa.googleapis.com/v1/log', 'https://example.com/', 'http://192.168.1.10:8765/', 'ws://evil.example/', 'wss://evil.example/',
+      'http://127.0.0.1.evil.example/', 'http://localhost.evil.example/', 'not a url',
+    ]) expect(isAllowedRequestUrl(url), url).toBe(false);
+    expect([...NETWORK_URL_PATTERNS].sort()).toEqual(['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*']);
+  });
   it('opens only web/mail links externally', () => {
     expect(isSafeExternalUrl('https://anthropic.com')).toBe(true);
     expect(isSafeExternalUrl('mailto:a@b.c')).toBe(true);
@@ -84,6 +97,7 @@ describe('app:// protocol handler', () => {
     fs.mkdirSync(path.join(root, 'assets', 'avatars', 'reference'), { recursive: true });
     fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><title>x</title>');
     fs.writeFileSync(path.join(root, 'assets', 'app.js'), 'console.log(1)');
+    fs.writeFileSync(path.join(root, 'assets', 'worker.mjs'), 'self.onmessage = () => {}');
     fs.writeFileSync(path.join(root, 'assets', 'avatars', 'reference', 'head.glb'), Buffer.from([0x67, 0x6c, 0x54, 0x46]));
     fs.writeFileSync(path.join(root, 'assets', 'with space.png'), Buffer.from([0x89, 0x50]));
     fs.writeFileSync(outside, 'TOP SECRET');
@@ -93,7 +107,7 @@ describe('app:// protocol handler', () => {
 
   const get = (url, init) => handler(new Request(url, init));
 
-  it('serves files with MIME types, CSP on HTML and nosniff', async () => {
+  it('serves files with MIME types, CSP on HTML and scripts, and nosniff', async () => {
     const html = await get('app://lawnmower/index.html');
     expect(html.status).toBe(200);
     expect(html.headers.get('content-type')).toBe('text/html; charset=utf-8');
@@ -101,10 +115,13 @@ describe('app:// protocol handler', () => {
     expect(await html.text()).toContain('<title>x</title>');
     const js = await get('app://lawnmower/assets/app.js');
     expect(js.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
-    expect(js.headers.get('content-security-policy')).toBeNull();
+    // a worker takes its CSP from its script's response (the face tracker must not reach the web)
+    expect(js.headers.get('content-security-policy')).toBe("default-src 'self'");
+    expect((await get('app://lawnmower/assets/worker.mjs')).headers.get('content-security-policy')).toBe("default-src 'self'");
     expect(js.headers.get('x-content-type-options')).toBe('nosniff');
     const glb = await get('app://lawnmower/assets/avatars/reference/head.glb');
     expect(glb.headers.get('content-type')).toBe('model/gltf-binary');
+    expect(glb.headers.get('content-security-policy')).toBeNull();
     expect(new Uint8Array(await glb.arrayBuffer())).toEqual(new Uint8Array([0x67, 0x6c, 0x54, 0x46]));
     const spaced = await get('app://lawnmower/assets/with%20space.png');
     expect(spaced.status).toBe(200);

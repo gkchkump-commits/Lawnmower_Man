@@ -4,6 +4,8 @@
 export const APP_SCHEME = 'app';
 export const APP_HOST = 'lawnmower';
 export const APP_ORIGIN = `${APP_SCHEME}://${APP_HOST}`;
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '[::1]'];
+const NETWORK_SCHEMES = ['http:', 'https:', 'ws:', 'wss:'];
 
 /**
  * Only a loopback Vite dev server is accepted as VITE_DEV_SERVER_URL.
@@ -14,7 +16,7 @@ export function validateDevServerUrl(raw) {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) return null;
+    if (!LOOPBACK_HOSTS.includes(u.hostname)) return null;
     return `${u.origin}/`;
   } catch {
     return null;
@@ -51,6 +53,28 @@ export function buildCsp(o = {}) {
     "frame-ancestors 'none'",
   ].join('; ');
 }
+
+/**
+ * May the app's session make this request? The renderer never needs the internet: the voice
+ * server and the dev server are loopback, links open in the browser (shell.openExternal) and the
+ * Claude CLI is a child process. So network requests (http/https/ws/wss) go to loopback hosts
+ * only, whatever context makes them; the CSP is the first line, this also covers a context
+ * without one. Other schemes (app:, blob:, data:, devtools:, …) are not network requests.
+ * @param {string} url
+ */
+export function isAllowedRequestUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!NETWORK_SCHEMES.includes(u.protocol)) return true;
+  return LOOPBACK_HOSTS.includes(u.hostname);
+}
+
+/** URL patterns for session.webRequest.onBeforeRequest: every network request. */
+export const NETWORK_URL_PATTERNS = Object.freeze(['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*']);
 
 /**
  * Is `url` one of our own pages (app://lawnmower/… or the dev server)?

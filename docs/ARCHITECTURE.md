@@ -28,7 +28,11 @@ Vite root is `src/`, `publicDir` is `public/` (served at `./`), build output `di
 `npm start` = `vite build` then Electron, which serves `dist/` through a privileged custom
 protocol `app://lawnmower/` (`protocol.handle`, standard+secure+supportFetchAPI) — **not**
 `file://`, because three.js loaders use `fetch()`, which Chromium does not allow on `file:`.
-Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice server.
+Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice server. `app://`
+sends the CSP with HTML and with scripts (a worker takes its policy from its script's response),
+and the session cancels every network request that does not go to a loopback host
+(`isAllowedRequestUrl`, `electron/security.js`): the window talks to no server on the internet
+(the Claude CLI is a child process with its own connection).
 
 ## 1. Processes
 
@@ -413,7 +417,8 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, an image
   block the fake CLI acknowledges, the camera (refused while camera.enabled is off; with it on, the
   privacy card and face tracking loading its wasm + model over app:// in a worker, on Chromium's
-  fake camera), voice status and a clean boot without console errors.
+  fake camera; the worker runs under the CSP and no request leaves the PC, also when the camera is
+  turned off), voice status and a clean boot without console errors.
 * Camera in the browser: `tests/e2e/camera.spec.js` runs with Chromium's fake camera playing a frame
   of `docs/reference/neutral.jpg` (MediaPipe detects that face); see [CAMERA.md](CAMERA.md).
 * Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>

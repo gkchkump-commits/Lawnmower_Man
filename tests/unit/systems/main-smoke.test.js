@@ -96,7 +96,10 @@ vi.mock('electron', () => {
     screen: { getPrimaryDisplay: () => m.display, getAllDisplays: () => [m.display], getDisplayMatching: () => m.display, getCursorScreenPoint: () => ({ ...m.cursor }), on: vi.fn() },
     session: {
       defaultSession: {
-        webRequest: { onHeadersReceived: vi.fn((h) => { m.sessionHandlers.headers = h; }) },
+        webRequest: {
+          onHeadersReceived: vi.fn((h) => { m.sessionHandlers.headers = h; }),
+          onBeforeRequest: vi.fn((filter, h) => { m.sessionHandlers.beforeRequest = { filter, h }; }),
+        },
         setPermissionRequestHandler: vi.fn((h) => { m.sessionHandlers.request = h; }),
         setPermissionCheckHandler: vi.fn((h) => { m.sessionHandlers.check = h; }),
         setDevicePermissionHandler: vi.fn(),
@@ -364,8 +367,28 @@ describe('electron/main.js wiring', () => {
 
   it('installs CSP headers, permission policy and navigation guards', () => {
     const cb = vi.fn();
-    m.sessionHandlers.headers({ resourceType: 'mainFrame', responseHeaders: { 'Content-Type': ['text/html'] } }, cb);
+    m.sessionHandlers.headers({ resourceType: 'mainFrame', url: 'http://127.0.0.1:5173/', responseHeaders: { 'Content-Type': ['text/html'] } }, cb);
     expect(cb.mock.calls[0][0].responseHeaders['Content-Security-Policy']).toEqual([main.__test.csp]);
+    // a worker script of our own origin gets the policy too; other origins' scripts are left alone
+    m.sessionHandlers.headers({ resourceType: 'script', url: 'app://lawnmower/assets/face-worker-x.js', responseHeaders: {} }, cb);
+    expect(cb.mock.calls[1][0].responseHeaders['Content-Security-Policy']).toEqual([main.__test.csp]);
+    m.sessionHandlers.headers({ resourceType: 'script', url: 'https://cdn.example/x.js', responseHeaders: { a: ['b'] } }, cb);
+    expect(cb.mock.calls[2][0].responseHeaders).toEqual({ a: ['b'] });
+
+    // no request leaves the PC: loopback passes, anything else is cancelled (and logged once)
+    const { filter, h: before } = m.sessionHandlers.beforeRequest;
+    expect(filter.urls).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*']));
+    const decide = (url) => {
+      const done = vi.fn();
+      before({ url, resourceType: 'xhr' }, done);
+      return done.mock.calls[0][0];
+    };
+    expect(decide('http://127.0.0.1:8765/v1/tts')).toEqual({ cancel: false });
+    expect(main.__test.state.blockedRequests).toEqual([]);
+    expect(decide('https://odml.pa.googleapis.com/v1/log')).toEqual({ cancel: true });
+    expect(decide('wss://evil.example/socket')).toEqual({ cancel: true });
+    expect(main.__test.state.blockedRequests).toEqual(['https://odml.pa.googleapis.com/v1/log', 'wss://evil.example/socket']);
+    main.__test.state.blockedRequests.length = 0;
     const grant = vi.fn();
     m.sessionHandlers.request(win.webContents, 'media', grant, { requestingUrl: 'app://lawnmower/index.html', mediaTypes: ['audio'] });
     m.sessionHandlers.request(win.webContents, 'geolocation', grant, { requestingUrl: 'app://lawnmower/index.html' });

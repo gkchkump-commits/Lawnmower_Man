@@ -134,6 +134,9 @@ describe('package.json build (electron-builder)', () => {
     expect(build.files.filter((f) => f.startsWith('!dist'))).toEqual(['!dist/dev/**', '!dist/assets/avatars/*/preview/**']);
     // the packaged smoke test looks for them inside app.asar
     expect(readText('scripts/electron-e2e.mjs')).toContain('app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.wasm');
+    // the notices name what the shipped wasm links in (a MediaPipe bump must keep them true)
+    const notices = readText('THIRD_PARTY_NOTICES.md');
+    for (const w of ['TensorFlow Lite', 'XNNPACK', 'Protocol Buffers', 'Eigen', 'OpenCV', '## BSD-3-Clause License', 'MPL-2.0']) expect(notices, w).toContain(w);
   });
 
   it('has the build scripts the docs and the workflow use', () => {

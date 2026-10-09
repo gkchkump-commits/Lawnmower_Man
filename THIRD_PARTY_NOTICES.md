@@ -13,6 +13,17 @@ Lawnmower Man bundles or downloads the following third-party works. Each is used
 | **MediaPipe Face Landmarker** model (`face_landmarker.task`), Google | `public/assets/vision/face_landmarker.task`: the camera's local face tracking ([docs/CAMERA.md](docs/CAMERA.md)); shipped in the app | [Apache-2.0](#apache-license-20) |
 | **MediaPipe Tasks Vision** (`@mediapipe/tasks-vision` 1.1.0), Google | npm dependency: its JavaScript is bundled into the renderer build and its WebAssembly runtime (`vision_wasm_module_internal.{js,wasm}`) is copied into `dist/assets/vision/wasm/` at build time; shipped in the app | [Apache-2.0](#apache-license-20) |
 
+### Statically linked into the MediaPipe WebAssembly runtime (`dist/assets/vision/wasm/`)
+
+The `vision_wasm_module_internal.wasm` that the app ships contains these libraries, unmodified, as built by Google for `@mediapipe/tasks-vision`:
+
+| Work | License |
+|---|---|
+| **TensorFlow Lite**, **Abseil**, **ruy**, **FlatBuffers**, **OpenCV** 4.x | [Apache-2.0](#apache-license-20) |
+| **XNNPACK** — Copyright (c) Facebook, Inc. and its affiliates. All rights reserved. Copyright 2019 Google LLC | [BSD-3-Clause](#bsd-3-clause-license) |
+| **Protocol Buffers** — Copyright 2008 Google Inc. All rights reserved. | [BSD-3-Clause](#bsd-3-clause-license) |
+| **Eigen** 3.4 | [MPL-2.0](https://mozilla.org/MPL/2.0/); unmodified source: <https://gitlab.com/libeigen/eigen> |
+
 The avatar pack in `public/assets/avatars/reference/` is derived from the project owner's own reference video. The frames in `docs/reference/` come from that video too.
 
 ## Downloaded at setup or build time (not committed)
@@ -31,7 +42,7 @@ The avatar pack in `public/assets/avatars/reference/` is derived from the projec
 
 ## Apache License 2.0
 
-The MediaPipe works above are distributed under the Apache License, Version 2.0 (copyright Google LLC and the MediaPipe authors); they are used unmodified. The full text of the license:
+The MediaPipe works above, and the Apache-2.0 libraries in its WebAssembly runtime (TensorFlow Lite, Abseil, ruy, FlatBuffers: Google LLC and their authors; OpenCV: the OpenCV authors), are distributed under the Apache License, Version 2.0; they are used unmodified. The full text of the license:
 
 ```text
                               Apache License
@@ -210,4 +221,34 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
    of your accepting any such warranty or additional liability.
 
 END OF TERMS AND CONDITIONS
+```
+
+## BSD-3-Clause License
+
+Applies to XNNPACK and Protocol Buffers (above), with their copyright notices as listed there:
+
+```text
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived from this
+    software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
 ```

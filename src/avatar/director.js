@@ -34,6 +34,9 @@ import { clamp, clamp01, expApproach, fbm1, lerp, mulberry32, noise1 } from './n
  * @property {number} mouthTeeth  0..1 upper lip raised, teeth show (s z, ee)
  * @property {number} mouthTongue 0..1 tongue tip at the teeth (th, l)
  * @property {number} mouthAsym   -1..1 left/right asymmetry of the lips (+ = screen-left corner higher)
+ * @property {number} cheekRaise  0..1 cheeks and nasolabial folds lift (spread vowels, smiles)
+ * @property {number} chinRaise   0..1 the chin (mentalis) bunches up under pressed lips
+ * @property {number} nostrilFlare 0..1 the nostrils widen (a breath in before speaking)
  */
 
 export const STATES = /** @type {const} */ (['idle', 'listening', 'thinking', 'speaking', 'error', 'sleep']);
@@ -42,7 +45,7 @@ export const STATES = /** @type {const} */ (['idle', 'listening', 'thinking', 's
 export const ANIM_KEYS = /** @type {const} */ ([
   'jawOpen', 'mouthWide', 'mouthRound', 'smile', 'blinkL', 'blinkR', 'gazeX', 'gazeY', 'browUp',
   'headYaw', 'headPitch', 'headRoll', 'breath', 'speech', 'energy', 'listen', 'think', 'speak', 'error', 'sleep',
-  'mouthPress', 'mouthTuck', 'mouthTeeth', 'mouthTongue', 'mouthAsym',
+  'mouthPress', 'mouthTuck', 'mouthTeeth', 'mouthTongue', 'mouthAsym', 'cheekRaise', 'chinRaise', 'nostrilFlare',
 ]);
 
 /** @returns {AnimState} the rest pose */
@@ -52,8 +55,12 @@ export function createAnimState() {
     browUp: 0, headYaw: 0, headPitch: 0, headRoll: 0, breath: 0, speech: 0, energy: 0.5,
     listen: 0, think: 0, speak: 0, error: 0, sleep: 0,
     mouthPress: 0, mouthTuck: 0, mouthTeeth: 0, mouthTongue: 0, mouthAsym: 0,
+    cheekRaise: 0, chinRaise: 0, nostrilFlare: 0,
   };
 }
+
+/** Expressiveness range (avatar.expressiveness): 0 = a still face, 1 = default, 2 = animated. */
+export const EXPRESSIVENESS_MAX = 2;
 
 /**
  * Lip-sync smoothing per mouth channel: [attack tau, release tau] (s). The lip-sync output is
@@ -72,12 +79,17 @@ const MOUTH_OUT = /** @type {const} */ ({
 });
 
 /**
- * Speech prosody cue (from the lip-sync, see src/audio/articulation.js):
+ * Speech prosody cue (from the lip-sync: src/audio/prosody.js for the local voice's audio,
+ * src/audio/articulation.js for a planned utterance):
  *   accent      a stressed syllable starts (a small nod; strength 0..1)
  *   emphasis    an emphasised word (brow raise + a firmer nod)
- *   phrase-start / phrase-end  (punct: , ; . ! ? — ; friendly 0..1 at a sentence end)
- * @typedef {{ type: 'accent'|'emphasis'|'phrase-start'|'phrase-end', strength?: number, punct?: string,
- *   friendly?: number }} ProsodyCue
+ *   phrase-start / phrase-end  (punct: , ; . ! ? — ; friendly 0..1 at a sentence end; from the
+ *               audio also fall / rise: the final pitch movement in semitones, and pause: the
+ *               silence that follows, s)
+ *   inhale      a breath before speaking on (nostrils, a slight lift, lips part); lead: the time
+ *               until the voice starts (s), the breath is in by then
+ * @typedef {{ type: 'accent'|'emphasis'|'phrase-start'|'phrase-end'|'inhale', strength?: number, punct?: string,
+ *   friendly?: number, fall?: number, rise?: number, pause?: number, lead?: number }} ProsodyCue
  */
 
 /** Impulse response that peaks (1) at x = tau and decays: a nod, a lift. */
@@ -128,12 +140,23 @@ const ENERGY = { idle: 0.5, listening: 0.78, thinking: 0.62, speaking: 0.55, err
 
 export class Director {
   /**
-   * @param {{ seed?: number, idleMotion?: number }} [opts]
-   *   idleMotion scales idle head sway / saccades (0 disables them, e.g. for visual diffs).
+   * @param {{ seed?: number, idleMotion?: number, expressiveness?: number }} [opts]
+   *   idleMotion scales idle head sway / saccades (0 disables them, e.g. for visual diffs);
+   *   expressiveness (0..2, default 1) scales the motion that comes with speech: nods, tilts,
+   *   brows, glances, smiles, and the face moving with the mouth.
    */
   constructor(opts = {}) {
     this.seed = (opts.seed ?? 1) | 0;
     this.idleMotion = opts.idleMotion ?? 1;
+    this.expressiveness = 1;
+    this.setExpressiveness(opts.expressiveness ?? 1);
+    // intonation of the voice (semitones re the speaker's usual pitch) and its smoothed value
+    this._into = { pitch: 0, voiced: false };
+    this._pitchS = 0;
+    // conversational gaze: a glance away from the listener as a phrase starts, back by its end
+    this._glance = { x: 0, y: 0, until: -Infinity };
+    // breathing while speaking: inhales at pauses, a slow exhale through the phrase
+    this._speechBreath = 0;
     this.rng = mulberry32(this.seed * 7919 + 17);
     /** @type {AvatarState} */
     this.current = 'idle';
@@ -144,7 +167,7 @@ export class Director {
     this._mouth = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, at: -Infinity };
     this._speechTarget = 0;
     // speech prosody (secondary motion): active impulses { at, kind, amp, ... }
-    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number }>} */
+    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number }>} */
     this._kicks = [];
     this._lastAccent = -Infinity;
     this._lastCue = -Infinity;
@@ -215,45 +238,90 @@ export class Director {
     if (Array.isArray(cue)) { for (const c of cue) this.setProsody(c); return; }
     const t = this._time;
     const s = clamp01(Number(cue.strength ?? 1));
+    // no two nods alike: each impulse varies a little in size
+    const vary = () => 0.8 + 0.4 * this.rng2();
     this._lastCue = t;
     switch (cue.type) {
       case 'accent':
         if (t - this._lastAccent < 0.2) return;           // one nod per syllable at most
         this._lastAccent = t;
-        this._kick({ at: t, kind: 'nod', amp: 0.5 + 0.5 * s });
+        this._kick({ at: t, kind: 'nod', amp: (0.5 + 0.5 * s) * vary() });
         break;
       case 'emphasis':
         this._kick({ at: t, kind: 'brow', amp: 0.6 * s });
-        this._kick({ at: t, kind: 'nod', amp: 0.8 * s });
+        this._kick({ at: t, kind: 'nod', amp: 0.8 * s * vary() });
         break;
       case 'phrase-start':
-        this._kick({ at: t, kind: 'lift', amp: s });
+        this._kick({ at: t, kind: 'lift', amp: s * vary() });
         // each phrase is said from a slightly different head angle
         this._phraseYaw = (this.rng2() * 2 - 1) * 0.022 * s;
+        // a speaker often looks away as a phrase starts (planning it) and back to the listener
+        // as it ends; the glance is an offset on top of lookAt (cursor / camera eye contact)
+        if (s >= 0.7 && this.rng2() < 0.5) {
+          const side = this.rng2() < 0.5 ? -1 : 1;
+          this._glance = {
+            x: side * (0.16 + 0.14 * this.rng2()), y: (this.rng2() < 0.6 ? -1 : 1) * (0.04 + 0.08 * this.rng2()),
+            until: t + 0.35 + 0.55 * this.rng2(),
+          };
+        }
+        this._lastPhraseStart = t;
         break;
       case 'phrase-end': {
         const p = cue.punct || '.';
-        if (p === '?') {
-          this._kick({ at: t, kind: 'brow', amp: 0.9 });
-          this._kick({ at: t, kind: 'tilt', amp: 1, dir: this.rng2() < 0.5 ? -1 : 1 });
+        const rise = Number(cue.rise) || 0, fall = Number(cue.fall) || 0;
+        if (p === '?' || rise >= 3) {
+          // a question (or a rising, asking end): brows up, the head tilts
+          const q = p === '?' ? Math.max(0.7, clamp01(rise / 4)) : 0.5 * clamp01(rise / 5);
+          this._kick({ at: t, kind: 'brow', amp: 0.9 * q });
+          this._kick({ at: t, kind: 'tilt', amp: q, dir: this.rng2() < 0.5 ? -1 : 1 });
         } else if (p === '!') {
           this._kick({ at: t, kind: 'brow', amp: 0.45 });
           this._kick({ at: t, kind: 'nod', amp: 0.8 });
         }
+        // final lowering: a falling end settles the head a little, held through the pause
+        if (fall > 1 && p !== '?') this._kick({ at: t - 0.1, kind: 'lower', amp: clamp01((fall - 1) / 4) * (/[.!]/.test(p) ? 1 : 0.6) });
         if (Number(cue.friendly) > 0) this._kick({ at: t + 0.05, kind: 'smile', amp: clamp01(Number(cue.friendly)) });
-        // blink at the phrase boundary: a deferred blink now, otherwise often
+        // eye contact again at the end of the phrase
+        if (this._glance.until > t) this._glance.until = t;
+        // blink at the phrase boundary: a deferred blink now, otherwise often (more at real pauses)
         const sinceBlink = t - this._blinkStart;
-        if (this._blinkDeferred || (sinceBlink > 1.0 && this.rng2() < (/[.!?]/.test(p) ? 0.75 : 0.4))) {
+        const pause = Number.isFinite(cue.pause) ? cue.pause : 1;
+        const pr = /[.!?]/.test(p) ? 0.75 : 0.4;
+        if (this._blinkDeferred || (sinceBlink > 1.0 && this.rng2() < (pause >= 0.25 ? Math.max(pr, 0.6) : pr))) {
           this._blinkRequested = true;
           this._blinkDeferred = false;
         }
         break;
       }
+      case 'inhale':
+        // one breath per pause
+        if (this._kicks.some((q) => q.kind === 'inhale' && t - q.at < 0.6)) return;
+        // the breath is in by the time the voice starts (a quick one before a clip's first words)
+        this._kick({ at: t, kind: 'inhale', amp: s, dur: clamp(Number(cue.lead ?? 0.2) - 0.02, 0.06, 0.2) });
+        break;
       default:
     }
   }
 
-  /** @param {{ at: number, kind: string, amp: number, dir?: number }} k */
+  /**
+   * Intonation of the voice being spoken (the lip-sync's analysis of the local voice): pitch in
+   * semitones above (+) / below the speaker's usual pitch. Higher pitch lifts the head a little and,
+   * well above the usual, the brows; it is 0 between phrases.
+   * @param {{ pitch?: number, voiced?: boolean }|null} v
+   */
+  setIntonation(v) {
+    const p = Number(v?.pitch);
+    this._into.pitch = Number.isFinite(p) ? clamp(p, -12, 12) : 0;
+    this._into.voiced = !!v?.voiced;
+  }
+
+  /** @param {number} k 0..2: how much the speech moves the head, brows and face (1 = default) */
+  setExpressiveness(k) {
+    const n = Number(k);
+    this.expressiveness = Number.isFinite(n) ? clamp(n, 0, EXPRESSIVENESS_MAX) : 1;
+  }
+
+  /** @param {{ at: number, kind: string, amp: number, dir?: number, dur?: number }} k */
   _kick(k) {
     this._kicks.push(k);
     if (this._kicks.length > 24) this._kicks.shift();
@@ -347,8 +415,9 @@ export class Director {
     const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
     o.mouthAsym = settle ? 0 : clamp((this._asymBias + 0.6 * fbm1(time * 0.31, this.seed + 61)) * 0.4 * talk, -1, 1);
 
-    // ---- speech prosody: nods, phrase lifts, question tilts, brows, micro-smiles ----------------
-    let nod = 0, lift = 0, tilt = 0, browK = 0, smileK = 0;
+    // ---- speech prosody: nods, phrase lifts, question tilts, brows, micro-smiles, breaths --------
+    const ex = this.expressiveness;
+    let nod = 0, lift = 0, tilt = 0, browK = 0, smileK = 0, lower = 0, inhale = 0;
     if (!settle && this._kicks.length) {
       this._kicks = this._kicks.filter((q) => time - q.at < 3);
       for (const q of this._kicks) {
@@ -358,16 +427,50 @@ export class Director {
         else if (q.kind === 'tilt') tilt += q.amp * (q.dir || 1) * envelope(x, 0.25, 0.45, 0.6);
         else if (q.kind === 'brow') browK = Math.max(browK, q.amp * envelope(x, 0.12, 0.3, 0.45));
         else if (q.kind === 'smile') smileK = Math.max(smileK, q.amp * envelope(x, 0.3, 0.7, 1.2));
+        else if (q.kind === 'lower') lower = Math.max(lower, q.amp * envelope(x, 0.28, 0.45, 0.7));
+        else if (q.kind === 'inhale') inhale = Math.max(inhale, q.amp * envelope(x, q.dur ?? 0.16, 0.04, 0.34));
       }
     }
     this._phraseYawS += (this._phraseYaw * w.speaking - this._phraseYawS) * k(0.5);
+    // intonation: the head and brows follow the voice's pitch a little (smoothed: no jitter)
+    const intoT = settle ? 0 : this._into.pitch * w.speaking;
+    this._pitchS += (intoT - this._pitchS) * k(this._into.voiced ? 0.12 : 0.3);
+    const pitchSt = this._pitchS;
+    // a breath in lifts the chest; speaking breathes out slowly
+    if (!settle) {
+      const inhaling = inhale > 0.05;
+      this._speechBreath += ((inhaling ? 1 : 0) - this._speechBreath) * k(inhaling ? 0.18 : 2.5);
+    }
+
+    // the lips part a little for a breath in, unless they are closing for a sound
+    if (inhale > 0 && !settle) {
+      const free = 1 - clamp01(Math.max(o.mouthPress, o.mouthTuck) * 2);
+      o.jawOpen = Math.max(o.jawOpen, 0.07 * inhale * free);
+    }
 
     // ---- expression ----------------------------------------------------------------------------
-    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error + 0.22 * smileK);
+    const browPitch = 0.045 * clamp(pitchSt - 2.5, 0, 6);    // well above the usual pitch: brows lift
+    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error + 0.22 * smileK * ex);
     const browT = clamp01(this._expr.browUp + 0.18 * w.listening + 0.1 * w.thinking + 0.25 * w.error
-      - 0.2 * w.sleep + 0.4 * browK);
+      - 0.2 * w.sleep + (0.4 * browK + browPitch + 0.08 * inhale - 0.06 * lower) * ex);
     o.smile += (smileT * (1 - w.sleep) - o.smile) * k(0.25);
     o.browUp += (browT - o.browUp) * k(0.2);
+
+    // ---- the face moving with the mouth ----------------------------------------------------------
+    // (anatomical coupling, so it stays partly on at expressiveness 0)
+    const faceK = 0.4 + 0.6 * Math.min(ex, 1.5);
+    // spread vowels and smiles lift the cheeks (a wide-open jaw pulls them down instead)
+    const cheekT = clamp01((0.55 * o.mouthWide * (1 - 0.6 * o.jawOpen) + 0.3 * o.mouthTeeth) * faceK * w.speaking + 0.9 * o.smile);
+    // pressed lips bunch the chin up (mentalis); tucks and puckers a little
+    const chinT = clamp01((0.85 * o.mouthPress + 0.3 * o.mouthTuck + 0.15 * o.mouthRound) * faceK);
+    const nostrilT = clamp01(inhale * faceK);
+    if (settle) {
+      o.cheekRaise = cheekT; o.chinRaise = chinT; o.nostrilFlare = nostrilT;
+    } else {
+      o.cheekRaise = lipSmooth(o.cheekRaise, cheekT, dt, 0.06, 0.12);
+      o.chinRaise = lipSmooth(o.chinRaise, chinT, dt, 0.025, 0.09);
+      o.nostrilFlare = lipSmooth(o.nostrilFlare, nostrilT, dt, 0.04, 0.2);
+    }
 
     // ---- blinks ----------------------------------------------------------------------------------
     let blink = 0;
@@ -375,7 +478,8 @@ export class Director {
       const busy = time - this._blinkStart < BLINK_TOTAL;
       // While talking, a scheduled blink waits for the next phrase boundary (people blink
       // between phrases, rarely mid-word), at most ~2 s.
-      const midPhrase = w.speaking > 0.5 && time - this._lastCue < 0.6;
+      // (mid-phrase: a cue came moments ago, or the voice is sounding right now)
+      const midPhrase = w.speaking > 0.5 && (time - this._lastCue < 0.6 || this._into.voiced || o.speech > 0.25);
       const due = time >= this._nextBlink && !(midPhrase && time - this._nextBlink < 2);
       if (!busy && time >= this._nextBlink && !due) this._blinkDeferred = true;
       if (!busy && (this._blinkRequested || due || time >= this._pendingDouble)) {
@@ -401,8 +505,10 @@ export class Director {
     if (!settle) {
       if (time >= this._saccadeAt) {
         const r1 = this.rng(), r2 = this.rng();
-        this._saccade.x = (r1 * 2 - 1) * 0.28 * im;
-        this._saccade.y = (r2 * 2 - 1) * 0.16 * im;
+        // while speaking the eyes stay mostly on the listener (the glances below replace them)
+        const roam = im * (1 - 0.6 * w.speaking);
+        this._saccade.x = (r1 * 2 - 1) * 0.28 * roam;
+        this._saccade.y = (r2 * 2 - 1) * 0.16 * roam;
         if (this.rng() < 0.35) { this._saccade.x *= 0.2; this._saccade.y *= 0.2; } // back to centre
         this._saccadeAt = time + 0.6 + this.rng() * 2.2;
       }
@@ -433,6 +539,13 @@ export class Director {
     gyT = lerp(gyT, -0.2, w.sleep);
     gxT += this._micro.x * (1 - w.sleep);
     gyT += this._micro.y * (1 - w.sleep);
+    // conversational glance: an offset on top of the target (it composes with lookAt, the
+    // cursor / camera eye contact, instead of replacing it) that ends by the phrase's end
+    if (!settle && time < this._glance.until) {
+      const gk = Math.min(1, ex) * w.speaking;
+      gxT += this._glance.x * gk;
+      gyT += this._glance.y * gk;
+    }
     // saccades are fast (~40 ms)
     this._gx += (gxT - this._gx) * k(0.04);
     this._gy += (gyT - this._gy) * k(0.04);
@@ -443,7 +556,8 @@ export class Director {
     const period = lerp(4.2, 6.5, w.sleep);
     if (settle) this._breathPhase = (time / 4.2) * Math.PI * 2;
     else this._breathPhase += (dt / period) * Math.PI * 2;
-    o.breath = 0.5 - 0.5 * Math.cos(this._breathPhase);
+    // while speaking, breaths come at the pauses (the inhale cues), not on a clock
+    o.breath = lerp(0.5 - 0.5 * Math.cos(this._breathPhase), 0.25 + 0.6 * this._speechBreath, settle ? 0 : w.speaking);
 
     // ---- head --------------------------------------------------------------------------------------
     const s = this.seed;
@@ -454,7 +568,7 @@ export class Director {
     pitchT += -0.035 * w.listening + 0.045 * w.thinking - 0.09 * w.sleep;
     rollT += 0.03 * w.listening + 0.035 * this._thinkSide * w.thinking + 0.04 * w.sleep;
     if (!settle) {
-      const sp = o.speech * w.speaking;
+      const sp = o.speech * w.speaking * ex;
       pitchT += sp * 0.03 * noise1(time * 3.1, s + 41);
       yawT += sp * 0.02 * noise1(time * 2.3, s + 43);
       const since = time - this._errorKick;
@@ -464,10 +578,13 @@ export class Director {
     this._yaw += (clamp(yawT, -0.35, 0.35) - this._yaw) * k(headTau);
     this._pitch += (clamp(pitchT, -0.25, 0.25) - this._pitch) * k(headTau);
     this._roll += (clamp(rollT, -0.2, 0.2) - this._roll) * k(headTau);
-    // prosody rides on top (already smooth impulses; the head smoothing would swallow a nod)
-    o.headYaw = this._yaw + this._phraseYawS;
-    o.headPitch = this._pitch - 0.02 * nod + 0.012 * lift + 0.012 * Math.abs(tilt);
-    o.headRoll = this._roll + 0.03 * tilt;
+    // prosody rides on top (already smooth impulses; the head smoothing would swallow a nod):
+    // nods on stressed syllables, a lift at phrase starts and breaths, the head following the
+    // pitch a little, and settling at a phrase-final fall
+    o.headYaw = this._yaw + this._phraseYawS * ex;
+    o.headPitch = this._pitch + ex * (-0.024 * nod + 0.012 * lift + 0.012 * Math.abs(tilt)
+      + 0.0036 * clamp(pitchSt, -6, 8) - 0.016 * lower + 0.008 * inhale);
+    o.headRoll = this._roll + 0.03 * tilt * ex;
 
     // ---- energy --------------------------------------------------------------------------------------
     const thinkPulse = 0.12 * (0.5 + 0.5 * Math.sin(time * 2.4));

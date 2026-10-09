@@ -5,15 +5,17 @@
 //   /dev/avatar.html?renderer=placeholder&state=thinking
 //   /dev/avatar.html?fixedTime=1&vis=PP                       one viseme's mouth shape
 //   /dev/avatar.html?say=Hello!%20I'm%20Claude.&t=0.8         the system-voice lip-sync at 0.8 s
-// Exposes window.__avatar and sets window.__ready = true after the first frame. In say mode
-// window.__seek(t) advances the simulation to t seconds and renders (film strips, videos).
+//   /dev/avatar.html?clip=a.json,b.json&t=1.2                 real voice-server clips (local voice)
+// Exposes window.__avatar and sets window.__ready = true after the first frame. In say / clip
+// mode window.__seek(t) advances the simulation to t seconds and renders (film strips, videos).
 /* global URLSearchParams, location, history */
 
 import { createAvatar } from '../avatar/index.js';
 import { STATES } from '../avatar/director.js';
 import { Emitter } from '../app/emitter.js';
-import { LipSync, VISEME_SHAPES, planSpeech } from '../audio/lipsync.js';
+import { LipSync, VISEME_SHAPES, normalizeVisemes, planSpeech } from '../audio/lipsync.js';
 import { LEAD_IN } from '../audio/articulation.js';
+import { base64ToBytes, decodeWav } from '../audio/wav.js';
 
 const q = new URLSearchParams(location.search);
 const num = (k, d) => (q.has(k) && q.get(k) !== '' && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
@@ -52,6 +54,9 @@ const SLIDERS = [
   ['teeth', ['mouthTeeth'], 0, 1, 0.01],
   ['tongue', ['mouthTongue'], 0, 1, 0.01],
   ['asym', ['mouthAsym'], -1, 1, 0.01],
+  ['cheek', ['cheekRaise'], 0, 1, 0.01],
+  ['chin', ['chinRaise'], 0, 1, 0.01],
+  ['nostril', ['nostrilFlare'], 0, 1, 0.01],
   ['smile', ['smile'], 0, 1, 0.01],
   ['browUp', ['browUp'], 0, 1, 0.01],
   ['blink', ['blinkL', 'blinkR'], 0, 1, 0.01],
@@ -73,6 +78,9 @@ if (q.has('vis') && VISEME_SHAPES[q.get('vis')]) {
 }
 for (const [p] of SLIDERS) if (q.has(p)) active.set(p, num(p, 0));
 const sayText = q.get('say');
+// clip=<url>[,<url>...]: real voice-server clips (/tts JSON: text, visemes, audioB64 or wav=<url>)
+const clipUrls = (q.get('clip') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const scripted = !!sayText || clipUrls.length > 0;
 
 const options = {
   renderer: q.get('renderer') || 'relief',
@@ -82,12 +90,13 @@ const options = {
   particles: num('particles', 1),
   bloom: num('bloom', 1),
   seed: num('seed', 1),
-  fixedTime: q.has('fixedTime') && !sayText ? num('fixedTime', 0) : undefined,
+  fixedTime: q.has('fixedTime') && !scripted ? num('fixedTime', 0) : undefined,
   transparent,
   idleMotion: num('idle', 1),
+  expressiveness: num('expr', 1),
   zoom: num('zoom', 1),
-  // say mode drives a scripted clock through avatar.advance(): no render loop of its own
-  autoStart: !sayText,
+  // say / clip modes drive a scripted clock through avatar.advance(): no render loop of their own
+  autoStart: !scripted,
 };
 
 function overridesFromActive() {
@@ -249,10 +258,11 @@ if (flag('stats', false)) {
   }, 500);
 }
 
-if (sayText) {
-  const sim = speechSimulation(sayText);
+if (sayText || clipUrls.length) {
+  const sim = sayText ? speechSimulation(sayText) : await clipSimulation(clipUrls);
   window.__seek = (t) => sim.seek(Number(t) || 0);
   window.__plan = sim.plan;
+  window.__schedule = sim.schedule;
   sim.seek(num('t', 0));
   // textures decode asynchronously: render the same instant again once they are surely there
   await new Promise((r) => setTimeout(r, 300));
@@ -334,6 +344,96 @@ function speechSimulation(text) {
       const said = k >= 0 && now < speechEnd ? words[k].text : '';
       if (caption) caption.textContent = `${now.toFixed(2)} s  ${said}`;
       return { t: now, word: said, p: lipsync.track?.p ?? null, leadIn: LEAD_IN };
+    },
+  };
+}
+
+/**
+ * The local-voice lip-sync path on REAL voice-server clips, deterministic: the clips (the /tts
+ * response JSON — text, visemes and audioB64, or `wav` = a URL of the WAV file) play back to back
+ * through a fake AudioPlayer (the playback clock, the decoded buffer, an analyser level over the
+ * real samples) into the real LipSync, whose output drives the avatar through the app's calls on
+ * a 60 Hz clock. The avatar thinks until the first clip starts and speaks until the last one has
+ * ended (as the controller does). URL: clip=<url>[,<url>...]&t=<s>, gap (s between clips, 0.06),
+ * latency (analyser lead, s, 0.02), pre (s of thinking before the first clip, 0.8), caption=1.
+ * @param {string[]} urls
+ */
+async function clipSimulation(urls) {
+  const gap = num('gap', 0.06);
+  const latency = num('latency', 0.02);
+  const pre = num('pre', 0.8);
+  /** @type {Array<{ clip: any, buffer: any, samples: Float32Array, sampleRate: number, start: number, end: number }>} */
+  const items = [];
+  let t0 = 0;
+  for (const url of urls) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`clip ${url}: HTTP ${res.status}`);
+    const j = await res.json();
+    let bytes;
+    if (j.audioB64) bytes = base64ToBytes(j.audioB64);
+    else if (j.wav) bytes = new Uint8Array(await (await fetch(new URL(j.wav, new URL(url, location.href)))).arrayBuffer());
+    else throw new Error(`clip ${url} has no audio`);
+    const wav = decodeWav(bytes);
+    const clip = { kind: 'audio', audioB64: j.audioB64 || '', visemes: normalizeVisemes(j.visemes), text: j.text || '' };
+    // what the app's AudioPlayer hands the lip-sync: the decoded (dry) buffer of the clip
+    const buffer = { sampleRate: wav.sampleRate, length: wav.samples.length, duration: wav.durationSec, getChannelData: () => wav.samples };
+    items.push({ clip, buffer, samples: wav.samples, sampleRate: wav.sampleRate, start: t0, end: t0 + wav.durationSec });
+    t0 += wav.durationSec + gap;
+  }
+  const player = Object.assign(new Emitter(), { current: null, sampleRate: 48000, analyser: null, spectrum: () => false });
+  let cur = -1;
+  player.level = () => {
+    const it = items[cur];
+    if (!player.current || !it) return 0;
+    // an AnalyserNode (2048 samples at 48 kHz) holds the newest audio, `latency` ahead of the ear
+    const win = Math.round(0.0427 * it.sampleRate);
+    const end = Math.round((player.current.time + latency) * it.sampleRate);
+    let acc = 0;
+    for (let i = end - win; i < end; i++) if (i >= 0 && i < it.samples.length) acc += it.samples[i] * it.samples[i];
+    return Math.sqrt(acc / win);
+  };
+  let now = -pre;
+  const lipsync = new LipSync({ player, now: () => now });
+  avatar.setState('thinking');
+  const caption = flag('caption', false) ? document.getElementById('caption') : null;
+  if (caption) caption.hidden = false;
+  const last = items[items.length - 1];
+  const dt = 1 / 60;
+  const step = () => {
+    now += dt;
+    const k = items.findIndex((it) => now >= it.start && now < it.end);
+    if (k !== cur) {
+      if (cur >= 0) {
+        const c = items[cur].clip;
+        player.current = null;
+        player.emit('end', c, { stopped: false });
+      }
+      cur = k;
+      if (k >= 0) {
+        if (k === 0) avatar.setState('speaking');
+        player.current = { clip: items[k].clip, kind: 'audio', time: 0, buffer: items[k].buffer };
+        player.emit('start', items[k].clip);
+      }
+    }
+    if (player.current) player.current.time = now - items[cur].start;
+    if (last && cur < 0 && now >= last.end + 0.3 && avatar.state === 'speaking') avatar.setState('idle');
+    const m = lipsync.update(dt, now);
+    avatar.setMouth(m);
+    avatar.setSpeechLevel(m.level);
+    if (m.cues) avatar.setProsody(m.cues);
+    avatar.setIntonation(m.intonation);
+    avatar.advance(dt, { render: false });
+  };
+  return {
+    plan: null,
+    schedule: items.map((it) => ({ start: it.start, end: it.end, text: it.clip.text })),
+    /** @param {number} tt seconds after the first clip's start */
+    seek(tt) {
+      while (now + dt <= tt + 1e-9) step();
+      avatar.advance(0);
+      const it = items.find((x) => now >= x.start && now < x.end);
+      if (caption) caption.textContent = `${now.toFixed(2)} s  ${it ? it.clip.text : ''}`;
+      return { t: now, clip: it ? items.indexOf(it) : -1 };
     },
   };
 }

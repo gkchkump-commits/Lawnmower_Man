@@ -106,8 +106,13 @@ describe('AvatarHost', () => {
     await host.apply({ ...AV, quality: 'low', bloom: 0.5 });
     expect(created).toHaveLength(1);
     expect(created[0].options.at(-1)).toEqual({ quality: 'low', particles: 1, bloom: 0.5 });
-    await host.apply({ ...AV, renderer: 'procedural' });
+    // avatar.expressiveness reaches the avatar at creation and when it changes
+    await host.apply({ ...AV, quality: 'low', bloom: 0.5, expressiveness: 1.6 });
+    expect(created).toHaveLength(1);
+    expect(created[0].options.at(-1)).toMatchObject({ expressiveness: 1.6 });
+    await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5 });
     expect(created).toHaveLength(2);
+    expect(created[1].opts.expressiveness).toBe(0.5);
     expect(created[0].disposed).toBe(true);
     expect(host.avatar.renderer).toBe('procedural');
   });

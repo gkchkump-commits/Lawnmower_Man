@@ -48,7 +48,8 @@ describe('relief rig: speech channels', () => {
 
   it('tuck lifts the upper lip a little and brings the lower lip up to the teeth', () => {
     const u = rigUniforms(rig, pose({ jawOpen: 0.07, mouthTuck: 1 }), {});
-    expect(u.upperLift).toBeCloseTo(RIG_LIMITS.tuckLiftFh * fh, 9);
+    // (plus the little the upper lip rises with the jaw)
+    expect(u.upperLift).toBeCloseTo((RIG_LIMITS.tuckLiftFh + 0.07 * RIG_LIMITS.jawUpperLipFh) * fh, 9);
     expect(u.lowerDrop).toBeLessThan(-u.jawDrop);    // the lower lip rises above its rest place
     expect(opening(u)).toBeGreaterThan(0);           // a small opening: the incisor edge shows
     expect(opening(u)).toBeLessThan(0.012 * fh);
@@ -156,5 +157,20 @@ describe('shaders declare every uniform they use', () => {
   for (const [name, src] of Object.entries({ ...reliefShaders, ...procShaders })) {
     if (typeof src !== 'string' || !/void main/.test(src)) continue;
     it(name, () => expect(undeclared(src)).toEqual([]));
+  }
+});
+
+describe('heads give every uniform their shaders declare a value', () => {
+  // a declared uniform without a value in the material compiles but reads 0 (or warns): a new
+  // face channel whose uniform is never set would silently do nothing
+  const headSource = (name) => readFileSync(fileURLToPath(new URL(`../../../src/avatar/heads/${name}/index.js`, import.meta.url)), 'utf8');
+  const given = (src) => new Set([...src.matchAll(/\b(u[A-Z]\w*)\s*:/g)].map((m) => m[1]));
+  const declared = (src) => [...src.matchAll(/uniform\s+\w+\s+(u[A-Z]\w*)/g)].map((m) => m[1]);
+  for (const [head, shaders] of [['relief', reliefShaders], ['procedural', procShaders]]) {
+    const have = given(headSource(head));
+    for (const [name, src] of Object.entries(shaders)) {
+      if (typeof src !== 'string' || !/void main/.test(src)) continue;
+      it(`${head} ${name}`, () => expect(declared(src).filter((u) => !have.has(u))).toEqual([]));
+    }
   }
 });

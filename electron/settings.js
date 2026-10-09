@@ -42,6 +42,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     particles: 1.0, // 0..2
     bloom: 1.0, // 0..2
     followCursor: true,
+    expressiveness: 1.0, // 0..2: how much speech moves the head, brows and face (1 = natural)
   },
   window: {
     sizePreset: 'medium', // 'small' | 'medium' | 'large'
@@ -262,6 +263,7 @@ const SCHEMA = {
     particles: num(0, 2),
     bloom: num(0, 2),
     followCursor: bool(),
+    expressiveness: num(0, 2),
   },
   window: {
     sizePreset: oneOf(['small', 'medium', 'large']),

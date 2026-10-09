@@ -229,26 +229,57 @@ export function closureCentreIn(segs, t0, t1) {
   return NaN;
 }
 
+/** Duration-based vowel prominence (jaw scale) of a timeline segment: long vowels are stressed. */
+export function durationJawScale(s, medianDur) {
+  return clamp(0.72 + 0.3 * ((s.end - s.start) / (medianDur || 0.1)), 0.7, 1.08);
+}
+
 /**
  * Segments from a voice-server viseme timeline ({start, end, viseme}, seconds). Vowel
- * prominence (and so the jaw) is estimated from duration: long vowels are the stressed ones.
- * Rest segments are added before and after, so the mouth closes at the edges.
+ * prominence (and so the jaw) is estimated from duration — long vowels are the stressed ones —
+ * unless `o.jawScale` measures it (e.g. from the audio). `o.vary` (a seed) gives every sound a
+ * small deterministic variation of its jaw, spread and rounding, as no speaker says the same
+ * syllable twice exactly alike. Rest segments are added before and after, so the mouth closes
+ * at the edges.
  * @param {Array<{start:number,end:number,viseme:string}>} tl
+ * @param {{ jawScale?: (s: {start:number,end:number,viseme:string}, medianDur: number) => number, vary?: number }} [o]
  * @returns {Segment[]}
  */
-export function segmentsFromVisemes(tl) {
+export function segmentsFromVisemes(tl, o = {}) {
   if (!Array.isArray(tl) || !tl.length) return [];
   const vowelDurs = tl.filter((s) => ['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)).map((s) => s.end - s.start).sort((a, b) => a - b);
   const median = vowelDurs.length ? vowelDurs[vowelDurs.length >> 1] : 0.1;
+  const jawScale = o.jawScale || durationJawScale;
   const out = [visemeSegment(tl[0].start - 0.3, tl[0].start, 'sil')];
-  for (const s of tl) {
+  tl.forEach((s, i) => {
     let js = 1;
-    if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = clamp(0.72 + 0.3 * ((s.end - s.start) / (median || 0.1)), 0.7, 1.08);
-    out.push(visemeSegment(s.start, s.end, s.viseme, js));
-  }
+    if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = jawScale(s, median);
+    const seg = visemeSegment(s.start, s.end, s.viseme, js);
+    if (Number.isFinite(o.vary) && s.viseme !== 'sil') varySegment(seg, o.vary * 7919 + i);
+    out.push(seg);
+  });
   const last = tl[tl.length - 1];
   out.push(visemeSegment(last.end, last.end + 0.3, 'sil'));
   return out;
+}
+
+/** Hash → [-1, 1). @param {number} n */
+function signedHash(n) {
+  const h = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
+  return 2 * (h - Math.floor(h)) - 1;
+}
+
+/**
+ * Natural variation of one sound: jaw +-8 %, spread +-0.06, rounding +-7 % (closures and tucks
+ * keep their full press / tuck: they must still close). Mutates seg.T.
+ * @param {Segment} seg @param {number} seed
+ */
+export function varySegment(seg, seed) {
+  const T = seg.T;
+  T[0] = clamp(T[0] * (1 + 0.08 * signedHash(seed)), 0, 1);
+  T[1] = clamp(T[1] + 0.06 * signedHash(seed + 1.7) * (T[1] > 0.05 ? 1 : 0.4), 0, 1);
+  T[2] = clamp(T[2] * (1 + 0.07 * signedHash(seed + 3.1)), 0, 1);
+  return seg;
 }
 
 // ---------------------------------------------------------------------------------------------

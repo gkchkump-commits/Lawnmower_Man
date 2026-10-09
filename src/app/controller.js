@@ -585,10 +585,12 @@ export class Controller extends Emitter {
       if (this.player.current) this._mouthActive = true;
       else if (m.jaw < 0.01 && m.press < 0.01 && m.level < 0.01) this._mouthActive = false;
       if (this.avatar) {
-        // every mouth channel (jaw wide round press tuck teeth tongue) + prosody cues
+        // every mouth channel (jaw wide round press tuck teeth tongue) + prosody cues + the
+        // voice's intonation (the local voice's pitch: the head and brows follow it a little)
         this.avatar.setMouth?.(this._mouthActive ? m : { jaw: 0, wide: 0, round: 0 });
         this.avatar.setSpeechLevel?.(this._mouthActive ? m.level : 0);
         if (m.cues) this.avatar.setProsody?.(m.cues);
+        this.avatar.setIntonation?.(this._mouthActive ? m.intonation : null);
       }
     }
     if (this.mic && (this.listen || this.handsFree)) this.view.setMicLevel?.(this.mic.paused ? 0 : this.mic.level || 0);

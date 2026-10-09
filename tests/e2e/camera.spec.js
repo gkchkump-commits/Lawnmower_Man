@@ -122,7 +122,7 @@ test.describe('camera (fake camera, mock bridge)', () => {
     // eye contact: the gaze goes to the face (or one of its short glances away)
     await page.waitForFunction(() => ['face', 'glance'].includes(window.__app.gaze.source));
     // it sees you for the first time: a quick spoken hello (no Claude turn)
-    await expect(page.locator('#transcript .msg').last()).toContainText(/Good (morning|afternoon|evening)|Up late|night owl|midnight oil/);
+    await expect(page.locator('#transcript .msg').last()).toContainText(/good (morning|afternoon|evening)|up late|night owl|midnight oil/i);
     expect(await page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'claude.send').length)).toBe(0);
     expect(await page.evaluate(() => localStorage.getItem('lawnmower.camera.consent.v1'))).toBe('yes');
     await page.waitForTimeout(400);

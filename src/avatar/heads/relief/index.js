@@ -3,7 +3,7 @@
 // the mouth cavity (dark interior + upper teeth on the upper jaw, lower teeth on the jaw).
 
 import { packWeights, validateMesh, validatePack, withSlash } from '../../pack.js';
-import { buildRig, rigUniforms } from './rig.js';
+import { RIG_LIMITS, buildRig, rigUniforms } from './rig.js';
 import { CAVITY_FRAG, CAVITY_VERT, FACE_FRAG, FACE_VERT } from './shaders.js';
 
 /** @typedef {import('../../types.js').HeadContext} HeadContext */
@@ -57,7 +57,7 @@ export default class ReliefHead {
       t.anisotropy = mip ? Math.min(8, maxAniso) : 1;
       t.needsUpdate = true;
     }
-    this.rig = buildRig(pack);
+    this.rig = buildRig(pack, mesh);
     this._buildFace(mesh);
     this._buildCavity(mesh);
     this.group = new THREE.Group();
@@ -69,6 +69,7 @@ export default class ReliefHead {
   _commonUniforms() {
     const { THREE } = this.ctx;
     const r = this.rig;
+    const f = r.face;
     return {
       uHeadRot: { value: new THREE.Matrix3() },
       uHeadPivot: { value: new THREE.Vector3(...r.headPivot) },
@@ -78,6 +79,14 @@ export default class ReliefHead {
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
       uMouth: { value: new THREE.Vector3(r.mouthCenter[0], r.mouthCenter[1], r.mouthHalfW) },
+      // jaw hinge and the face regions that move with the mouth (rest geometry; amounts per frame)
+      uHinge: { value: new THREE.Vector4(...r.hinge) },
+      uHingeK: { value: new THREE.Vector3(RIG_LIMITS.hingeSide, RIG_LIMITS.hingeStretch, RIG_LIMITS.hingeBack) },
+      uFaceMove: { value: new THREE.Vector4() },
+      uCheekC: { value: new THREE.Vector4(...f.cheekL, ...f.cheekR) },
+      uChinC: { value: new THREE.Vector4(...f.chin, ...f.chinRadius) },
+      uAlaC: { value: new THREE.Vector4(...f.alaL, ...f.alaR) },
+      uFaceR: { value: new THREE.Vector3(...f.cheekRadius, f.alaRadius) },
     };
   }
 
@@ -221,6 +230,7 @@ export default class ReliefHead {
     f.uSleep.value = a.sleep;
     f.uFx.value = this.fx;
     f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
+    f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
     const cu = this.cavityUniforms;
     const H = this.pack.plate.height;
     cu.uTeeth.value = cavityTeeth(a);

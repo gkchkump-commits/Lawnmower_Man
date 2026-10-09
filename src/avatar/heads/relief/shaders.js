@@ -18,6 +18,13 @@ uniform vec2 uCornerR;
 uniform vec2 uBrows;
 uniform vec4 uLids;   // upperL, lowerL, upperR, lowerR travel (world units, + closes)
 uniform vec2 uNeckBand; // world y: the neck below .x stays put, everything above .y turns with the head
+uniform vec4 uHinge;    // jaw: centre line x, half width (angle to angle), slit y, chin y (world, rest)
+uniform vec3 uHingeK;   // side falloff, chin stretch, back swing
+uniform vec4 uFaceMove; // cheek lift, chin boss lift, nostril wings out, cheeks out (world units)
+uniform vec4 uCheekC;   // cheek centres: L.xy, R.xy (world, rest)
+uniform vec4 uChinC;    // chin boss centre xy, radii xy
+uniform vec4 uAlaC;     // nostril wing centres: L.xy, R.xy
+uniform vec3 uFaceR;    // cheek radii xy, nostril wing radius
 
 vec3 applyRig(vec3 p) {
   // eyelids: upper lids move down, lower lids move up
@@ -28,12 +35,33 @@ vec3 applyRig(vec3 p) {
   p.y += aW0.z * uUpperLift - aW0.y * uLowerDrop;
   p.xy += aW0.w * uCornerL + aW1.x * uCornerR;
   p.z += (aW0.y + aW0.z) * uLipPush;
-  // jaw: drops (and slightly recedes) with its weight; the weights already fall off toward the
-  // cheeks and neck, so a weighted translation reads as a hinge without the depth ordering
-  // problems a large rotation causes in a 2.5D relief
+  // the face moving with the mouth: soft regions around landmark centres (all zero at rest, so
+  // the rest pose is the baked plate; displacements stay far below the regions' size: no folds)
+  if (uFaceMove.x + uFaceMove.y + uFaceMove.z > 0.0) {
+    vec2 q = position.xy;
+    vec2 cl = (q - uCheekC.xy) / uFaceR.xy, cr = (q - uCheekC.zw) / uFaceR.xy;
+    float wl = exp(-dot(cl, cl)), wr = exp(-dot(cr, cr));
+    // cheeks and the nasolabial folds beside them lift and widen (the lips have their own rig)
+    float cw = (1.0 - clamp(aW0.y + aW0.z, 0.0, 1.0)) * aW2.w;
+    p.y += (wl + wr) * cw * uFaceMove.x;
+    p.x += (wr - wl) * cw * uFaceMove.w;
+    // the chin boss bunches up under pressed lips (mentalis)
+    vec2 cc = (q - uChinC.xy) / uChinC.zw;
+    p.y += exp(-dot(cc, cc)) * (1.0 - aW0.y) * uFaceMove.y;
+    // the nostril wings widen on a breath in
+    vec2 al = (q - uAlaC.xy) / uFaceR.z, ar = (q - uAlaC.zw) / uFaceR.z;
+    p.x += (exp(-dot(ar, ar)) - exp(-dot(al, al))) * uFaceMove.z;
+  }
+  // jaw: a hinge about the joints in front of the ears. With its weight the jaw drops; its sides
+  // near the joints drop less than the chin and lips, the chin travels a little farther than the
+  // lips (the lower face lengthens) and swings back the more the farther below the joint it is.
+  // (A weighted translation shaped like this avoids the depth-order trouble a large rotation
+  // causes in a 2.5D relief.)
   float j = aW0.x * uJawDrop;
-  p.y -= j;
-  p.z -= j * 0.3;
+  float side = smoothstep(0.45, 1.05, abs(position.x - uHinge.x) / uHinge.y);
+  float below = clamp((uHinge.z - position.y) / max(1e-4, uHinge.z - uHinge.w), 0.0, 1.0);
+  p.y -= j * (1.0 - uHingeK.x * side) * (1.0 + uHingeK.y * below);
+  p.z -= j * (0.25 + uHingeK.z * below);
   return p;
 }
 
@@ -129,14 +157,15 @@ void main() {
   vec2 suv = vUv;
   if (mB.g > 0.001) suv -= (vUv.x < 0.5 ? gazeWarp(vUv, uEyeL) : gazeWarp(vUv, uEyeR));
   // Lips pressed (m b p) or tucked (f v): the lip texture is compressed toward the seam (thinner,
-  // rolled-in lips), the rest gap is skipped (the lips meet) and a tucked lower lip rises. The
-  // displacement fades out over ~1.5 lip heights, so the mapping never folds.
+  // rolled-in lips), the rest gap is skipped (the lips meet) and a tucked lower lip rises; rounded
+  // lips (a negative thinning) fill out instead. The displacement fades out over ~1.5 lip heights,
+  // so the mapping never folds.
   // (sampling gradients of the unwarped uv: the warp is discontinuous at the seam, where
   // implicit derivatives would pick a blurry mip level; 0.66 = the -0.6 LOD bias below)
   vec2 gdx = dFdx(vUv) * 0.66, gdy = dFdy(vUv) * 0.66;
   float contact = 0.0;
   bool lipWarp = false;
-  if (abs(vLip.y) < 1.25 && abs(vLip.x) < 120.0 && dot(uLipWarp, vec4(1.0)) > 0.001) {
+  if (abs(vLip.y) < 1.25 && abs(vLip.x) < 120.0 && dot(abs(uLipWarp), vec4(1.0)) > 0.001) {
     float d = vLip.x;
     float ad = abs(d);
     float lower = step(0.0, d);
@@ -149,7 +178,7 @@ void main() {
     float shift = (k * min(ad, band) + uLipWarp.y + lower * uLipWarp.z) * fall;
     suv.y -= (lower * 2.0 - 1.0) * shift / uPlateSize.y;
     contact = uLipWarp.y * fall * exp(-d * d / 2.5);
-    lipWarp = shift > 0.01;
+    lipWarp = abs(shift) > 0.01;
   }
   // (mipmapped: a slight negative LOD bias keeps the fine grid crisp when minified)
   vec3 col = texture2D(tPlate, suv, -0.6).rgb;

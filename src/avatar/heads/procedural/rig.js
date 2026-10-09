@@ -28,6 +28,10 @@ export const PROC_LIMITS = Object.freeze({
   pressInFh: 0.004,        // ...and flatten (the seam itself stays: the cavity must not show)
   jawLipK: 0.37,           // lower-lip drop per radian of jaw rotation (cancelled by a closure)
   asymFh: 0.008,           // corner height difference at |mouthAsym| = 1
+  // the face moving with the mouth
+  jawUpperLipFh: 0.01,     // the upper lip rises a little as the jaw opens
+  chinLiftFh: 0.008,       // the chin boss bunches up under pressed lips (mentalis)
+  nostrilFh: 0.006,        // each nostril wing moves outward at nostrilFlare = 1
 });
 
 /**
@@ -78,12 +82,20 @@ export function mulMat3Vec3(m, v, out) {
 /** @param {any} meta head.json @returns {ProcRig} */
 export function buildProcRig(meta) {
   const r = meta.rig;
+  const fh = r.faceHeight, hw = r.mouthHalfWidth;
+  const mc = r.mouthCenter;
+  const chinY = r.chinY ?? mc[1] - 0.27 * fh;
+  const nose = meta.features?.noseTip ?? [mc[0], mc[1] + 0.17 * fh, mc[2] + 0.07];
   return {
-    faceH: r.faceHeight,
-    mouthHW: r.mouthHalfWidth,
+    faceH: fh,
+    mouthHW: hw,
     jawPivot: [...r.jawPivot],
     headPivot: [...r.headPivot],
     eyes: meta.eyes.map((e) => ({ axisX: [...e.axisX], axisY: [...e.axisY], axisZ: [...e.axisZ] })),
+    // the chin boss (x, y, radii) between the lower lip and the chin, and the nostril wings
+    // (|x| from the midline, y, radius, the front z they sit at)
+    chin: [mc[0], mc[1] + 0.6 * (chinY - mc[1]), 0.8 * hw, 0.065 * fh],
+    ala: [0.45 * hw, nose[1] - 0.02 * fh, 0.035 * fh, nose[2] - 0.03],
   };
 }
 
@@ -110,6 +122,16 @@ export function deformVertex(p, w, u, rig, out, seam = 0) {
   y += w[5] * u.brow[0] + w[6] * u.brow[1];
   y += w[7] * u.lips[3];
   z += w[7] * u.lips[3] * 0.35;
+  const f = u.face || [0, 0, 0, 0];
+  if (f[0] + f[1] > 0) {
+    // chin boss (on the jaw, not the lower lip) and nostril wings (on the front of the face)
+    const c = rig.chin, al = rig.ala;
+    const cx = (p[0] - c[0]) / c[2], cy = (p[1] - c[1]) / c[3];
+    y += Math.exp(-(cx * cx + cy * cy)) * w[0] * (1 - w[2]) * f[0];
+    const ax = (Math.abs(p[0]) - al[0]) / al[2], ay = (p[1] - al[1]) / al[2];
+    const front = smoothstep(al[3] - 0.06, al[3], p[2]);
+    x += Math.sign(p[0]) * Math.exp(-(ax * ax + ay * ay)) * front * f[1];
+  }
   const jp = rig.jawPivot, m = u.jawRot;
   const rx = x - jp[0], ry = y - jp[1], rz = z - jp[2];
   const jx = jp[0] + m[0] * rx + m[3] * ry + m[6] * rz;
@@ -123,6 +145,7 @@ export function deformVertex(p, w, u, rig, out, seam = 0) {
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+const smoothstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
 
 /**
  * Compute every rig uniform for an AnimState. Writes into `u` (allocates only on first use)
@@ -151,13 +174,19 @@ export function procRigUniforms(rig, a, u) {
   u.cornerL[0] = -out; u.cornerL[1] = up + tilt; u.cornerL[2] = back;
   u.cornerR[0] = out; u.cornerR[1] = up - tilt; u.cornerR[2] = back;
   u.lips = u.lips || [0, 0, 0, 0];
-  // pressing / tucking lips stay closed over a slightly open jaw (the lower lip comes back up)
-  const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth) * fh;
+  // pressing / tucking lips stay closed over a slightly open jaw (the lower lip comes back up);
+  // the upper lip rises a little with the jaw too (open vowels)
+  const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth + L.jawUpperLipFh * jaw) * fh;
   u.lips[0] = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;      // upper lift
   u.lips[1] = L.wideLipFh * 1.2 * wide * fh * (1 - press - tuck)    // lower drop
     - (press + tuck) * L.jawLipK * u.jawAngle - L.tuckRaiseFh * tuck * fh;
   u.lips[2] = L.roundPushFh * round * fh;                         // push forward
-  u.lips[3] = L.cheekFh * smile * fh;                             // cheek raise
+  // cheek raise: smiles, and the spread vowels of speech (the director's cheekRaise)
+  u.lips[3] = L.cheekFh * Math.max(smile, clamp01(a.cheekRaise ?? 0)) * fh;
+  // chin boss lift (mentalis, pressed lips) and nostril wings out (a breath in), world units
+  u.face = u.face || [0, 0, 0, 0];
+  u.face[0] = L.chinLiftFh * clamp01(a.chinRaise ?? 0) * fh;
+  u.face[1] = L.nostrilFh * clamp01(a.nostrilFlare ?? 0) * fh;
   // press thinning, press roll-in, tuck draw-back (world units), tongue tip amount
   u.mouthX = u.mouthX || [0, 0, 0, 0];
   u.mouthX[0] = L.pressThinFh * press * fh;

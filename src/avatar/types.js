@@ -14,6 +14,8 @@
  * @property {boolean} [transparent]  true: premultiplied black->alpha output (desktop overlay); false: opaque black
  * @property {number} [opacity]       0..1 how much the head occludes the desktop when transparent (default 0.88)
  * @property {number} [idleMotion]    idle sway / saccade amount (default 1, 0 for visual diffs)
+ * @property {number} [expressiveness] 0..2 how much speech moves the head, brows and face (default 1;
+ *           settings avatar.expressiveness)
  * @property {number} [zoom]          camera zoom (default 1)
  * @property {Record<string,string>} [colors]  palette overrides: eye, line, rim, grid, wisp, mote (hex)
  * @property {boolean} [autoStart]    start the render loop (default true)

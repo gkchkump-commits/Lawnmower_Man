@@ -420,6 +420,34 @@ describe('sync with a voice at its own tempo', () => {
   });
 });
 
+describe('a file name in a sentence', () => {
+  it('the mouth keeps moving through "package dot json" (one boundary per space-separated token)', () => {
+    const text = 'Open package.json and add a start script.';
+    const voice = planSpeech('Open package dot json and add a start script.').words; // what the voice says
+    const plan = planSpeech(text);
+    // the voice reports a boundary per whitespace token: "Open", "package.json", "and", …
+    const tokens = [...text.matchAll(/\S+/g)].map((m) => m.index);
+    const spokenIndex = [0, 1, 4, 5, 6, 7, 8];
+    const onsets = tokens.map((ci, i) => ({ t: 0.05 + voice[spokenIndex[i]].t0 - LEAD_IN, ci }));
+    const tr = new SpeechTrack(plan, { speed: 1, now: 0 });
+    tr.begin(0.05);
+    let k = 0;
+    let run = 0;
+    let longest = 0;
+    for (let f = 1; f < 60 * 4; f++) {
+      const t = f / 60;
+      for (; k < onsets.length && onsets[k].t <= t; k++) tr.boundary(onsets[k].t, { charIndex: onsets[k].ci });
+      tr.update(1 / 60, t);
+      const [jaw, , , press, tuck] = tr.sample();
+      const vp = LEAD_IN + (t - 0.05);
+      const talking = voice.some((w) => vp >= w.t0 && vp < w.t1);
+      run = talking && jaw < 0.03 && press < 0.2 && tuck < 0.2 ? run + 1 : 0;
+      longest = Math.max(longest, run);
+    }
+    expect(longest / 60).toBeLessThan(0.1); // was 0.65 s: a planned sentence pause inside the name
+  });
+});
+
 describe('Web Speech → player → lip-sync (fake timers)', () => {
   afterEach(() => vi.useRealTimers());
 

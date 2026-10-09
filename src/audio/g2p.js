@@ -479,6 +479,8 @@ function isAcronym(tok) {
 }
 
 const PUNCT_RE = /[,;:.!?…—–]/;
+/** What may follow punctuation that the voice pauses at: a space, a closing quote or bracket. */
+const PUNCT_FOLLOW_RE = /[\s"'”’»)\]}*_]/;
 
 /**
  * Split text into pronounced words with their character offsets and following punctuation.
@@ -495,11 +497,20 @@ export function textToWords(text) {
   let m;
   while ((m = re.exec(s))) {
     if (m[3]) {
+      // a mark inside a token ("github.com", "package.json", "Node.js", "10:30", "v2.1.3") is
+      // read straight through: no pause, no phrase end. Dashes pause even without spaces.
+      const next = s[m.index + m[3].length];
+      if (next !== undefined && !PUNCT_FOLLOW_RE.test(next) && !/[—–]/.test(m[3])) continue;
       const prev = words[words.length - 1];
       if (prev && !prev.punct) prev.punct = normalizePunct(m[3]);
       continue;
     }
     const tok = m[0];
+    const prevWord = words[words.length - 1];
+    if (prevWord && prevWord.end === m.index - 1 && s[m.index - 1] === '.' && /[A-Za-z]/.test(s[m.index - 2] || '') && /^[A-Za-z]{2}/.test(tok)) {
+      // "package.json", "github.com": the voice says "dot" (not "e.g.", "a.m.", "U.S.")
+      words.push({ text: 'dot', start: m.index - 1, end: m.index, phones: wordToPhones('dot'), punct: '', content: false, emphasis: false });
+    }
     let phones;
     if (m[1]) {
       const pct = tok.endsWith('%');

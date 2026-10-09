@@ -278,3 +278,15 @@ describe('through the director (what the head shows)', () => {
     expect(Math.max(...frames.map((f) => f.tuck))).toBeGreaterThanOrEqual(0.75);
   });
 });
+
+describe('marks inside a token', () => {
+  it('"github.com" plans no pause and no phrase end mid-sentence', () => {
+    const plan = planSpeech('See github.com for the full source.');
+    expect(plan.words.map((w) => w.text)).toEqual(['See', 'github', 'dot', 'com', 'for', 'the', 'full', 'source']);
+    expect(plan.words.filter((w) => w.pause > 0)).toEqual([]);
+    expect(plan.cues.filter((c) => c.type === 'phrase-end')).toHaveLength(1);
+    expect(plan.cues.filter((c) => c.type === 'phrase-start')).toHaveLength(1);
+    const ten = planSpeech('Meet me at 10:30 with version 1.2.3 please.');
+    expect(ten.words.filter((w) => w.pause > 0)).toEqual([]);
+  });
+});

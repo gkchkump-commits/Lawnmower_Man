@@ -188,6 +188,18 @@ describe('textToWords', () => {
     expect(textToWords('Well, wait; then: go — now... done').map((w) => w.punct)).toEqual([',', ';', ';', '—', '.', '']);
   });
 
+  it('reads marks inside a token straight through: no pause, and "dot" where the voice says it', () => {
+    const w = textToWords('Open package.json at 10:30 on github.com, v2.1.3 now.');
+    expect(w.map((x) => x.text)).toEqual(['Open', 'package', 'dot', 'json', 'at', '10', '30', 'on', 'github', 'dot', 'com', 'v', '2.1', '3', 'now']);
+    expect(w.map((x) => x.punct)).toEqual(['', '', '', '', '', '', '', '', '', '', ',', '', '', '', '.']);
+    expect(w.filter((x) => x.text === 'dot').map((x) => x.content)).toEqual([false, false]);
+    expect(textToWords('Use Node.js and main.js.').map((x) => x.text + x.punct).join(' ')).toBe('Use Node dot js and main dot js.');
+    // abbreviations keep their (spoken) pauses and get no "dot"
+    expect(textToWords('See e.g. this, at 10 a.m. in the U.S. today.').map((x) => x.text + x.punct).join(' ')).toBe('See e g. this, at 10 a m. in the U S. today.');
+    // closing quotes and brackets still end a sentence; dashes pause without spaces too
+    expect(textToWords('"Done." (Yes.) Wait—what?').map((x) => x.punct)).toEqual(['.', '.', '—', '?']);
+  });
+
   it('splits hyphenated words, expands percentages and skips symbols', () => {
     expect(textToWords('well-known').map((w) => w.text)).toEqual(['well', 'known']);
     const pct = textToWords('50% off');

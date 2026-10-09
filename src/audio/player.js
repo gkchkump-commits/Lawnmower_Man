@@ -146,8 +146,12 @@ export class AudioPlayer extends Emitter {
    * @param {{ character?: VoiceCharacter|string, amount?: number }} o
    */
   setVoiceFx(o = {}) {
-    this._fx = normalizeFx({ character: o.character ?? this._fx.character, amount: o.amount ?? this._fx.amount });
-    if (this._fxNode) this._fxNode.port.postMessage({ type: 'set', ...this._fx });
+    const next = normalizeFx({ character: o.character ?? this._fx.character, amount: o.amount ?? this._fx.amount });
+    // every settings change passes through here (window moves, other toggles): only real
+    // changes go to the audio thread
+    const changed = next.character !== this._fx.character || next.amount !== this._fx.amount;
+    this._fx = next;
+    if (changed && this._fxNode) this._fxNode.port.postMessage({ type: 'set', ...next });
     if (this._fxWanted()) this._prepareFx();
   }
 

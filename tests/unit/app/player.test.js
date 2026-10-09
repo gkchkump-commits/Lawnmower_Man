@@ -252,6 +252,11 @@ describe('AudioPlayer voice character', () => {
     // changes go to the processor (it ramps them)
     g.p.setVoiceFx({ amount: 0.9 });
     expect(fx.posted.at(-1).m).toEqual({ type: 'set', character: 'robot', amount: 0.9 });
+    // settings changes that leave the character alone send nothing to the audio thread
+    const n = fx.posted.length;
+    g.p.setVoiceFx({ character: 'robot', amount: 0.9 });
+    g.p.setVoiceFx({});
+    expect(fx.posted).toHaveLength(n);
   });
 
   it('a natural player loads nothing', async () => {

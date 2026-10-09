@@ -325,7 +325,7 @@ export class ClipPitch {
     this.f0 = new Float32Array(this.count);
     /** frames analysed so far */
     this.done = 0;
-    this.dec = new Float64Array(Math.ceil(samples.length / this.D) + 1);
+    this.dec = new Float32Array(Math.ceil(samples.length / this.D) + 1);
     this._decN = 0;
     this._srcPos = 0;
     this._lp = biquadLowpass(Math.min(1000, 0.4 * this.rate), rate);

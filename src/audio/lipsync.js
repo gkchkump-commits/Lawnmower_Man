@@ -21,6 +21,8 @@ import {
   toShape,
 } from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
+import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms } from './prosody.js';
+import { base64ToBytes, decodeWav } from './wav.js';
 
 export { CHANNELS, VISEME_SHAPES, planSpeech };
 
@@ -76,19 +78,90 @@ function segmentsFor(tl) {
 /** Default visual lead: the mouth shapes a sound slightly before it is heard. */
 export const VISEME_LEAD = 0.05;
 
+/** Seconds of a clip's pitch analysed at once when it starts (its first cues are due at once). */
+export const PRE_ANALYSE = 0.8;
+/** Pitch frames analysed per update at most (~25 µs each), and how far ahead of playback. */
+export const FRAMES_PER_UPDATE = 40;
+export const LOOKAHEAD = 0.8;
+
+/**
+ * The samples of a playing audio clip: the player's decoded (dry) buffer when it offers one, the
+ * clip's raw samples, or its WAV decoded here. null when there are none.
+ * @param {{ clip: any, buffer?: { sampleRate: number, getChannelData: (c: number) => Float32Array } }} cur
+ * @returns {{ samples: Float32Array, sampleRate: number }|null}
+ */
+export function clipSamples(cur) {
+  const b = cur?.buffer;
+  if (b && typeof b.getChannelData === 'function' && b.sampleRate > 0) {
+    try {
+      return { samples: b.getChannelData(0), sampleRate: b.sampleRate };
+    } catch { /* fall through to the clip's own audio */ }
+  }
+  const c = cur?.clip;
+  if (c?.samples?.length && c.sampleRate > 0) return { samples: c.samples, sampleRate: c.sampleRate };
+  if (c?.audioB64 || c?.wav) {
+    try {
+      const d = decodeWav(c.wav ? new Uint8Array(c.wav) : base64ToBytes(c.audioB64));
+      return { samples: d.samples, sampleRate: d.sampleRate };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Jaw scale of a vowel from its measured loudness (dB above the clip's median vowel) and length
+ * (/ the median vowel's): stressed syllables open wider, reduced ones less.
+ * @param {number} eRel @param {number} durRel
+ */
+export function stressJawScale(eRel, durRel) {
+  return clamp(0.84 + 0.035 * eRel + 0.12 * (durRel - 1), 0.62, 1.16);
+}
+
+/**
+ * How far the loudness at the mouth's moment lets the jaw open (multiplies the viseme's jaw):
+ * 0.58 near silence, 1.08 at full voice, smooth in between. The envelope is the clip's own, so a
+ * syllable's sharp onset opens the jaw as sharply, and a dip (a closure, a pause) lets it close.
+ * @param {number} db loudness re the clip's loudest frame
+ */
+export function energyJaw(db) {
+  const x = clamp01((db + 30) / 26);
+  return 0.58 + 0.5 * x * x * (3 - 2 * x);
+}
+
+/**
+ * The text's phrase ends (punctuation, friendliness) with their relative position in the text,
+ * for ClipProsody. @param {string} text
+ */
+export function textEnds(text) {
+  if (!text) return [];
+  const plan = planSpeech(text);
+  const n = Math.max(1, plan.words.length);
+  return plan.cues.filter((c) => c.type === 'phrase-end').map((c) => ({ punct: c.punct, friendly: c.friendly || 0, pos: ((c.word ?? n - 1) + 1) / n }));
+}
+
+/** Small integer hash of a string (the seed of a clip's natural variation). @param {string} s */
+function hashText(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return (h >>> 0) % 100003;
+}
+
 /**
  * Mouth shape at playback time t from a viseme timeline, with coarticulation.
  * @param {VisemeSegment[]} tl
  * @param {number} t seconds into the clip
- * @param {{ lead?: number, prevT?: number }} [opts]
+ * @param {{ lead?: number, prevT?: number, segs?: import('./articulation.js').Segment[] }} [opts]
  *   lead: the mouth leads the sound (default VISEME_LEAD); prevT: the previous sample time — a
- *   closure whose centre lies in between is sampled at its centre (never skipped)
+ *   closure whose centre lies in between is sampled at its centre (never skipped); segs: the
+ *   timeline's segments when the caller built them itself (measured prominence, variation)
  * @returns {MouthShape}
  */
 export function mouthFromVisemes(tl, t, opts = {}) {
   if (!Array.isArray(tl) || !tl.length || !Number.isFinite(t)) return { ...SIL };
   const lead = opts.lead ?? VISEME_LEAD;
-  const segs = segmentsFor(tl);
+  const segs = opts.segs || segmentsFor(tl);
   let tt = t + lead;
   if (Number.isFinite(opts.prevT)) {
     const c = closureCentreIn(segs, /** @type {number} */ (opts.prevT) + lead, tt);
@@ -416,6 +489,12 @@ export class LipSync {
     this._audioCues = null;
     this._prevClip = null;
     this._prevT = NaN;
+    /** per audio clip: its analysis, trimmed timeline, segments and prosody (null: no samples) */
+    this._clips = new WeakMap();
+    /** the speaker's usual pitch (Hz), learned over the clips (0 = not yet) */
+    this.f0Ref = 0;
+    this._pitch = 0;
+    this._voicedAt = -Infinity;
     /** @type {Array<() => void>} */
     this._offs = [];
     const p = this.player;
@@ -474,9 +553,38 @@ export class LipSync {
   }
 
   /**
+   * Analysis state of a server-voiced clip (built on its first frame, then cached).
+   * @param {{ clip: any, buffer?: any }} cur
+   */
+  _clipState(cur) {
+    const clip = cur.clip;
+    if (this._clips.has(clip)) return this._clips.get(clip);
+    let st = null;
+    const src = clipSamples(cur);
+    if (src && src.samples.length >= src.sampleRate * 0.05) {
+      const a = new VoiceAnalysis(src.samples, src.sampleRate, { refHz: this.f0Ref });
+      a.advanceTo(PRE_ANALYSE);
+      if (!this.f0Ref) this.f0Ref = a.medianPitch();
+      const tl = trimPhraseEnds(clip.visemes, a);
+      const norms = vowelNorms(a, tl);
+      const segs = segmentsFromVisemes(tl, {
+        jawScale: (s) => stressJawScale(peakEnergy(a, s.start, s.end) - norms.energy, (s.end - s.start) / norms.dur),
+        vary: hashText(clip.text || String(tl.length)),
+      });
+      const prosody = new ClipProsody(a, tl, { ref: () => this.f0Ref || a.medianPitch() || 160, ends: textEnds(clip.text || '') });
+      st = { a, tl, segs, prosody, learned: false };
+    }
+    this._clips.set(clip, st);
+    return st;
+  }
+
+  /**
    * @param {number} dt seconds since the previous update
    * @param {number} now seconds (for the system-voice driver)
-   * @returns {MouthShape & { level: number, source: 'visemes'|'audio'|'speech'|'none', cues: Cue[]|null }}
+   * @returns {MouthShape & { level: number, source: 'visemes'|'audio'|'speech'|'none', cues: Cue[]|null,
+   *   intonation: { pitch: number, voiced: boolean } }}
+   *   intonation: the voice's pitch in semitones above / below the speaker's usual one (held over
+   *   short unvoiced sounds, 0 in pauses), for the head and brows
    */
   update(dt, now) {
     const cur = this.player && this.player.current;
@@ -485,12 +593,31 @@ export class LipSync {
     let source = /** @type {'visemes'|'audio'|'speech'|'none'} */ ('none');
     /** @type {Cue[]|null} */
     let cues = null;
+    /** @type {{ pitch: number, voiced: boolean }|null} */
+    let into = null;
     if (cur && cur.kind === 'audio') {
-      const lvl = this.player.level();
-      const level = dbToUnit(toDb(lvl), -50, -14);
       const tl = cur.clip.visemes;
       const prevT = cur.clip === this._prevClip ? this._prevT : NaN;
-      if (tl && tl.length) {
+      const st = tl && tl.length ? this._clipState(cur) : null;
+      if (st) {
+        // the clip's own analysis: the loudness envelope drives the jaw, the pitch the prosody
+        const tt = cur.time + VISEME_LEAD;
+        st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
+        if (st.a.complete && !st.learned) {
+          st.learned = true;
+          const m = st.a.medianPitch();
+          if (m > 0) this.f0Ref = this.f0Ref > 0 ? 2 ** (0.7 * Math.log2(this.f0Ref) + 0.3 * Math.log2(m)) : m;
+        }
+        const m = mouthFromVisemes(st.tl, cur.time, { prevT, segs: st.segs });
+        // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it)
+        const e = Math.max(st.a.energyAt(tt - 0.005), st.a.energyAt(tt + 0.015));
+        m.jaw = clamp01(m.jaw * energyJaw(e));
+        target = { ...m, level: clamp01((st.a.energyAt(tt) + 38) / 30) };
+        source = 'visemes';
+        cues = st.prosody.take(tt);
+        into = st.prosody.intonation(tt);
+      } else if (tl && tl.length) {
+        const level = dbToUnit(toDb(this.player.level()), -50, -14);
         const m = mouthFromVisemes(tl, cur.time, { prevT });
         // louder syllables open the jaw a little more, a dip in the audio a little less
         m.jaw = clamp01(m.jaw * (0.78 + 0.4 * level));
@@ -498,6 +625,8 @@ export class LipSync {
         source = 'visemes';
         cues = this._clipCues(cur.clip, tl, cur.time + VISEME_LEAD);
       } else {
+        const lvl = this.player.level();
+        const level = dbToUnit(toDb(lvl), -50, -14);
         const bins = this.player.analyser?.frequencyBinCount;
         if (bins && this._freq.length !== bins) this._freq = new Float32Array(bins);
         const ok = this.player.spectrum(this._freq);
@@ -536,9 +665,17 @@ export class LipSync {
       else step(k, 0.008, 0.008);
     }
     sm.level += (target.level - sm.level) * (1 - Math.exp(-Math.max(0, dt) / 0.08));
+    // intonation: follows the voiced pitch, holds over a short unvoiced sound, relaxes in a pause
+    const k = (tau) => 1 - Math.exp(-Math.max(0, dt) / tau);
+    if (into?.voiced) {
+      this._pitch += (into.pitch - this._pitch) * k(0.05);
+      this._voicedAt = now;
+    } else if (!(now - this._voicedAt < 0.15)) {
+      this._pitch += (0 - this._pitch) * k(0.3);
+    }
     return {
       jaw: sm.jaw, wide: sm.wide, round: sm.round, press: sm.press, tuck: sm.tuck, teeth: sm.teeth, tongue: sm.tongue,
-      level: sm.level, source, cues,
+      level: sm.level, source, cues, intonation: { pitch: this._pitch, voiced: !!into?.voiced },
     };
   }
 

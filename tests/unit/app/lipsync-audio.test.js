@@ -1,0 +1,177 @@
+// The local-voice lip-sync on a clip's own audio: the loudness envelope opens the jaw (stressed,
+// louder syllables wider, a sharp onset sharply), the pitch gives intonation and audio prosody
+// cues, phrase-final sounds rest when the voice stops, and the player's decoded buffer is used
+// when it offers one (else the clip's WAV is decoded).
+import { describe, expect, it } from 'vitest';
+import { LipSync, clipSamples, energyJaw, stressJawScale, textEnds } from '../../../src/audio/lipsync.js';
+import { bytesToBase64, encodeWav } from '../../../src/audio/wav.js';
+import { Emitter } from '../../../src/app/emitter.js';
+
+const SR = 24000;
+function buzz(dur, f, amp) {
+  const x = new Float32Array(Math.round(dur * SR));
+  let ph = 0;
+  for (let i = 0; i < x.length; i++) {
+    ph += (2 * Math.PI * f) / SR;
+    let v = 0;
+    for (let k = 1; k <= 8; k++) v += Math.sin(k * ph) / k;
+    x[i] = amp * 0.5 * v;
+  }
+  return x;
+}
+const silence = (d) => new Float32Array(Math.round(d * SR));
+function concat(...p) {
+  const o = new Float32Array(p.reduce((n, x) => n + x.length, 0));
+  let k = 0;
+  for (const x of p) { o.set(x, k); k += x.length; }
+  return o;
+}
+
+/** A fake AudioPlayer playing one clip; step(t) sets the playback clock. */
+function rig(clip, { buffer } = {}) {
+  const player = Object.assign(new Emitter(), { current: null, sampleRate: 48000, level: () => 0.05, spectrum: () => false });
+  let now = 0;
+  const ls = new LipSync({ player, now: () => now });
+  const dt = 1 / 60;
+  const run = (until, each) => {
+    for (; now <= until + 1e-9; now += dt) {
+      player.current = now < clip.dur ? { clip, kind: 'audio', time: now, buffer } : null;
+      const m = ls.update(dt, now);
+      each?.(now, m);
+    }
+  };
+  return { player, ls, run };
+}
+
+/** Two "aa" syllables, the second 12 dB louder; a "d" the timeline holds 0.25 s past the voice. */
+function makeClip() {
+  const samples = concat(silence(0.15), buzz(0.2, 150, 0.08), silence(0.08), buzz(0.2, 150, 0.32), silence(0.6));
+  const visemes = [
+    { start: 0, end: 0.15, viseme: 'sil' }, { start: 0.15, end: 0.35, viseme: 'aa' }, { start: 0.35, end: 0.43, viseme: 'kk' },
+    { start: 0.43, end: 0.6, viseme: 'aa' }, { start: 0.6, end: 0.88, viseme: 'DD' }, { start: 0.88, end: 1.23, viseme: 'sil' },
+  ];
+  const audioB64 = bytesToBase64(new Uint8Array(encodeWav(samples, SR)));
+  return { kind: 'audio', audioB64, visemes, text: 'Ah, ahd.', dur: samples.length / SR, samples: undefined, _raw: samples };
+}
+
+describe('jaw from the audio', () => {
+  it('energyJaw: smooth, monotonic, 0.58 near silence and 1.08 at full voice', () => {
+    expect(energyJaw(-80)).toBeCloseTo(0.58, 9);
+    expect(energyJaw(0)).toBeCloseTo(1.08, 9);
+    let prev = 0;
+    for (let db = -60; db <= 0; db += 2) {
+      expect(energyJaw(db)).toBeGreaterThanOrEqual(prev);
+      prev = energyJaw(db);
+    }
+  });
+
+  it('stressJawScale: louder and longer vowels open wider, within bounds', () => {
+    expect(stressJawScale(4, 1)).toBeGreaterThan(stressJawScale(0, 1));
+    expect(stressJawScale(0, 1.6)).toBeGreaterThan(stressJawScale(0, 1));
+    expect(stressJawScale(-30, 0.2)).toBe(0.62);
+    expect(stressJawScale(30, 5)).toBe(1.16);
+  });
+
+  it('the louder syllable opens the jaw clearly wider than the quiet one with the same viseme', () => {
+    const clip = makeClip();
+    const { run } = rig(clip);
+    const jaw = [];
+    run(1.3, (t, m) => jaw.push({ t, jaw: m.jaw, teeth: m.teeth, source: m.source }));
+    const at = (t0, t1) => Math.max(...jaw.filter((q) => q.t >= t0 && q.t <= t1).map((q) => q.jaw));
+    const quiet = at(0.2, 0.32), loud = at(0.47, 0.58);
+    expect(jaw.find((q) => q.t > 0.3).source).toBe('visemes');
+    expect(loud).toBeGreaterThan(quiet * 1.4);
+    expect(quiet).toBeGreaterThan(0.2);                    // the quiet one still opens
+  });
+
+  it('the jaw opens with a syllable\'s onset, not after it', () => {
+    const clip = makeClip();
+    const { run } = rig(clip);
+    let opened = NaN;
+    run(0.5, (t, m) => { if (t > 0.38 && Number.isNaN(opened) && m.jaw > 0.3) opened = t; });
+    // the loud syllable starts at 0.43 s; with the visual lead the mouth is open by then
+    expect(opened).toBeGreaterThan(0.36);
+    expect(opened).toBeLessThan(0.45);
+  });
+
+  it('rests when the voice stops, though the timeline holds the final sound longer', () => {
+    const clip = makeClip();
+    const { run } = rig(clip);
+    const late = [];
+    run(1.0, (t, m) => { if (t >= 0.75 && t <= 0.86) late.push(m.jaw + m.teeth); });
+    // (untrimmed, the DD would still hold jaw ~0.18 and teeth ~0.5 here)
+    expect(Math.max(...late)).toBeLessThan(0.12);
+  });
+});
+
+describe('audio prosody through the lip-sync', () => {
+  it('gives cues (a breath, the phrase, its end) and the intonation of the voice', () => {
+    const clip = makeClip();
+    const { ls, run } = rig(clip);
+    const cues = [];
+    let voiced = 0;
+    run(1.3, (t, m) => {
+      if (m.cues) cues.push(...m.cues.map((c) => c.type));
+      if (m.intonation.voiced) voiced++;
+    });
+    expect(cues[0]).toBe('inhale');
+    expect(cues).toContain('phrase-start');
+    expect(cues).toContain('phrase-end');
+    expect(voiced).toBeGreaterThan(10);
+    expect(ls.f0Ref).toBeGreaterThan(140);                 // learned the speaker's pitch
+    expect(ls.f0Ref).toBeLessThan(160);
+  });
+
+  it('the intonation rises above the speaker\'s usual pitch on a high syllable', () => {
+    const samples = concat(silence(0.1), buzz(0.3, 150, 0.2), silence(0.05), buzz(0.3, 150 * 2 ** (5 / 12), 0.2), silence(0.3));
+    const clip = {
+      kind: 'audio', samples, sampleRate: SR, dur: samples.length / SR, text: '',
+      visemes: [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.4, viseme: 'aa' }, { start: 0.4, end: 0.45, viseme: 'kk' },
+        { start: 0.45, end: 0.75, viseme: 'E' }, { start: 0.75, end: 1.05, viseme: 'sil' }],
+    };
+    const { ls, run } = rig(clip);
+    ls.f0Ref = 150;
+    const p = [];
+    run(0.9, (t, m) => p.push({ t, pitch: m.intonation.pitch }));
+    const lo = p.find((q) => q.t > 0.3).pitch, hi = p.find((q) => q.t > 0.65).pitch;
+    expect(Math.abs(lo)).toBeLessThan(1.5);
+    expect(hi).toBeGreaterThan(3.5);
+    // and it relaxes back toward 0 in the pause after the voice
+    expect(Math.abs(p[p.length - 1].pitch)).toBeLessThan(hi);
+  });
+});
+
+describe('clip samples', () => {
+  it('prefers the player\'s decoded buffer, then raw samples, then decodes the WAV', () => {
+    const clip = makeClip();
+    let asked = 0;
+    const buf = { sampleRate: SR, getChannelData: (c) => { asked++; expect(c).toBe(0); return clip._raw; } };
+    const a = clipSamples({ clip, buffer: buf });
+    expect(asked).toBe(1);
+    expect(a.samples).toBe(clip._raw);
+    const b = clipSamples({ clip: { samples: clip._raw, sampleRate: SR } });
+    expect(b.samples).toBe(clip._raw);
+    const c = clipSamples({ clip });
+    expect(c.sampleRate).toBe(SR);
+    expect(c.samples.length).toBe(clip._raw.length);
+    expect(Math.abs(c.samples[5000] - clip._raw[5000])).toBeLessThan(1e-4);
+    expect(clipSamples({ clip: { audioB64: 'not a wav' } })).toBeNull();
+    expect(clipSamples({ clip: {} })).toBeNull();
+  });
+
+  it('a clip without decodable audio keeps the timeline-only path', () => {
+    const clip = { kind: 'audio', audioB64: '', text: 'Hi.', dur: 0.5, visemes: [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.4, viseme: 'aa' }, { start: 0.4, end: 0.5, viseme: 'sil' }] };
+    const { run } = rig(clip);
+    let max = 0;
+    run(0.45, (t, m) => { max = Math.max(max, m.jaw); expect(m.source).toBe(t < 0.5 ? 'visemes' : 'none'); });
+    expect(max).toBeGreaterThan(0.3);
+  });
+
+  it('textEnds gives each phrase end its place in the text', () => {
+    const e = textEnds("Hello! I'm Claude. How are you?");
+    expect(e.map((x) => x.punct)).toEqual(['!', '.', '?']);
+    expect(e[0].pos).toBeLessThan(e[1].pos);
+    expect(e[2].pos).toBe(1);
+    expect(e[0].friendly).toBeGreaterThan(0);
+  });
+});

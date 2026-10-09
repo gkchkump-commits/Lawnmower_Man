@@ -182,6 +182,10 @@ export default class ProceduralHead {
       uBrow: { value: new THREE.Vector2() },
       uBreathY: { value: 0 },
       uNeckRot: { value: new THREE.Vector2(meta.neck.fadeBottom - 0.02, meta.neck.fadeTop + 0.06) },
+      // the face moving with the mouth: chin boss, nostril wings (rest geometry; amounts per frame)
+      uFace: { value: new THREE.Vector2() },
+      uChinP: { value: new THREE.Vector4(...this.rig.chin) },
+      uAlaP: { value: new THREE.Vector4(...this.rig.ala) },
       uTime: { value: 0 }, uEnergy: { value: 0.5 }, uSpeech: { value: 0 }, uListen: { value: 0 },
       uThink: { value: 0 }, uSpeak: { value: 0 }, uError: { value: 0 }, uSleep: { value: 0 }, uFx: { value: this.fx },
       uColLine: { value: palette.line.clone() }, uColRim: { value: palette.rim.clone() },
@@ -232,6 +236,7 @@ export default class ProceduralHead {
     f.uMouthX.value.fromArray(u.mouthX);
     f.uBrow.value.fromArray(u.brow);
     f.uBreathY.value = u.breathY;
+    f.uFace.value.set(u.face[0], u.face[1]);
     f.uBlink.value.fromArray(u.blink);
     f.uSquint.value = u.squint;
     f.uGaze.value[0].fromArray(u.gaze, 0);

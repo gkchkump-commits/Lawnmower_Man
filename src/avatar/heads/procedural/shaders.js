@@ -36,6 +36,9 @@ uniform vec4 uMouthX;   // press thinning, press roll-in, tuck draw-back (world 
 uniform vec2 uBrow;
 uniform float uBreathY;
 uniform vec2 uNeckRot;  // rest y: head rotation weight 0 at x, 1 at y (the neck stays put)
+uniform vec2 uFace;     // chin boss lift, nostril wings out (world units; 0 at rest)
+uniform vec4 uChinP;    // chin boss centre x, y and radii x, y (rest)
+uniform vec4 uAlaP;     // nostril wings: |x| from the midline, y, radius, the front z they sit at
 // expression + jaw (head frame); n is carried through the jaw hinge
 vec3 rigFace(vec3 p, inout vec3 n) {
   p += aRig0.w * uCornerL + aRig1.x * uCornerR;
@@ -48,6 +51,14 @@ vec3 rigFace(vec3 p, inout vec3 n) {
   p.z -= (aRig0.y + aRig0.z) * uMouthX.y * (1.0 - aExtra.y) + aRig0.z * uMouthX.z;
   p.y += aRig1.y * uBrow.x + aRig1.z * uBrow.y;
   p += aRig1.w * vec3(0.0, uLips.w, uLips.w * 0.35);
+  // the chin boss bunches up under pressed lips (on the jaw, not the lower lip); the nostril
+  // wings widen on a breath in (front of the face only)
+  if (uFace.x + uFace.y > 0.0) {
+    vec2 c = (position.xy - uChinP.xy) / uChinP.zw;
+    p.y += exp(-dot(c, c)) * aRig0.x * (1.0 - aRig0.z) * uFace.x;
+    vec2 al = vec2(abs(position.x) - uAlaP.x, position.y - uAlaP.y) / uAlaP.z;
+    p.x += sign(position.x) * exp(-dot(al, al)) * smoothstep(uAlaP.w - 0.06, uAlaP.w, position.z) * uFace.y;
+  }
   // jaw hinge (weighted rotation = a smooth skin blend between skull and mandible)
   p = mix(p, uJawPivot + uJawRot * (p - uJawPivot), aRig0.x);
   n = mix(n, uJawRot * n, aRig0.x);

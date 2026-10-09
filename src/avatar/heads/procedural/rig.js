@@ -197,8 +197,10 @@ export function procRigUniforms(rig, a, u) {
   u.brow[0] = u.brow[1] = L.browFh * clamp01(a.browUp) * fh;
   u.breathY = (a.breath - 0.5) * L.breathFh * fh;
   u.blink = u.blink || [0, 0];
-  u.blink[0] = clamp01(a.blinkL);
-  u.blink[1] = clamp01(a.blinkR);
+  // the upper lid follows a downward gaze part of the way (nothing at rest)
+  const lidG = 0.25 * clamp01(-(a.gazeY ?? 0));
+  u.blink[0] = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG);
+  u.blink[1] = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG);
   u.squint = L.squint * smile;
   // gaze directions in the head's rest frame
   const gx = Math.tan(clamp(a.gazeX, -1, 1) * L.gazeYaw);

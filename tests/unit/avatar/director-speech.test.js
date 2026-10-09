@@ -1,7 +1,7 @@
 // Director: the lip-sync channels (press, tuck, teeth, tongue, asymmetry) and the secondary
 // speech motion driven by prosody cues (nods, brows, phrase-end blinks, micro-smiles).
 import { describe, expect, it } from 'vitest';
-import { Director, MOUTH_TAU, createAnimState } from '../../../src/avatar/director.js';
+import { Director, MOUTH_OMEGA, createAnimState } from '../../../src/avatar/director.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -34,7 +34,7 @@ describe('Director: speech channels', () => {
     expect(c.mouthTuck).toBe(0);
     expect(c.mouthTeeth).toBe(0);
     expect(c.mouthTongue).toBe(0.4);
-    expect(Object.keys(MOUTH_TAU).sort()).toEqual(Object.keys(CH).sort());
+    expect(Object.keys(MOUTH_OMEGA).sort()).toEqual(Object.keys(CH).sort());
   });
 
   it('smooths every channel (no frame jumps) and settles on the target', () => {

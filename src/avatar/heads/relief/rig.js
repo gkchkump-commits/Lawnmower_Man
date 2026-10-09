@@ -34,6 +34,7 @@ export const RIG_LIMITS = {
   browFh: 0.02,
   gazeX: 0.6,             // iris shift in iris radii
   gazeY: 0.24,
+  lidGaze: 0.25,          // upper lid travel (blink units) at gazeY = -1
   breathFh: 0.003,
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
   teethLiftFh: 0.012,     // upper lip lift for teeth = 1 (the incisors show)
@@ -215,8 +216,10 @@ export function rigUniforms(rig, a, u) {
   // the upper incisors follow a lifted upper lip part of the way (world units); in a tuck they
   // fill the small opening down to the lower lip that touches them
   u.teethShift = L.teethShift * lift0 * (1 - press) + 1.1 * L.tuckLiftFh * tuck * fh;
-  // eyelids (world units, + = toward closing)
-  const bl = clamp01(a.blinkL), br = clamp01(a.blinkR);
+  // eyelids (world units, + = toward closing); the upper lid follows a downward gaze part of the
+  // way (lidGaze of its travel at gazeY = -1; nothing at rest)
+  const lidG = L.lidGaze * clamp01(-(a.gazeY ?? 0));
+  const bl = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG), br = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG);
   const eL = rig.eyes.L.height, eR = rig.eyes.R.height;
   const lt = rig.lidTravel ?? 1;
   u.lids = u.lids || [0, 0, 0, 0];

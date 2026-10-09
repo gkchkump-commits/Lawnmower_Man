@@ -1,7 +1,7 @@
 // Director: the speech motion that comes from the voice's prosody (audio cues, intonation),
 // the face moving with the mouth, conversational glances, and avatar.expressiveness scaling it.
 import { describe, expect, it } from 'vitest';
-import { ANIM_KEYS, Director, EXPRESSIVENESS_MAX, createAnimState } from '../../../src/avatar/director.js';
+import { ANIM_KEYS, Director, EXPRESSIVENESS_MAX, createAnimState, worldGaze } from '../../../src/avatar/director.js';
 
 function run(d, seconds, t0, each = () => {}, fps = 60) {
   const dt = 1 / fps;
@@ -188,8 +188,10 @@ describe('the face moving with the mouth', () => {
     expect(wide.chinRaise).toBeLessThan(0.05);
     const open = settle({ jaw: 0.9, wide: 0.9 });
     expect(open.cheekRaise).toBeLessThan(wide.cheekRaise);
+    // (a light bunching: the chin does not pump with every m / b / p)
     const press = settle({ press: 1 });
-    expect(press.chinRaise).toBeGreaterThan(0.7);
+    expect(press.chinRaise).toBeGreaterThan(0.4);
+    expect(press.chinRaise).toBeLessThan(0.6);
     expect(press.cheekRaise).toBeLessThan(0.05);
     const round = settle({ jaw: 0.3, round: 1 });
     expect(round.chinRaise).toBeGreaterThan(0.08);
@@ -199,7 +201,7 @@ describe('the face moving with the mouth', () => {
   it('is anatomical, so it stays partly on at expressiveness 0', () => {
     const still = settle({ press: 1 }, { expressiveness: 0 });
     const norm = settle({ press: 1 }, { expressiveness: 1 });
-    expect(still.chinRaise).toBeGreaterThan(0.25);
+    expect(still.chinRaise).toBeGreaterThan(0.3 * norm.chinRaise);
     expect(still.chinRaise).toBeLessThan(norm.chinRaise);
   });
 });
@@ -209,18 +211,20 @@ describe('conversational gaze', () => {
     const { d, t: t0 } = speaking();
     d.lookAt(0.5, 0.2);
     let t = run(d, 0.5, t0).t;
-    const target = { x: d.out.gazeX, y: d.out.gazeY };
+    // (world gaze: the eyes in the head plus the head's turn; the head turns toward the target
+    // slowly and the eyes counter-rotate, so the world gaze stays on it)
+    const target = worldGaze(d.out);
     expect(target.x).toBeCloseTo(0.5 * 0.85, 1);
     let glances = 0;
     for (let k = 0; k < 8; k++) {
       d.setProsody({ type: 'phrase-start', strength: 1 });
       let away = 0;
-      ({ t } = run(d, 0.3, t, () => { away = Math.max(away, Math.abs(d.out.gazeX - target.x)); }));
+      ({ t } = run(d, 0.3, t, () => { away = Math.max(away, Math.abs(worldGaze(d.out).x - target.x)); }));
       if (away > 0.1) glances++;
       d.setProsody({ type: 'phrase-end', punct: '.', pause: 0.4 });
       ({ t } = run(d, 0.3, t));
       // eye contact again: back at the lookAt target (within the micro-saccades)
-      expect(Math.abs(d.out.gazeX - target.x)).toBeLessThan(0.06);
+      expect(Math.abs(worldGaze(d.out).x - target.x)).toBeLessThan(0.06);
     }
     expect(glances).toBeGreaterThan(0);
     expect(glances).toBeLessThan(8);

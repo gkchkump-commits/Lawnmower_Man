@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ANIM_KEYS, BLINK_CLOSE, BLINK_HOLD, BLINK_TOTAL, Director, STATES, blinkCurve, createAnimState, lipSmooth, worldGaze,
 } from '../../../src/avatar/director.js';
+import { GAZE_DEG } from '../../../src/avatar/eyes.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -182,10 +183,12 @@ describe('Director', () => {
     d.lookAt(1, -1);
     const { a } = run(d, 1);
     const g = worldGaze(a);
-    // the world gaze is on the target (0.85, -0.75), not beyond it (no eye + head overshoot)
+    // the world gaze is on the target (14.6 deg right, 8 deg down), not beyond it (no eye + head
+    // overshoot)
     expect(g.x).toBeGreaterThan(0.8);
     expect(g.x).toBeLessThan(0.88);
-    expect(g.y).toBeLessThan(-0.7);
+    expect(g.y * GAZE_DEG.y).toBeLessThan(-7.5);
+    expect(g.y * GAZE_DEG.y).toBeGreaterThan(-8.5);
     expect(a.headYaw).toBeGreaterThan(0.05);     // the head follows a little
     expect(a.gazeX).toBeGreaterThan(0.5);        // the eyes do most of it
     expect(a.gazeX).toBeLessThan(g.x);

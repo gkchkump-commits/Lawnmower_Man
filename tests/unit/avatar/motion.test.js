@@ -212,8 +212,8 @@ describe('EyeController', () => {
     expect(r2.at(-1).hx).toBeLessThan(0.6);
   });
 
-  it('GAZE_DEG maps gaze units to degrees of eye rotation (relief iris travel)', () => {
+  it('GAZE_DEG maps gaze units to degrees of eye rotation (relief iris travel, procedural eyeballs)', () => {
     expect(GAZE_DEG.x).toBeCloseTo(17.2, 1);
-    expect(GAZE_DEG.y).toBeCloseTo(6.8, 1);
+    expect(GAZE_DEG.y).toBeCloseTo(12.8, 1);
   });
 });

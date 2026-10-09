@@ -230,10 +230,10 @@ describe('GazeArbiter: cursor priority and eye contact', () => {
     expect(a.source).toBe('face');
     run(20);
     expect(a.source).toBe('glance');
-    // an explicit look away, 8-15 deg (x 14.6 deg, y 5.1 deg per unit), not a tiny wander
+    // an explicit look away, 8-15 deg (x 14.6 deg, y 8 deg per unit), not a tiny wander
     const g = applied.at(-1);
     expect(g).not.toBeNull();
-    const deg = Math.hypot(g[0] * 14.6, g[1] * 5.1);
+    const deg = Math.hypot(g[0] * 14.6, g[1] * 8);
     expect(deg).toBeGreaterThanOrEqual(GAZE_DEFAULTS.glanceMinDeg - 0.5);
     expect(deg).toBeLessThanOrEqual(GAZE_DEFAULTS.glanceMaxDeg + 0.5);
     run(glance);

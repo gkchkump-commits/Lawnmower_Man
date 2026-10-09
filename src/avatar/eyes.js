@@ -16,8 +16,11 @@
 
 import { Spring, minJerk, minJerkVel } from './motion.js';
 
-/** Degrees of eye rotation per gaze unit (relief iris travel: 0.6 / 0.24 iris radii). */
-export const GAZE_DEG = Object.freeze({ x: 17.16, y: 6.78 });
+/**
+ * Degrees of eye rotation per gaze unit: the relief head's iris travel (0.6 / 0.45 iris radii,
+ * iris radius / eyeball radius 0.49) and the procedural head's eyeball rotation agree on these.
+ */
+export const GAZE_DEG = Object.freeze({ x: 17.16, y: 12.77 });
 
 /** Main-sequence saccade duration (s) for an amplitude in degrees. @param {number} a */
 export const saccadeDuration = (a) => (21 + 2.2 * Math.abs(a)) / 1000;

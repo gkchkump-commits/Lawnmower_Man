@@ -33,8 +33,8 @@ export const GAZE_DEFAULTS = Object.freeze({
   dedupe: 0.0015,
 });
 
-/** Degrees of eye rotation per lookAt unit (the director's mapping: 0.85 x 17.2 deg, 0.75 x 6.8 deg). */
-const DEG_PER_UNIT = { x: 14.6, y: 5.1 };
+/** Degrees of world gaze per lookAt unit (the director's mapping: 0.85 x 17.2 deg, 8 deg). */
+const DEG_PER_UNIT = { x: 14.6, y: 8 };
 
 const clamp = (/** @type {number} */ v, lo = -1, hi = 1) => Math.min(hi, Math.max(lo, v));
 

@@ -18,7 +18,7 @@
  * @property {ReturnType<typeof faceAnchors>} face  cheek / chin / nostril-wing centres and radii
  * @property {number} px            world units per plate pixel
  */
-/** @typedef {{ center:[number,number], uv:[number,number], irisR:number, height:number }} EyeRig */
+/** @typedef {{ center:[number,number], uv:[number,number], irisR:number, height:number, discR?:number }} EyeRig  discR: the moving iris disc (iris + glow), set by the head once it has located the painted iris */
 
 /** Tunable magnitudes, fractions of the face height (fh) / mouth half width (hw). */
 export const RIG_LIMITS = {
@@ -26,18 +26,18 @@ export const RIG_LIMITS = {
   wideCornerHw: 0.11,     // corners outward for mouthWide = 1
   wideLipFh: 0.007,       // lips part (teeth show) for wide
   roundCornerHw: 0.34,    // corners inward for mouthRound = 1 (more stretches the cheek grid)
-  roundPushFh: 0.035,     // lips forward for round
-  roundLipFh: 0.015,      // centre parting for round (the lip weights are 0 at the corners)
+  roundPushFh: 0.05,      // lips forward for round
+  roundLipFh: 0.026,      // centre parting for round: with the narrow lens, a round opening
   smileUpFh: 0.032,       // corners up for smile
   smileOutHw: 0.07,
   smileLidFrac: 0.12,     // lower lid squint
   browFh: 0.02,
-  gazeX: 0.6,             // iris shift in iris radii
-  gazeY: 0.24,
+  gazeX: 0.6,             // iris shift in iris radii (gazeX = 1: ~17 deg of eye rotation)
+  gazeY: 0.45,            // (gazeY = 1: ~12.8 deg; the iris slides under the lids, which stay put)
   lidGaze: 0.25,          // upper lid travel (blink units) at gazeY = -1
   breathFh: 0.003,
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
-  teethLiftFh: 0.012,     // upper lip lift for teeth = 1 (the incisors show)
+  teethLiftFh: 0.016,     // upper lip lift for teeth = 1 (the incisors show)
   teethDropFh: 0.004,     // lower lip drop for teeth = 1
   tuckLiftFh: 0.012,      // upper lip lift for tuck (the incisor edge shows over the lower lip)
   tuckRaiseFh: 0.003,     // the lower lip rises to the upper teeth
@@ -48,8 +48,9 @@ export const RIG_LIMITS = {
   teethShift: 0.6,        // the upper incisors follow a lifted upper lip by this fraction
   asymFh: 0.008,          // corner height difference at |mouthAsym| = 1
   // the face moving with the mouth
-  jawUpperLipFh: 0.014,   // the upper lip rises a little as the jaw opens (~15 % of the lower lip: open vowels)
-  roundThick: 0.14,       // rounded (protruded) lips look fuller: the lip texture expands
+  jawUpperLipFh: 0.03,    // the upper lip rises as the jaw opens (~30 % of the lower lip: open vowels; the incisors show)
+  roundThick: 0.22,       // rounded (protruded) lips look fuller: the lip texture expands
+  cornerJawShare: 0.4,    // the commissures drop with this share of the jaw: the opening is a lens, the corners stay closed
   cheekLiftFh: 0.012,     // cheeks / nasolabial folds lift for cheekRaise = 1
   cheekOutFh: 0.004,      // ... and move a little outward
   chinLiftFh: 0.007,      // the chin boss bunches up under pressed lips (mentalis)
@@ -189,6 +190,8 @@ export function rigUniforms(rig, a, u) {
   // over a slightly open jaw (the chin stays down), so a closure never leaks a dark line.
   u.upperLift = lift0 * (1 - press) + L.tuckLiftFh * tuck * fh;
   u.lowerDrop = drop0 * (1 - press - tuck) - (press + tuck) * u.jawDrop - L.tuckRaiseFh * tuck * fh;
+  // (the part of it that closes the lips over the jaw: at the corners it cancels the jaw's share)
+  u.lowerClose = (press + tuck) * u.jawDrop;
   u.lipPush = L.roundPushFh * round * fh;
   // corners: x outward is -x for L, +x for R; asymmetry tilts the mouth a little
   const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
@@ -198,6 +201,16 @@ export function rigUniforms(rig, a, u) {
   u.cornerR = u.cornerR || [0, 0];
   u.cornerL[0] = -out; u.cornerL[1] = up + tilt;
   u.cornerR[0] = out; u.cornerR[1] = up - tilt;
+  // the lens of the opening spans the corners where they are now (narrow for O / U, wide for E)
+  u.lens = u.lens || [1, L.cornerJawShare];
+  u.lens[0] = Math.max(0.35, 1 + out / hw);
+  u.lens[1] = L.cornerJawShare;
+  // the opening at the centre (plate px) for the shading of the lips' inner edges and the cavity
+  const px = 1 / (rig.px ?? 1 / 1168);
+  u.open = u.open || [0, 0, 1];
+  u.open[0] = Math.max(0, u.upperLift) * px;
+  u.open[1] = Math.max(0, u.jawDrop + u.lowerDrop) * px;
+  u.open[2] = u.lens[0];
   // lip texture warp (plate px): x upper thinning, y contact, z lower lip rise, w lower thinning
   // (pressed lips thin, rounded ones fill out: a negative thinning expands the lip texture)
   const thick = L.roundThick * round * (1 - press) * (1 - tuck);

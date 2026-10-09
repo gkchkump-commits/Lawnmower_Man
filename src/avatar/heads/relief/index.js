@@ -4,6 +4,8 @@
 
 import { packWeights, validateMesh, validatePack, withSlash } from '../../pack.js';
 import { RIG_LIMITS, buildRig, rigUniforms } from './rig.js';
+import { mouthRegion, refineMesh } from './refine.js';
+import { irisLayer } from './iris.js';
 import { CAVITY_FRAG, CAVITY_VERT, FACE_FRAG, FACE_VERT } from './shaders.js';
 
 /** @typedef {import('../../types.js').HeadContext} HeadContext */
@@ -58,6 +60,39 @@ export default class ReliefHead {
       t.needsUpdate = true;
     }
     this.rig = buildRig(pack, mesh);
+    // the irises as painted on the plate (the gaze moves them as discs), and the plate with them
+    // painted over: what a moving iris uncovers
+    const iris = irisLayer(plate.image, pack, { lids: f.masksC ? masksC.image : null, aperture: masksB.image });
+    this.iris = iris.eyes;
+    for (const k of /** @type {const} */ (['L', 'R'])) {
+      const e = iris.eyes[k], H = pack.plate.height;
+      // (the gaze travel is in iris radii: the painted iris')
+      Object.assign(this.rig.eyes[k], { uv: [e.cx / pack.plate.width, 1 - e.cy / H], irisR: e.r / H, discR: e.disc / H });
+    }
+    if (iris.canvas) {
+      const t = new THREE.CanvasTexture(iris.canvas);
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.generateMipmaps = true;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.anisotropy = Math.min(8, maxAniso);
+      t.needsUpdate = true;
+      this.textures.sclera = t;
+    }
+    if (iris.canvas && iris.open) {
+      // (DataTexture rows run bottom-up, the open map's top-down)
+      const W = pack.plate.width, H = pack.plate.height;
+      const rows = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) rows.set(iris.open.subarray(y * W, (y + 1) * W), (H - 1 - y) * W);
+      const t = new THREE.DataTexture(rows, W, H, THREE.RedFormat, THREE.UnsignedByteType);
+      t.minFilter = t.magFilter = THREE.LinearFilter;
+      t.generateMipmaps = false;
+      t.unpackAlignment = 1;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.needsUpdate = true;
+      this.textures.open = t;
+    }
     this._buildFace(mesh);
     this._buildCavity(mesh);
     this.group = new THREE.Group();
@@ -79,6 +114,9 @@ export default class ReliefHead {
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
       uMouth: { value: new THREE.Vector3(r.mouthCenter[0], r.mouthCenter[1], r.mouthHalfW) },
+      uLens: { value: new THREE.Vector2(1, RIG_LIMITS.cornerJawShare) },
+      uLowerClose: { value: 0 },
+      uOpen: { value: new THREE.Vector3(0, 0, 1) },
       // jaw hinge and the face regions that move with the mouth (rest geometry; amounts per frame)
       uHinge: { value: new THREE.Vector4(...r.hinge) },
       uHingeK: { value: new THREE.Vector3(RIG_LIMITS.hingeSide, RIG_LIMITS.hingeStretch, RIG_LIMITS.hingeBack) },
@@ -101,8 +139,12 @@ export default class ReliefHead {
     return out;
   }
 
-  _buildFace(mesh) {
+  _buildFace(mesh0) {
     const { THREE, palette } = this.ctx;
+    // the mouth region is refined to ~6 px triangles (smooth lip contours when the mouth moves;
+    // the rest surface is unchanged: new vertices lie on the baked edges)
+    const mesh = refineFaceMesh(mesh0, this.pack);
+    this.meshStats = { vertices: mesh.vertexCount, baked: mesh0.vertexCount, triangles: mesh.indices.length / 3 };
     const n = mesh.vertexCount;
     const W = this.pack.plate.width, H = this.pack.plate.height;
     const geo = new THREE.BufferGeometry();
@@ -132,10 +174,13 @@ export default class ReliefHead {
     this.faceUniforms = {
       ...this._commonUniforms(),
       tPlate: { value: t.plate }, tClosed: { value: t.closed }, tMaskA: { value: t.masksA }, tMaskB: { value: t.masksB },
+      tSclera: { value: t.sclera || t.plate }, tOpen: { value: t.open || t.masksB },
+      uIrisLayer: { value: t.sclera && t.open ? 1 : 0 },
       tMaskC: { value: t.masksC }, uHasLids: { value: this.hasLids ? 1 : 0 },
       uPlateSize: { value: new THREE.Vector2(W, H) },
-      uEyeL: { value: new THREE.Vector4(r.eyes.L.uv[0], r.eyes.L.uv[1], r.eyes.L.irisR, 0) },
-      uEyeR: { value: new THREE.Vector4(r.eyes.R.uv[0], r.eyes.R.uv[1], r.eyes.R.irisR, 0) },
+      // iris discs: centre, radius (iris + glow), 2 px feather (plate heights)
+      uEyeL: { value: new THREE.Vector4(r.eyes.L.uv[0], r.eyes.L.uv[1], r.eyes.L.discR ?? r.eyes.L.irisR, 2 / H) },
+      uEyeR: { value: new THREE.Vector4(r.eyes.R.uv[0], r.eyes.R.uv[1], r.eyes.R.discR ?? r.eyes.R.irisR, 2 / H) },
       uGaze: { value: new THREE.Vector2() }, uBlink: { value: new THREE.Vector2() },
       // pulses radiate from the "third eye" between the brows along the gold circuit lines
       uPulseOrigin: { value: new THREE.Vector2(lm.noseBridge[0] / W, 1 - (lm.noseBridge[1] - 0.06 * this.pack.rig.faceHeight) / H) },
@@ -161,7 +206,7 @@ export default class ReliefHead {
 
   _buildCavity(mesh) {
     const { THREE } = this.ctx;
-    const c = mesh.cavity;
+    const c = refineCavity(mesh.cavity);
     const n = c.vertexCount;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this._toWorld(c.positions, n), 3));
@@ -173,7 +218,7 @@ export default class ReliefHead {
     geo.setAttribute('aLayer', new THREE.BufferAttribute(Float32Array.from(c.layer), 1));
     // distance below the closed-mouth slit (px) for the shadow under the upper lip
     geo.setAttribute('aSlit', new THREE.BufferAttribute(slitDistances(c.positions, n, this.pack.rig.slitLine), 1));
-    geo.setIndex(new THREE.BufferAttribute(Uint16Array.from(c.indices), 1));
+    geo.setIndex(new THREE.BufferAttribute((n > 65535 ? Uint32Array : Uint16Array).from(c.indices), 1));
     geo.computeBoundingSphere();
     const dark = this.pack.mouth?.darkColor ?? [0.06, 0.035, 0.03];
     this.cavityUniforms = {
@@ -231,6 +276,9 @@ export default class ReliefHead {
     f.uFx.value = this.fx;
     f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
     f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
+    f.uLens.value.set(u.lens[0], u.lens[1]);
+    f.uLowerClose.value = u.lowerClose;
+    f.uOpen.value.set(u.open[0], u.open[1], u.open[2]);
     const cu = this.cavityUniforms;
     const H = this.pack.plate.height;
     cu.uTeeth.value = cavityTeeth(a);
@@ -291,6 +339,11 @@ export default class ReliefHead {
     return this._worldOutline(this.pack.visibleOutline ?? this.pack.outline);
   }
 
+  /** What load() measured: the irises as located on the plate (px) and the refined mesh. */
+  info() {
+    return { iris: this.iris ? structuredClone(this.iris) : null, irisLayer: this.faceUniforms?.uIrisLayer.value === 1, mesh: this.meshStats ?? null };
+  }
+
   /** @param {{ palette?: import('../../types.js').HeadPalette, fx?: number }} o */
   setOptions(o) {
     if (o.palette && this.faceUniforms) {
@@ -311,6 +364,37 @@ export default class ReliefHead {
     if (this.textures) Object.values(this.textures).forEach((t) => t.dispose());
     this.group = null;
   }
+}
+
+/**
+ * The face mesh with its mouth region refined (src/avatar/heads/relief/refine.js), in the
+ * mesh.json layout (positions in plate px, weights in 0..weightScale).
+ * @param {any} mesh @param {any} pack
+ */
+export function refineFaceMesh(mesh, pack) {
+  const names = Object.keys(mesh.weights);
+  const attrs = { edge: { data: mesh.edge, size: 1 }, face: { data: mesh.face, size: 1 } };
+  for (const k of names) attrs[`w:${k}`] = { data: mesh.weights[k], size: 1 };
+  const r = refineMesh({ positions: mesh.positions, indices: mesh.indices, attrs }, { inside: mouthRegion(pack), maxLen: 6, levels: 3 });
+  const weights = {};
+  for (const k of names) weights[k] = r.attrs[`w:${k}`];
+  return {
+    ...mesh, vertexCount: r.vertexCount, positions: r.positions, indices: r.indices, edge: r.attrs.edge, face: r.attrs.face, weights,
+  };
+}
+
+/**
+ * The mouth cavity refined the same way (its teeth and interior follow the lips' fine rig).
+ * @param {any} c mesh.cavity
+ */
+export function refineCavity(c) {
+  const names = Object.keys(c.weights || {});
+  const attrs = { uv: { data: c.uvs, size: 2 }, layer: { data: c.layer, size: 1 } };
+  for (const k of names) attrs[`w:${k}`] = { data: c.weights[k], size: 1 };
+  const r = refineMesh({ positions: c.positions, indices: c.indices, attrs }, { inside: () => true, maxLen: 8, levels: 2 });
+  const weights = {};
+  for (const k of names) weights[k] = r.attrs[`w:${k}`];
+  return { ...c, vertexCount: r.vertexCount, positions: r.positions, indices: r.indices, uvs: r.attrs.uv, layer: r.attrs.layer, weights };
 }
 
 /**

@@ -4,6 +4,7 @@
 // settled renders keep the original rest pose exactly.
 import { describe, expect, it } from 'vitest';
 import { Director, worldGaze } from '../../../src/avatar/director.js';
+import { GAZE_DEG } from '../../../src/avatar/eyes.js';
 
 const DEG = 180 / Math.PI;
 
@@ -178,7 +179,7 @@ describe('director motion: gaze', () => {
 
   it('a state change brings a saccade to the new gaze ~0.1-0.35 s later', () => {
     const rec = record({ idleMotion: 0 }, 2, 60, (t, d) => { if (Math.abs(t - 0.5) < 1e-6) d.setState('thinking'); }, ['gazeY', 'headPitch']);
-    const w = rec.gazeY.map((g, i) => g * 6.78 + rec.headPitch[i] * DEG);
+    const w = rec.gazeY.map((g, i) => g * GAZE_DEG.y + rec.headPitch[i] * DEG);
     const start = rec.t.find((t, i) => i > 0 && Math.abs(w[i] - w[i - 1]) > 0.05);
     expect(start - 0.5).toBeGreaterThan(0.1);
     expect(start - 0.5).toBeLessThan(0.4);
@@ -222,9 +223,10 @@ describe('director motion: settled renders keep the original rest pose', () => {
   const GOLDEN = [
     [1, 'idle', 1, [0.00473491783997, 0.00130596389846, -0.00197356822877, 0, 0, 0.462634953207, 0.5, 0, 0, 0]],
     [1, 'idle', 3.3, [0.008808608449, -0.00471671910391, -0.00180718298254, 0, 0, 0.388739533022, 0.5, 0, 0, 0]],
-    [7, 'thinking', 17.25, [0.050693113379, 0.0751568083956, 0.045884551368, 0.42, 0.48, 0.109084258766, 0.648164649335, 0.1, 0, 0]],
+    // (gazeY 0.48 in the original units: 6.78 deg each; now 12.77 deg each, the same iris offset)
+    [7, 'thinking', 17.25, [0.050693113379, 0.0751568083956, 0.045884551368, 0.42, 0.48 * 6.78 / 12.77, 0.109084258766, 0.648164649335, 0.1, 0, 0]],
     [42, 'listening', 0.5, [-0.00112404981207, -0.0380723232657, 0.0306385435295, 0, 0, 0.133474064085, 0.78, 0.18, 0.08, 0]],
-    [3, 'sleep', 5, [0.000401337149336, -0.102549152048, 0.0405902775464, 0, -0.2, 0.317329487817, 0.14, 0, 0, 1]],
+    [3, 'sleep', 5, [0.000401337149336, -0.102549152048, 0.0405902775464, 0, -0.2 * 6.78 / 12.77, 0.317329487817, 0.14, 0, 0, 1]],
   ];
   const KEYS = ['headYaw', 'headPitch', 'headRoll', 'gazeX', 'gazeY', 'breath', 'energy', 'browUp', 'smile', 'blinkL'];
   for (const [seed, state, t, want] of GOLDEN) {

@@ -146,6 +146,11 @@ export function worldGaze(a) {
 }
 
 const ENERGY = { idle: 0.5, listening: 0.78, thinking: 0.62, speaking: 0.55, error: 0.32, sleep: 0.14 };
+/** lookAt(x, y) at +-1 (the stage's edges): this many degrees of world gaze */
+const LOOK_DEG = { x: 0.85 * GAZE_DEG.x, y: 8 };
+/** Settled renders keep the original gaze units (6.78 deg vertically per unit, before the relief's
+ * vertical iris range was widened): the same on-screen pose. */
+const SETTLED_GY = 6.78 / GAZE_DEG.y;
 const WEIGHTED = /** @type {const} */ (['listening', 'thinking', 'speaking', 'error', 'sleep']);
 const WEIGHT_OMEGA = { listening: 8, thinking: 8, speaking: 8, error: 14, sleep: 3.2 };
 /** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
@@ -436,7 +441,7 @@ export class Director {
     // world target (deg) of this sample: interpolate to it over the time since the last one, or
     // jump when it moved far (the saccade does that)
     const t = this._time;
-    const X = nx * 0.85 * GAZE_DEG.x, Y = ny * 0.75 * GAZE_DEG.y;
+    const X = nx * LOOK_DEG.x, Y = ny * LOOK_DEG.y;
     const cur = this._lookSeg ? this._lookAtT(t) : null;
     const far = !cur || Math.hypot(X - cur.x, Y - cur.y) > 1.2;
     const dur = far ? 0 : clamp(t - this._lookLastT, 0, 0.12);
@@ -662,8 +667,9 @@ export class Director {
       const r1 = this.rng(), r2 = this.rng();
       // while speaking the eyes stay mostly on the listener (the glances below replace them)
       const rm = im * (gs === 'speaking' ? 0.4 : 1);
+      // (about +-4.8 deg across, +-2 deg up and down)
       this._saccade.x = (r1 * 2 - 1) * 0.28 * rm;
-      this._saccade.y = (r2 * 2 - 1) * 0.16 * rm;
+      this._saccade.y = ((r2 * 2 - 1) * 2 / GAZE_DEG.y) * rm;
       if (this.rng() < 0.35) { this._saccade.x *= 0.2; this._saccade.y *= 0.2; } // back to centre
       this._saccadeAt = time + 0.6 + this.rng() * 2.2;
       if (!this._look && gs !== 'thinking' && gs !== 'sleep' && im > 0) jump = true;
@@ -704,17 +710,18 @@ export class Director {
     if (gs === 'thinking') {
       // look up and aside (the eyes go with the head's lift there), or down and aside
       const up = this._think.mode !== 'down';
+      // (~7 deg aside; 7 deg up in the head, which lifts too; or 5 deg down)
       const ax = (this._thinkSide * (up ? 0.42 : 0.36) + this._think.mx) * GAZE_DEG.x;
-      const ay = ((up ? 0.48 : -0.42) + this._think.my) * GAZE_DEG.y + (up ? 0.045 : -0.025) * DEG;
+      const ay = (up ? 7 : -5) + this._think.my * GAZE_DEG.y + (up ? 0.045 : -0.025) * DEG;
       const k = look ? 0.6 : 1;
       x = lerp(x, ax, k); y = lerp(y, ay, k);
     }
-    if (gs === 'sleep') { x = 0; y = -0.2 * GAZE_DEG.y - 0.09 * DEG; }
+    if (gs === 'sleep') { x = 0; y = -1.4 - 0.09 * DEG; }
     else { x += this._micro.x * GAZE_DEG.x; y += this._micro.y * GAZE_DEG.y; }
     if (glanceOn) {
       const gk = Math.min(1, ex);
       x += this._glance.x * gk * GAZE_DEG.x;
-      y += this._glance.y * gk * GAZE_DEG.y;
+      y += this._glance.y * gk * 6.78; // (0.3-0.8 deg: a little up or down)
     }
     // ---- pursuit sees the target's velocity ~100 ms late (and never a 12 / 30 Hz staircase)
     const h = this._lookHist;
@@ -849,7 +856,7 @@ export class Director {
     gyT += this._micro.y * (1 - w.sleep);
     this._gx = gxT; this._gy = gyT;
     o.gazeX = clamp(gxT, -1, 1);
-    o.gazeY = clamp(gyT, -1, 1);
+    o.gazeY = clamp(gyT * SETTLED_GY, -1, 1);
     // breathing
     this._breathPhase = (time / 4.2) * Math.PI * 2;
     o.breath = 0.5 - 0.5 * Math.cos(this._breathPhase);

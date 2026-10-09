@@ -25,14 +25,36 @@ uniform vec4 uCheekC;   // cheek centres: L.xy, R.xy (world, rest)
 uniform vec4 uChinC;    // chin boss centre xy, radii xy
 uniform vec4 uAlaC;     // nostril wing centres: L.xy, R.xy
 uniform vec3 uFaceR;    // cheek radii xy, nostril wing radius
+uniform vec3 uMouth;    // mouth centre x, y (world, rest), half width (world)
+uniform vec2 uLens;     // the opening's half width (x mouth half widths: the corners move), the
+                        // share of the jaw drop the commissures take
+uniform float uLowerClose; // the part of uLowerDrop that closes the lips over the jaw (press, tuck)
 
-vec3 applyRig(vec3 p) {
+// The lips part as a lens: fully in the middle, tapering to closed corners (the commissures move
+// together, down by a share of the jaw drop), never as a flat-topped slot running into the
+// corners. lensUp / lensLo: 1 at the centre, 0 at and beyond the (current) corners.
+float lensOf(float u, float e) { return pow(clamp(1.0 - u * u, 0.0, 1.0), e); }
+
+// slitD: rest plate px below the closed-mouth slit (+ below, - above)
+vec3 applyRig(vec3 p, float slitD) {
   // eyelids: upper lids move down, lower lids move up
   p.y += -aW1.y * uLids.x + aW1.z * uLids.y - aW1.w * uLids.z + aW2.x * uLids.w;
   // brows
   p.y += aW2.y * uBrows.x + aW2.z * uBrows.y;
-  // lips
-  p.y += aW0.z * uUpperLift - aW0.y * uLowerDrop;
+  // lips: the upper lip rises in the middle (most under the philtrum); the tissue at the corners
+  // (both lips, close to the slit, fading out beyond the corners) goes down with them by a share
+  // of the jaw drop, the lower lip's own parting tapers the same way
+  float ax = abs(position.x - uMouth.x) / max(1e-4, uMouth.z);
+  float mu = ax / max(1e-4, uLens.x);
+  float lensUp = lensOf(mu, 0.75), lensLo = lensOf(mu, 0.55);
+  float fLo = mix(uLens.y, 1.0, lensLo);
+  float reach = 1.0 - smoothstep(1.05, 1.7, ax);
+  float nearUp = (1.0 - smoothstep(0.0, 28.0, -slitD)) * reach;
+  float nearLo = (1.0 - smoothstep(0.0, 36.0, slitD)) * reach;
+  float lowerFace = aW0.x;                 // (the jaw's weight: the lower lip and below)
+  p.y += aW0.z * uUpperLift * lensUp - (1.0 - lowerFace) * uLens.y * uJawDrop * (1.0 - lensUp) * nearUp;
+  // (its own parting tapers to closed corners; the closure part cancels the jaw's share exactly)
+  p.y -= aW0.y * ((uLowerDrop + uLowerClose) * lensLo - uLowerClose * fLo);
   p.xy += aW0.w * uCornerL + aW1.x * uCornerR;
   p.z += (aW0.y + aW0.z) * uLipPush;
   // the face moving with the mouth: soft regions around landmark centres (all zero at rest, so
@@ -57,7 +79,8 @@ vec3 applyRig(vec3 p) {
   // lips (the lower face lengthens) and swings back the more the farther below the joint it is.
   // (A weighted translation shaped like this avoids the depth-order trouble a large rotation
   // causes in a 2.5D relief.)
-  float j = aW0.x * uJawDrop;
+  // (the lower lip takes the jaw drop only in the middle: at the corners it stays with the upper lip)
+  float j = lowerFace * uJawDrop * (1.0 - (1.0 - fLo) * nearLo);
   float side = smoothstep(0.45, 1.05, abs(position.x - uHinge.x) / uHinge.y);
   float below = clamp((uHinge.z - position.y) / max(1e-4, uHinge.z - uHinge.w), 0.0, 1.0);
   p.y -= j * (1.0 - uHingeK.x * side) * (1.0 + uHingeK.y * below);
@@ -81,7 +104,6 @@ export const FACE_VERT = /* glsl */ `
 ${RIG_CHUNK}
 attribute float aEdge;
 attribute float aSlitD;     // rest px below the closed-mouth slit (+ = below; lip warp)
-uniform vec3 uMouth;        // mouth centre x, y (world, rest), half width (world)
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
@@ -89,7 +111,7 @@ varying float vFace;
 varying vec2 vLip;          // (px below the slit, x across the mouth in half widths)
 void main() {
   vUv = uv;
-  vec3 p = applyRig(position);
+  vec3 p = applyRig(position, aSlitD);
   vUv2 = plateUv(p);
   vEdge = aEdge;
   vFace = aW2.w;
@@ -103,9 +125,12 @@ uniform sampler2D tClosed;
 uniform sampler2D tMaskA;   // r alpha, g gold lines, b sparkle
 uniform sampler2D tMaskB;   // r eye aperture, g eye region, b mouth region
 uniform sampler2D tMaskC;   // r lid coordinate (0.5 + 0.5 w), g upper lid, b occlusion
+uniform sampler2D tSclera;  // the plate with its irises painted over (what a moving iris uncovers)
+uniform sampler2D tOpen;    // r: the plate shows the open eye's inside here (no lid, no lid glow)
+uniform float uIrisLayer;   // 1: tSclera / tOpen exist (the iris moves as a disc); 0: uv warp
 uniform float uHasLids;     // 1 when the pack has masks_c (lid wipe); 0 = legacy cross-fade
 uniform vec2 uPlateSize;    // px
-uniform vec4 uEyeL;         // uv.xy, iris radius (plate heights), -
+uniform vec4 uEyeL;         // iris: uv.xy, disc radius and feather (plate heights)
 uniform vec4 uEyeR;
 uniform vec2 uGaze;         // uv offset of the irises
 uniform vec2 uBlink;
@@ -125,6 +150,7 @@ uniform vec3 uColRim;
 uniform vec3 uColEye;
 uniform vec3 uColGrid;
 uniform vec4 uLipWarp;      // px: upper thinning, contact, lower lip rise, lower thinning
+uniform vec3 uOpen;         // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
@@ -137,9 +163,49 @@ float hash12(vec2 p) {
   return fract((p3.x + p3.y) * p3.z);
 }
 
-// Gaze: the iris (and the glow around it) slides rigidly; the displacement falls off smoothly
-// (separably, gradient < 0.5 so the texture never folds) toward the eye corners and the brow.
-// MediaPipe's lid polygon is tighter than the hologram's visible iris, so no lid mask here.
+// Gaze: the iris (with its pupil and glow) is a disc that slides rigidly inside the open eye;
+// where it uncovers its rest place, the eye white shows (tSclera: the plate with the irises
+// painted over, src/avatar/heads/relief/iris.js, which also located the painted irises: uEyeL/R).
+// Outside the open eye nothing moves: the lids, the lid lines and the eye's outline never follow
+// the gaze, and the pupil stays round. The open eye is the lid coordinate's inside (w > 0, just in
+// from the lid lines; packs without masks_c: the aperture mask).
+float openEye(vec2 uv) {
+  if (uHasLids > 0.5) return smoothstep(0.03, 0.09, texture2D(tMaskC, uv).r * 2.0 - 1.0);
+  return smoothstep(0.3, 0.75, texture2D(tMaskB, uv).r);
+}
+// The moved iris at a texel whose rest source is src. Where the plate shows lid or lid glow at the
+// source (tOpen), its mirror image across the iris' horizontal axis stands in (an iris looks alike
+// all round), else the same radius turned toward the horizontal (which the lids never hide): two
+// thirds, one third, or all the way.
+float seen(vec2 uv) { return smoothstep(0.1, 0.6, texture2D(tOpen, uv).r); }
+vec3 irisTurned(vec4 eye, vec2 asp, float rho, float th, float sx, vec2 gdx, vec2 gdy) {
+  vec2 p = eye.xy + vec2(sx, 0.0) * rho / asp.x;
+  vec3 c = textureGrad(tPlate, p, gdx, gdy).rgb;
+  p = eye.xy + vec2(sx * cos(0.33 * th), sin(0.33 * th)) * rho / asp;
+  c = mix(c, textureGrad(tPlate, p, gdx, gdy).rgb, seen(p));
+  p = eye.xy + vec2(sx * cos(0.67 * th), sin(0.67 * th)) * rho / asp;
+  return mix(c, textureGrad(tPlate, p, gdx, gdy).rgb, seen(p));
+}
+vec3 irisAt(vec2 src, vec4 eye, vec2 asp, vec2 gdx, vec2 gdy) {
+  vec2 dv = (src - eye.xy) * asp;
+  float rho = length(dv);
+  float th = atan(dv.y, abs(dv.x));         // from the horizontal, on its side
+  float side = smoothstep(-0.25, 0.25, dv.x / max(1e-5, rho));
+  vec3 c = mix(irisTurned(eye, asp, rho, th, -1.0, gdx, gdy), irisTurned(eye, asp, rho, th, 1.0, gdx, gdy), side);
+  vec2 mir = vec2(src.x, 2.0 * eye.y - src.y);
+  c = mix(c, textureGrad(tPlate, mir, gdx, gdy).rgb, seen(mir));
+  return mix(c, textureGrad(tPlate, src, gdx, gdy).rgb, seen(src));
+}
+// eye: uv centre, disc radius (plate heights: iris + glow; the fill's rim), feather
+vec3 eyeLayer(vec2 uv, vec4 eye, vec2 gdx, vec2 gdy) {
+  vec2 asp = vec2(uPlateSize.x / uPlateSize.y, 1.0);
+  vec2 src = uv - uGaze;                    // where this texel of the moved iris comes from
+  float inIris = 1.0 - smoothstep(eye.z, eye.z + eye.w, length((src - eye.xy) * asp));
+  vec3 sclera = textureGrad(tSclera, uv, gdx, gdy).rgb;
+  if (inIris <= 0.0) return sclera;
+  return mix(sclera, irisAt(src, eye, asp, gdx, gdy), inIris);
+}
+// (packs whose plate cannot be read back: the old uv warp around the iris)
 vec2 gazeWarp(vec2 uv, vec4 eye) {
   vec2 d = abs(uv - eye.xy) * vec2(uPlateSize.x / uPlateSize.y, 1.0) / eye.z;
   return uGaze * (1.0 - smoothstep(1.05, 2.5, d.x)) * (1.0 - smoothstep(0.95, 1.8, d.y));
@@ -155,7 +221,7 @@ void main() {
   float fw = clamp(fwidth(w), 1e-3, 0.5);     // (derivatives outside any branch)
   float ap = mB.r;
   vec2 suv = vUv;
-  if (mB.g > 0.001) suv -= (vUv.x < 0.5 ? gazeWarp(vUv, uEyeL) : gazeWarp(vUv, uEyeR));
+  if (uIrisLayer < 0.5 && mB.g > 0.001) suv -= (vUv.x < 0.5 ? gazeWarp(vUv, uEyeL) : gazeWarp(vUv, uEyeR));
   // Lips pressed (m b p) or tucked (f v): the lip texture is compressed toward the seam (thinner,
   // rolled-in lips), the rest gap is skipped (the lips meet) and a tucked lower lip rises; rounded
   // lips (a negative thinning) fill out instead. The displacement fades out over ~1.5 lip heights,
@@ -183,7 +249,22 @@ void main() {
   // (mipmapped: a slight negative LOD bias keeps the fine grid crisp when minified)
   vec3 col = texture2D(tPlate, suv, -0.6).rgb;
   if (lipWarp) col = textureGrad(tPlate, suv, gdx, gdy).rgb;
+  if (uIrisLayer > 0.5 && abs(uGaze.x) + abs(uGaze.y) > 1e-6 && mB.g > 0.001) {
+    float open = openEye(vUv);
+    if (open > 0.001) col = mix(col, eyeLayer(vUv, vUv.x < 0.5 ? uEyeL : uEyeR, gdx, gdy), open);
+  }
   col *= 1.0 - 0.14 * contact;    // the line where pressed lips meet
+  // Parted lips: their inner edges roll into the mouth (a soft shadow over the last ~4 px) and
+  // the moist inner lip catches a thin highlight just outside it, instead of a hard cut-out.
+  float openC = uOpen.x + uOpen.y;
+  if (openC > 0.5 && abs(vLip.y) < 1.3 && abs(vLip.x) < 12.0) {
+    float mu = abs(vLip.y) / max(0.05, uOpen.z);
+    float lensAt = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6);
+    float k = smoothstep(0.5, 6.0, openC * lensAt) * mB.b;
+    float ad = abs(vLip.x);
+    col *= 1.0 - 0.55 * k * (1.0 - smoothstep(0.0, 4.5, ad));
+    col += uColLine * 0.16 * k * exp(-pow((ad - 5.5) / 1.8, 2.0)) * (0.4 + 0.6 * mA.g);
+  }
   float baseLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
 
   // Blink = lid wipe. w (baked per pixel) is 0 on the open eye's lid margins, 1 on the closed
@@ -273,7 +354,6 @@ export const CAVITY_VERT = /* glsl */ `
 ${RIG_CHUNK}
 attribute float aLayer;
 attribute float aSlit;
-uniform vec3 uMouth;        // mouth centre x, y (world, rest), half width (world)
 uniform float uPxPerUnit;   // plate px per world unit
 varying vec2 vUvM;
 varying float vLayer;
@@ -283,7 +363,7 @@ void main() {
   vUvM = uv;
   vLayer = aLayer;
   vSlit = aSlit;
-  vec3 p = applyRig(position);
+  vec3 p = applyRig(position, aSlit);
   vTongue = vec2((p.x - uMouth.x) / uMouth.z, aSlit + (position.y - p.y) * uPxPerUnit);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(applyHead(p), 1.0);
 }`;
@@ -297,10 +377,21 @@ uniform float uTongue;     // tongue tip at the teeth (th, l)
 uniform float uTeethShift; // mouth-texture v: the upper incisors follow a lifted upper lip
 uniform float uJawPx;      // jaw drop (plate px)
 uniform vec3 uColLine;
+uniform vec3 uOpen;        // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width
 varying vec2 vUvM;
 varying float vLayer;
 varying float vSlit;
 varying vec2 vTongue;
+
+// Where in the opening a fragment is: 0 at the upper lip's edge, 1 at the lower lip's, and how far
+// from the corners (1 in the middle). The interior is deepest (darkest) in the middle and lit
+// warmly by the lips near their edges; open vowels show the body of the tongue low in the mouth.
+vec2 openingAt() {
+  float mu = abs(vTongue.x) / max(0.05, uOpen.z);
+  float lens = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6);
+  float up = uOpen.x * lens, lo = uOpen.y * lens;
+  return vec2(clamp((vTongue.y + up) / max(1.0, up + lo), 0.0, 1.0), lens);
+}
 
 // Tongue tip: a soft rounded tip between the teeth, just under the upper incisors, riding half
 // way down with the jaw. Warm and dim like the rest of the interior (lit by the gold lips).
@@ -328,6 +419,16 @@ void main() {
     vec3 c = texture2D(tMouth, vUvM - vec2(0.0, uTeethShift)).rgb;
     float shade = mix(0.3, 1.0, smoothstep(0.0, 6.0, vSlit));   // shadow under the upper lip
     c = mix(uDark, c, vis);
+    vec2 op = openingAt();
+    float depth = sin(3.14159 * op.x) * op.y;                   // 0 at the lips, 1 deep inside
+    vec3 lipLight = mix(uDark, uColLine * 0.3, 0.45);
+    float teethLum0 = smoothstep(0.05, 0.25, max(c.r, max(c.g, c.b))) * vis;
+    c = mix(c, lipLight, (1.0 - teethLum0) * 0.22 * (1.0 - smoothstep(0.0, 0.3, depth)));
+    c *= 1.0 - 0.55 * smoothstep(0.15, 0.85, depth);
+    // the body of the tongue, low in an open mouth (dim: it is in the mouth's shadow)
+    float body = smoothstep(0.6, 0.9, op.x) * smoothstep(0.3, 0.7, uJawPx / 30.0) * smoothstep(0.2, 0.7, op.y);
+    vec3 tongueC = mix(vec3(0.07, 0.03, 0.026), uColLine * 0.12, 0.2) * (0.75 + 0.4 * smoothstep(0.75, 1.0, op.x));
+    c = mix(c, tongueC, body * (1.0 - teethLum0) * 0.7);
     // ... and behind the upper incisors' edge
     float teethLum = smoothstep(0.05, 0.25, max(c.r, max(c.g, c.b))) * vis;
     c = mix(c, tg.rgb, tg.a * (1.0 - 0.45 * teethLum));

@@ -318,6 +318,8 @@ export async function createAvatar(canvas, options = {}) {
   const api = {
     /** Name of the head actually in use (after fallbacks). */
     get renderer() { return headName; },
+    /** What the head measured while loading (relief: the located irises, the refined mesh), for tools and tests. */
+    headInfo() { return head?.info?.() ?? null; },
     get state() { return director.state; },
     /** @param {import('./director.js').AvatarState} s */
     setState(s) { director.setState(s); stage.requestRender(); },

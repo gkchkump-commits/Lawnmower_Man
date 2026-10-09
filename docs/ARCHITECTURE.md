@@ -303,7 +303,8 @@ command line — user text only ever travels over stdin; long prompts go in file
     presence: true,              // away > 2 min while idle → sleep; back → wake + greeting expression
     mirrorExpressions: true,     // smile back
     shareWithClaude: false,      // a snapshot (JPEG ≤ 640 px) with every message
-    greet: false,                // hidden prompt so Claude says hello after ≥ 10 min away
+    greeting: 'hello',           // first sight / back after ≥ 2 min: 'hello' (quick spoken line,
+                                 // controller.say), 'claude' (hidden prompt), 'off'
     lookToTalk: false,           // hands-free only listens while the user looks at the screen
   },
 }

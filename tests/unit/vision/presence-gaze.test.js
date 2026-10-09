@@ -10,10 +10,27 @@ import { logLine } from '../../../src/vision/landmarker.js';
 const MIN = 60_000;
 
 describe('PresenceMachine', () => {
-  it('nobody watched before the camera started: someone there right away is not "back"', () => {
+  it('the first face after the camera starts is the first sight: a welcome and a greeting', () => {
     const p = new PresenceMachine({}, 0);
-    expect(p.update(true, 300)).toEqual([{ type: 'back', awayMs: 300, welcome: false, greet: false }]);
+    expect(p.update(true, 300)).toEqual([{ type: 'back', awayMs: 300, first: true, welcome: true, greet: true }]);
     expect(p.update(true, 400)).toEqual([]);
+    // the first sight is used up: a short absence afterwards is neither
+    p.update(false, 500);
+    expect(p.update(true, 30_000)).toEqual([{ type: 'back', awayMs: 29_500, first: false, welcome: false, greet: false }]);
+  });
+
+  it('after a pause (reset without `first`) someone there right away is not "back"', () => {
+    const p = new PresenceMachine({}, 0);
+    p.update(true, 0);
+    p.reset(10 * MIN);
+    expect(p.update(true, 10 * MIN + 300)).toEqual([{ type: 'back', awayMs: 300, first: false, welcome: false, greet: false }]);
+    // turned on again: first sight again (greeting still rate-limited by greetEveryMs)
+    p.markGreeted(0);
+    p.reset(20 * MIN, true);
+    expect(p.update(true, 20 * MIN + 100)[0]).toMatchObject({ first: true, welcome: true, greet: true });
+    p.markGreeted(20 * MIN + 100);
+    p.reset(21 * MIN, true);
+    expect(p.update(true, 21 * MIN + 100)[0]).toMatchObject({ first: true, greet: false });
   });
 
   it('away after 2 minutes while idle (once); back wakes with a welcome', () => {
@@ -24,7 +41,8 @@ describe('PresenceMachine', () => {
     expect(p.update(false, 1000 + 2 * MIN, { idle: true })).toEqual([{ type: 'away', awayMs: 2 * MIN }]);
     expect(p.update(false, 1000 + 3 * MIN, { idle: true })).toEqual([]); // once
     const back = p.update(true, 1000 + 4 * MIN, { idle: true, sleeping: true });
-    expect(back).toEqual([{ type: 'back', awayMs: 4 * MIN, welcome: true, greet: false }]);
+    // 4 minutes away and the first sight's greeting was not marked: greeted again
+    expect(back).toEqual([{ type: 'back', awayMs: 4 * MIN, first: false, welcome: true, greet: true }]);
   });
 
   it('waits for the conversation to be idle before dozing off', () => {
@@ -44,22 +62,26 @@ describe('PresenceMachine', () => {
     expect(p.update(true, 50_000, { sleeping: true })[0]).toMatchObject({ welcome: true });
   });
 
-  it('greets after ≥ 10 minutes away, at most every 30 minutes', () => {
+  it('greets when back after ≥ 2 minutes away, at most every 5 minutes', () => {
     const p = new PresenceMachine({}, 0);
     p.update(true, 0);
+    p.markGreeted(0); // the first sight was greeted
     p.update(false, 1000);
     const b1 = p.update(true, 1000 + 12 * MIN)[0];
-    expect(b1).toMatchObject({ type: 'back', greet: true, welcome: true });
+    expect(b1).toMatchObject({ type: 'back', first: false, greet: true, welcome: true });
     p.markGreeted(1000 + 12 * MIN);
     p.update(false, 1000 + 13 * MIN);
-    expect(p.update(true, 1000 + 25 * MIN)[0].greet).toBe(false); // rate limit
-    p.update(false, 1000 + 26 * MIN);
-    expect(p.update(true, 1000 + 44 * MIN)[0].greet).toBe(true);
-    // the 10-minute threshold itself
+    expect(p.update(true, 1000 + 16 * MIN)[0].greet).toBe(false); // rate limit
+    p.update(false, 1000 + 16 * MIN + 1);
+    expect(p.update(true, 1000 + 19 * MIN)[0].greet).toBe(true);
+    // the 2-minute threshold itself
     const q = new PresenceMachine({}, 0);
     q.update(true, 0);
+    q.markGreeted(-PRESENCE_DEFAULTS.greetEveryMs);
     q.update(false, 0);
     expect(q.update(true, PRESENCE_DEFAULTS.greetAfterMs - 1)[0].greet).toBe(false);
+    q.update(false, PRESENCE_DEFAULTS.greetAfterMs);
+    expect(q.update(true, 2 * PRESENCE_DEFAULTS.greetAfterMs)[0].greet).toBe(true);
   });
 
   it('the absence starts when the face was last seen, not when the tracker gave up on it', () => {

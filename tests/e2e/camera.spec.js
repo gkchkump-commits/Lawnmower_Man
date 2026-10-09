@@ -121,6 +121,9 @@ test.describe('camera (fake camera, mock bridge)', () => {
     expect(st.rate).toBe(12);
     // eye contact: the gaze goes to the face (or one of its short glances away)
     await page.waitForFunction(() => ['face', 'glance'].includes(window.__app.gaze.source));
+    // it sees you for the first time: a quick spoken hello (no Claude turn)
+    await expect(page.locator('#transcript .msg').last()).toContainText(/Good (morning|afternoon|evening)|Up late|night owl|midnight oil/);
+    expect(await page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'claude.send').length)).toBe(0);
     expect(await page.evaluate(() => localStorage.getItem('lawnmower.camera.consent.v1'))).toBe('yes');
     await page.waitForTimeout(400);
     await shot(page, testInfo, 'camera-on');
@@ -208,10 +211,12 @@ test.describe('camera (fake camera, mock bridge)', () => {
     await page.locator('#btn-settings').click();
     const section = page.locator('[data-section="camera"]');
     await expect(section).toBeVisible();
-    for (const label of ['Camera', 'Device', 'Eye contact', 'Notice when I leave', 'Smile back', 'Let Claude see me', 'Say hello when I sit down', 'Listen only when I look']) {
+    for (const label of ['Camera', 'Device', 'Eye contact', 'Notice when I leave', 'Smile back', 'Let Claude see me', 'Greet me', 'Listen only when I look']) {
       await expect(section.locator('.field-label', { hasText: label }).first()).toBeVisible();
     }
     await expect(section.locator('[data-path="camera.enabled"] .switch')).toHaveAttribute('aria-checked', 'false');
+    // the greeting is on by default: the quick spoken hello
+    await expect(section.locator('[data-path="camera.greeting"] button[data-value="hello"]')).toHaveAttribute('aria-checked', 'true');
     await expect(page.locator('#set-camera-deviceId')).toHaveValue('');
     // no camera light in the header while the camera is off
     expect(await page.evaluate(() => getComputedStyle(document.querySelector('.drawer-head h2'), '::after').content)).toBe('none');

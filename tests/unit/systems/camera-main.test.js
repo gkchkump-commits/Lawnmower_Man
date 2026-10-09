@@ -29,7 +29,7 @@ describe('camera settings group', () => {
   it('is off by default, with the documented fields, mirrored in the renderer defaults', () => {
     expect(DEFAULT_SETTINGS.camera).toEqual({
       enabled: false, deviceId: '', followFace: true, presence: true, mirrorExpressions: true,
-      shareWithClaude: false, greet: false, lookToTalk: false,
+      shareWithClaude: false, greeting: 'hello', lookToTalk: false,
     });
     expect(RENDERER_DEFAULTS.camera).toEqual(DEFAULT_SETTINGS.camera);
     expect(defaultSettings('win32').camera.enabled).toBe(false);
@@ -40,7 +40,7 @@ describe('camera settings group', () => {
     const ok = applyPatch(base, { camera: { enabled: true, deviceId: 'a1B2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2', shareWithClaude: true, lookToTalk: true } });
     expect(ok.warnings).toEqual([]);
     expect(ok.settings.camera).toMatchObject({ enabled: true, shareWithClaude: true, lookToTalk: true });
-    const bad = applyPatch(base, { camera: { enabled: 'yes', deviceId: 'bad id\nwith newline', greet: 1, bogus: true } });
+    const bad = applyPatch(base, { camera: { enabled: 'yes', deviceId: 'bad id\nwith newline', greeting: 'shout', bogus: true } });
     expect(bad.settings.camera).toEqual(base.camera);
     expect(bad.warnings).toHaveLength(4);
     expect(bad.warnings.join('\n')).toMatch(/camera\.enabled/);

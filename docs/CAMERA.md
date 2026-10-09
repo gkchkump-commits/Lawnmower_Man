@@ -32,7 +32,7 @@ Each behaviour has its own switch in *Settings › Camera*:
 | **Notice when I leave** (`camera.presence`) | on | Away for more than 2 minutes while nothing is going on (no reply, no typing or mouse use): the avatar dozes off. When you are back it wakes up with a little eyebrow flash and a smile. While you are in view it does not doze off. |
 | **Smile back** (`camera.mirrorExpressions`) | on | When you smile, it smiles back gently. |
 | **Let Claude see me** (`camera.shareWithClaude`) | off | Every message you send, typed or spoken, carries one snapshot of you. |
-| **Say hello when I sit down** (`camera.greet`) | off | When you sit down after 10 minutes or more away, the app sends Claude a short hidden note so it greets you. At most every 30 minutes, never during a reply, never while you type; the chat shows a line saying it happened. The note carries no picture, even with *Let Claude see me* on. |
+| **Greet me** (`camera.greeting`) | Hello | When the camera first sees you after it is turned on, and when you are back after 2 minutes or more away, the avatar greets you, at most every 5 minutes, never during a reply or while you type. **Hello**: a quick spoken line of its own, right away, with no Claude turn ("Good morning!" by time of day the first time, "Welcome back!" later). **Claude**: the app sends Claude a short hidden note so it says hello in its own words (a second or two); the chat shows a line saying it happened, and the note carries no picture, even with *Let Claude see me* on. **Off**: no greeting. Hiding or minimizing the window does not count as being away. |
 | **Listen only when I look** (`camera.lookToTalk`) | off | With *Settings › Voice › Hands-free* on: it only listens while you look at the screen. Speech already in progress is never cut off. |
 | **Device** (`camera.deviceId`) | default camera | Which camera to use. If the chosen one is unplugged, the default camera is used. |
 
@@ -90,7 +90,7 @@ CameraCapture ──(<video>, 640×480)──► FaceTracker ──► Attention
  getUserMedia      VideoFrame, no copy,  module worker:      present/absent    GazeArbiter → avatar.lookAt
  video only        transferred; one      ~320 px bitmap →    (hysteresis),      PresenceMachine → sleep / wake
                    frame in flight       Face Landmarker     centre, distance,  smile back → avatar.setExpression
-                                         (CPU, XNNPACK)      yaw/pitch, look,   greeting → hidden prompt
+                                         (CPU, XNNPACK)      yaw/pitch, look,   greeting → say() / hidden prompt
                                                              smile, talking     look-to-talk → listen gate
 snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► claude.send(text, { images })
                                                                  └► main: ipc-validate → ClaudeSession
@@ -119,7 +119,7 @@ snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► 
   effect"). So the eyes target about (0, 0), lean a little toward where you are (gain 0.35), and
   hold contact for 2.5 to 6.5 s between short glances away. The cursor priority lives here too.
 * `src/vision/presence.js` (pure): away 2 min while idle → sleep; back → welcome; the greeting
-  rule (≥ 10 min away, at most every 30 min).
+  rule (the first sight after the camera starts, or back after ≥ 2 min; at most every 5 min).
 * `src/vision/index.js` (`CameraFeature`) ties it together and implements every setting;
   `src/vision/ui.js` is its DOM side (buttons, the light, the cards, the info block).
 * The WebAssembly runtime of `@mediapipe/tasks-vision` (13 MB) is not committed: the Vite plugin

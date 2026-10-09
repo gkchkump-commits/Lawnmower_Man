@@ -156,6 +156,7 @@ export class Controller extends Emitter {
     this._snapshots = null;
     /** Hands-free may listen (the camera's look-to-talk closes it while the user looks away). */
     this._listenGate = true;
+    this._sayCounter = 0;
   }
 
   // ------------------------------------------------------------------------------------------
@@ -521,6 +522,23 @@ export class Controller extends Emitter {
 
   get listenGate() {
     return this._listenGate;
+  }
+
+  /**
+   * Say a short line of the avatar's own, with no Claude turn (the camera's quick hello): shown
+   * as a reply bubble and spoken. Only when idle, so it never talks over a reply or the user.
+   * @param {string} text @returns {boolean} false when it was not said (busy, empty)
+   */
+  say(text) {
+    const clean = String(text ?? '').trim();
+    if (!clean || !this.isIdle()) return false;
+    const id = `say-${++this._sayCounter}`;
+    this.view.assistantStart?.(id);
+    this.view.assistantDelta?.(id, clean);
+    this.view.assistantEnd?.(id, {});
+    const spoken = toSpeechText(clean);
+    if (spoken && this._ttsWanted()) this.speech.push(spoken, { turnId: null, kind: 'say' });
+    return true;
   }
 
   /** Nothing going on: no reply, no queued message, no speech, no listening, no approval card. */

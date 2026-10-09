@@ -128,6 +128,29 @@ describe('Controller + camera snapshots', () => {
   });
 });
 
+describe("Controller: say() (the camera's quick hello)", () => {
+  it('shows a reply bubble and speaks it, with no Claude turn; then back to idle', async () => {
+    const { c, bridge, view } = setup({ tts: true });
+    await c.start();
+    expect(c.say('Good morning!')).toBe(true);
+    const id = view.of('assistantStart')[0][0];
+    expect(id).toMatch(/^say-/);
+    expect(view.of('assistantDelta')[0].slice(0, 2)).toEqual([id, 'Good morning!']);
+    expect(view.of('assistantEnd')[0][0]).toBe(id);
+    expect(sends(bridge)).toEqual([]);
+    await waitFor(() => c.state === 'speaking');
+    await waitFor(() => c.state === 'idle');
+  });
+
+  it('only when idle, and never empty', async () => {
+    const { c } = setup();
+    await c.start();
+    expect(c.say('   ')).toBe(false);
+    c.sendText('hello');
+    expect(c.say('Hi!')).toBe(false); // a reply is coming
+  });
+});
+
 describe('Controller: hidden prompts (camera greeting)', () => {
   it('no user bubble; a note in the transcript instead; the reply shows as usual', async () => {
     const { c, bridge, view } = setup();
@@ -164,7 +187,7 @@ describe('Controller: hidden prompts (camera greeting)', () => {
   it('with the real camera feature and "Let Claude see me" on, the greeting carries no picture', async () => {
     const { c, bridge, view } = setup();
     await c.start();
-    const settings = deepMerge(DEFAULT_SETTINGS, { camera: { enabled: true, shareWithClaude: true, greet: true } });
+    const settings = deepMerge(DEFAULT_SETTINGS, { camera: { enabled: true, shareWithClaude: true, greeting: 'claude' } });
     const camera = Object.assign(new Emitter(), {
       label: 'Fake Cam', video: null,
       start: async () => { camera.video = { readyState: 4, videoWidth: 640, videoHeight: 480 }; },

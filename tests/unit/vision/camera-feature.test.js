@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Emitter } from '../../../src/app/emitter.js';
 import { withDefaults, deepMerge } from '../../../src/app/settings-defaults.js';
 import { summarizeFaceResult } from '../../../src/vision/attention.js';
-import { CONSENT_KEY, CameraFeature, MIRROR_SMILE, TRACK_RATES, WELCOME, greetingPrompt } from '../../../src/vision/index.js';
+import { CONSENT_KEY, CameraFeature, MIRROR_SMILE, QUICK_GREETINGS, TRACK_RATES, WELCOME, greetingPrompt, quickGreeting } from '../../../src/vision/index.js';
 import { faceResult } from './helpers.js';
 
 const MIN = 60_000;
@@ -75,6 +75,8 @@ function setup(o = {}) {
     sleep: vi.fn(() => { controller.sleeping = true; return true; }),
     noteActivity: vi.fn(() => { controller.sleeping = false; }),
     sendText: vi.fn((text, opts) => { controller.sent.push([text, opts]); return true; }),
+    said: [],
+    say: vi.fn((text) => { if (!controller.idle) return false; controller.said.push(text); return true; }),
   };
   const store = new Map(o.consent ? [[CONSENT_KEY, 'yes']] : []);
   const view = {
@@ -99,6 +101,7 @@ function setup(o = {}) {
     storage: { get: (k) => store.get(k) ?? null, set: (k, v) => store.set(k, v) },
     capture, listCameras: async () => [{ id: 'a', label: 'Fake Cam' }],
     userBusy: () => !!o.userBusy?.(),
+    hour: () => o.hour ?? 10, random: () => 0,
     platform: 'win32', ...clock,
   });
   const set = (patch) => {
@@ -346,6 +349,8 @@ describe('CameraFeature: behaviours', () => {
 
   it('smiles back while the user smiles (mirrorExpressions)', async () => {
     const h = await onWithFace();
+    for (let i = 0; i < 4; i++) h.frame(face()); // the first sight: hello (welcome smile)
+    h.advance(WELCOME.smileMs + 10);
     const smiling = face({ blend: { mouthSmileLeft: 0.85, mouthSmileRight: 0.8 } });
     for (let i = 0; i < 10; i++) h.frame(smiling);
     expect(h.expressions.at(-1)).toEqual({ smile: MIRROR_SMILE, browUp: 0 });
@@ -379,10 +384,9 @@ describe('CameraFeature: behaviours', () => {
     expect(h.controller.sleep).toHaveBeenCalledTimes(1);
   });
 
-  it('greets (opt-in) after ≥ 10 min away: a hidden prompt with a transcript note, rate-limited, never when busy', async () => {
-    const h = await onWithFace({ settings: { camera: { greet: true, shareWithClaude: true } } });
+  it('says a quick hello at the first sight and when the user is back (by default), rate-limited', async () => {
+    const h = await onWithFace({ hour: 9 });
     const away = (minutes) => {
-      for (let i = 0; i < 4; i++) h.frame(face());
       h.frame(null, minutes * MIN);
       h.frame(null, 250);
       h.frame(null, 250);
@@ -390,38 +394,88 @@ describe('CameraFeature: behaviours', () => {
     const back = () => {
       for (let i = 0; i < 4; i++) h.frame(face());
     };
-    away(12);
+    back(); // the camera was just turned on and sees the user
+    expect(h.controller.said).toEqual([QUICK_GREETINGS.morning[0]]);
+    expect(h.controller.sendText).not.toHaveBeenCalled(); // no Claude turn
+    expect(h.expressions.at(-1)).toEqual({ smile: WELCOME.smile, browUp: WELCOME.browUp });
+    away(1); // a short absence: nothing
     back();
+    expect(h.controller.said).toHaveLength(1);
+    away(6); // back after 6 min (and 7 since the hello)
+    back();
+    expect(h.controller.said).toEqual([QUICK_GREETINGS.morning[0], QUICK_GREETINGS.back[0]]);
+    away(3); // 3 min away, but the last hello was 3 min ago: rate limit
+    back();
+    expect(h.controller.said).toHaveLength(2);
+    away(40); // busy (a reply runs): no hello
+    h.controller.idle = false;
+    back();
+    expect(h.controller.said).toHaveLength(2);
+    // greeting off: nothing, but the welcome after a long absence still shows
+    h.controller.idle = true;
+    h.set({ camera: { greeting: 'off' } });
+    away(40);
+    back();
+    expect(h.controller.said).toHaveLength(2);
+  });
+
+  it('hides and shows of the window do not count as being away; turning the camera on again does', async () => {
+    const h = await onWithFace();
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.said).toHaveLength(1);
+    h.feat.setVisible(false);
+    h.advance(20 * MIN);
+    h.feat.setVisible(true);
+    await h.flush();
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.said).toHaveLength(1); // restored: no hello
+    h.set({ camera: { enabled: false } });
+    h.set({ camera: { enabled: true } });
+    await h.flush();
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.said).toHaveLength(2); // turned on again: hello
+  });
+
+  it("greeting 'claude': a hidden prompt with a transcript note, never with a picture", async () => {
+    const h = await onWithFace({ settings: { camera: { greeting: 'claude', shareWithClaude: true } } });
+    for (let i = 0; i < 4; i++) h.frame(face());
     expect(h.controller.sendText).toHaveBeenCalledTimes(1);
-    const [text, opts] = h.controller.sent[0];
+    const [first, o1] = h.controller.sent[0];
+    expect(first).toBe(greetingPrompt(1, true));
+    expect(o1.note).toMatch(/camera sees you/);
+    h.frame(null, 12 * MIN);
+    h.frame(null, 250);
+    h.frame(null, 250);
+    for (let i = 0; i < 4; i++) h.frame(face());
+    expect(h.controller.sendText).toHaveBeenCalledTimes(2);
+    const [text, opts] = h.controller.sent[1];
     expect(text).toBe(greetingPrompt(12));
     expect(opts).toMatchObject({ source: 'camera', hidden: true });
     expect(opts.note).toMatch(/back after 12 min/);
     expect(h.controller.provider.wants(opts)).toBe(false); // even with "Let Claude see me" on
-    // again 15 min later: rate limit (30 min)
-    away(15);
-    back();
-    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
-    // after the rate limit, but a reply is running: no greeting
-    away(20);
-    h.controller.idle = false;
-    back();
-    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
-    // greet off: nothing
-    h.controller.idle = true;
-    h.set({ camera: { greet: false } });
-    away(40);
-    back();
-    expect(h.controller.sendText).toHaveBeenCalledTimes(1);
+    expect(h.controller.said).toEqual([]);
   });
 
-  it('no greeting while the user is typing or Claude has a setup problem', async () => {
+  it('quickGreeting: time of day for the first sight, back / long time no see otherwise', () => {
+    const at = (hour, pick = 0) => quickGreeting({ first: true, awayMs: 0, hour, pick: () => pick });
+    expect(at(6)).toBe(QUICK_GREETINGS.morning[0]);
+    expect(at(13)).toBe(QUICK_GREETINGS.afternoon[0]);
+    expect(at(19)).toBe(QUICK_GREETINGS.evening[0]);
+    expect(at(2)).toBe(QUICK_GREETINGS.night[0]);
+    expect(at(23.5)).toBe(QUICK_GREETINGS.night[0]);
+    expect(at(9, 0.999)).toBe(QUICK_GREETINGS.morning.at(-1));
+    expect(quickGreeting({ first: false, awayMs: 5 * MIN, hour: 9, pick: () => 0.5 })).toBe(QUICK_GREETINGS.back[2]);
+    expect(quickGreeting({ first: false, awayMs: 45 * MIN, hour: 9, pick: () => NaN })).toBe(QUICK_GREETINGS.backLong[0]);
+  });
+
+  it('no greeting while the user is typing; the Claude greeting also not with a setup problem', async () => {
     let typing = true;
-    const h = await onWithFace({ settings: { camera: { greet: true } }, userBusy: () => typing });
+    const h = await onWithFace({ settings: { camera: { greeting: 'claude' } }, userBusy: () => typing });
     h.frame(null, 11 * MIN);
     h.frame(null, 250);
     for (let i = 0; i < 4; i++) h.frame(face());
     expect(h.controller.sendText).not.toHaveBeenCalled();
+    expect(h.controller.said).toEqual([]);
     typing = false;
     h.controller.claudeProblem = { kind: 'auth' };
     h.frame(null, 2000);

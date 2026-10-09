@@ -83,7 +83,7 @@ export const SECTIONS = [
       { type: 'toggle', path: 'camera.presence', label: 'Notice when I leave', hint: 'Dozes off when you are away, wakes up when you are back' },
       { type: 'toggle', path: 'camera.mirrorExpressions', label: 'Smile back' },
       { type: 'toggle', path: 'camera.shareWithClaude', label: 'Let Claude see me', hint: 'A snapshot goes with every message you send' },
-      { type: 'toggle', path: 'camera.greet', label: 'Say hello when I sit down', hint: 'After 10+ minutes away, Claude greets you' },
+      { type: 'segmented', path: 'camera.greeting', label: 'Greet me', options: [['off', 'Off'], ['hello', 'Hello'], ['claude', 'Claude']], hint: 'When it first sees you and when you are back. Claude = a personal hello from Claude (a short reply)' },
       { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free mode listens only while you look at the screen' },
     ],
   },

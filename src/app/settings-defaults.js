@@ -59,7 +59,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     presence: true,
     mirrorExpressions: true,
     shareWithClaude: false,
-    greet: false,
+    greeting: 'hello', // 'off' | 'hello' (quick spoken hello) | 'claude' (Claude says hello)
     lookToTalk: false,
   },
 });

@@ -5,7 +5,8 @@
 //     followFace         eye contact through the GazeArbiter (a moving cursor still wins)
 //     presence           away > 2 min while idle → sleep; back → wake with a brow raise + smile
 //     mirrorExpressions  a gentle smile back when the user smiles
-//     greet              back after ≥ 10 min → a short hidden prompt so Claude says hello
+//     greeting           the first sight after the camera starts, or back after ≥ 2 min →
+//                        'hello': a quick spoken hello; 'claude': a hidden prompt, Claude says hello
 //     lookToTalk         hands-free only listens while the user looks at the screen
 //   and the pictures for Claude: shareWithClaude (every message) or the 📷 one-shot, through the
 //   controller's snapshot provider.
@@ -35,11 +36,43 @@ export const WELCOME = Object.freeze({ browUp: 0.7, browMs: 700, smile: 0.55, sm
 export const CONSENT_KEY = 'lawnmower.camera.consent.v1';
 
 /**
- * The hidden prompt of the camera greeting. It goes to Claude only; the transcript shows a note.
- * @param {number} minutes
+ * The hidden prompt of the 'claude' greeting. It goes to Claude only; the transcript shows a note.
+ * @param {number} minutes away (ignored for the first sight) @param {boolean} [first] the camera
+ *   just started and sees the user for the first time
  */
-export function greetingPrompt(minutes) {
-  return `(Automatic note from the Lawnmower Man app, not typed by the user: the camera shows that the user just sat back down at the computer after about ${minutes} minutes away. Greet them briefly and warmly, in one short spoken sentence. You don't need to mention the camera.)`;
+export function greetingPrompt(minutes, first = false) {
+  const what = first
+    ? 'the camera was just turned on and sees the user at the computer'
+    : `the camera shows that the user just sat back down at the computer after about ${minutes} minutes away`;
+  return `(Automatic note from the Lawnmower Man app, not typed by the user: ${what}. Greet them briefly and warmly, in one short spoken sentence. You don't need to mention the camera.)`;
+}
+
+/** Lines of the quick 'hello' greeting (no Claude turn): by time of day for the first sight. */
+export const QUICK_GREETINGS = Object.freeze({
+  morning: ['Good morning!', 'Morning! Good to see you.', 'Good morning, there you are.'],
+  afternoon: ['Good afternoon!', 'Hi there! Good afternoon.', 'Hey, good afternoon.'],
+  evening: ['Good evening!', 'Hey, good evening.', 'Evening! Nice to see you.'],
+  night: ['Hi! Up late, huh?', 'Hey there, night owl.', 'Hi! Burning the midnight oil?'],
+  back: ['Welcome back!', "Hey, you're back.", 'Good to see you again.', 'There you are!'],
+  backLong: ["Welcome back! It's been a while.", 'Hey, long time no see!', 'Oh, hi! Welcome back.'],
+});
+
+/**
+ * The quick hello for a presence 'back' event. Pure; `pick` is the random source (0..1).
+ * @param {{ first: boolean, awayMs: number, hour: number, pick?: () => number }} o
+ */
+export function quickGreeting(o) {
+  const g = QUICK_GREETINGS;
+  let list;
+  if (o.first) {
+    const h = ((Math.floor(Number(o.hour)) % 24) + 24) % 24;
+    list = h >= 5 && h < 12 ? g.morning : h >= 12 && h < 18 ? g.afternoon : h >= 18 && h < 23 ? g.evening : g.night;
+  } else {
+    list = o.awayMs >= 30 * 60_000 ? g.backLong : g.back;
+  }
+  const r = Number((o.pick || Math.random)());
+  const i = Number.isFinite(r) ? Math.floor(Math.min(0.999999, Math.max(0, r)) * list.length) : 0;
+  return list[i];
 }
 
 /**
@@ -82,6 +115,8 @@ export class CameraFeature extends Emitter {
    * @param {() => boolean} [d.userBusy]        e.g. the user is typing (no greeting then)
    * @param {string} [d.platform]
    * @param {() => number} [d.now]
+   * @param {() => number} [d.hour]     local hour 0..23 (the quick hello's time of day)
+   * @param {() => number} [d.random]   0..1 (which quick hello)
    * @param {(fn: () => void, ms: number) => any} [d.setTimeout]
    * @param {(id: any) => void} [d.clearTimeout]
    */
@@ -96,6 +131,10 @@ export class CameraFeature extends Emitter {
     this._createTracker = d.createTracker || (() => d.tracker || new FaceTracker());
     this.attention = d.attention || new AttentionTracker();
     this.presence = d.presence || new PresenceMachine({}, this._now());
+    this._hour = d.hour || (() => new Date().getHours());
+    this._random = d.random || Math.random;
+    /** The next face in view is the first since the camera was turned on (the avatar says hello). */
+    this._firstPending = true;
     this._capture = d.capture || captureSnapshot;
     this._listCameras = d.listCameras || (() => listCameras());
     this._storage = d.storage || browserStorage();
@@ -239,6 +278,7 @@ export class CameraFeature extends Emitter {
   // lifecycle
 
   _begin() {
+    this._firstPending = true;
     if (this._storage.get(CONSENT_KEY) === 'yes') {
       this._start();
       return;
@@ -293,7 +333,9 @@ export class CameraFeature extends Emitter {
     if (this.camera.deviceId && this.camera.deviceId === this._settings.camera?.deviceId) this._fallbackWarned = '';
     this.state = 'on';
     this.attention.reset(this._now());
-    this.presence.reset(this._now());
+    // first sight after the camera was turned on: hello; after a pause (window hidden) the user
+    // simply carries on, the hidden time does not count as being away
+    this.presence.reset(this._now(), this._firstPending);
     this._render();
     this.refreshDevices(); // labels are known now
     this._startTracking(gen);
@@ -404,8 +446,10 @@ export class CameraFeature extends Emitter {
       if (ev.type === 'away') {
         if (s.presence) ctl.sleep?.();
       } else if (ev.type === 'back') {
-        if (s.presence && ev.welcome) this._welcome(t);
-        if (s.greet && ev.greet) this._greet(ev.awayMs, t);
+        if (ev.first) this._firstPending = false;
+        const mode = s.greeting ?? 'hello';
+        const greeted = mode !== 'off' && ev.greet && this._greet(ev, t, mode);
+        if ((s.presence && ev.welcome) || greeted) this._welcome(t);
       }
     }
     // someone is there: keep the avatar awake (it dozes after a while without any input)
@@ -431,19 +475,29 @@ export class CameraFeature extends Emitter {
     this._applyExpression();
   }
 
-  /** @param {number} awayMs @param {number} t */
-  _greet(awayMs, t) {
+  /**
+   * Say hello: the quick spoken line, or (mode 'claude') a hidden prompt so Claude does.
+   * @param {{ awayMs: number, first: boolean }} ev @param {number} t @param {'hello'|'claude'} mode
+   * @returns {boolean} greeted
+   */
+  _greet(ev, t, mode) {
     const ctl = this.d.controller;
     // never during a turn, while listening, with a card open, or while the user types
-    if (!ctl.isIdle?.() || ctl.claudeProblem || (ctl.claudeStatus && ctl.claudeStatus.status && !['ready', 'busy'].includes(ctl.claudeStatus.status))) return;
-    if (this.d.userBusy?.()) return;
-    const minutes = Math.max(1, Math.round(awayMs / 60_000));
-    const sent = ctl.sendText(greetingPrompt(minutes), {
-      source: 'camera',
-      hidden: true,
-      note: `You're back after ${minutes} min, so the camera asked Claude to say hello.`,
-    });
-    if (sent) this.presence.markGreeted(t);
+    if (!this._idle() || this.d.userBusy?.()) return false;
+    let done = false;
+    if (mode === 'claude') {
+      if (ctl.claudeProblem || (ctl.claudeStatus && ctl.claudeStatus.status && !['ready', 'busy'].includes(ctl.claudeStatus.status))) return false;
+      const minutes = Math.max(1, Math.round(ev.awayMs / 60_000));
+      done = ctl.sendText(greetingPrompt(minutes, ev.first), {
+        source: 'camera',
+        hidden: true,
+        note: ev.first ? 'The camera sees you, so it asked Claude to say hello.' : `You're back after ${minutes} min, so the camera asked Claude to say hello.`,
+      });
+    } else {
+      done = !!ctl.say?.(quickGreeting({ first: ev.first, awayMs: ev.awayMs, hour: this._hour(), pick: this._random }));
+    }
+    if (done) this.presence.markGreeted(t);
+    return done;
   }
 
   _idle() {

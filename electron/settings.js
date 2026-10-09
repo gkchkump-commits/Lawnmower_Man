@@ -64,7 +64,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     presence: true, // doze off when you are away, wake up when you are back
     mirrorExpressions: true, // smile back
     shareWithClaude: false, // a snapshot with every message you send
-    greet: false, // say hello when you sit down after 10+ minutes away (a hidden prompt)
+    // greet you when it first sees you and when you are back: 'hello' = a quick spoken hello
+    // (instant, no Claude turn), 'claude' = a short hidden prompt so Claude says hello, 'off'
+    greeting: 'hello',
     lookToTalk: false, // hands-free mode: only listen while you look at the screen
   },
 });
@@ -81,7 +83,7 @@ export const WIN32_HOTKEYS = Object.freeze({
 });
 
 /** Version written into settings.json (top-level "version"); bump when a migration is added. */
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 
 /** @param {string} [platform] */
 export function defaultHotkeys(platform = process.platform) {
@@ -103,6 +105,9 @@ export function defaultSettings(platform = process.platform) {
  * Upgrade a parsed settings file written by an older version (mutates `raw`).
  * v1 → v2 (Windows only): hotkeys that still hold the old Ctrl+Alt defaults move to the new
  * Windows defaults; shortcuts the user chose are kept.
+ * v2 → v3: camera.greet (a boolean, off by default, so it never greeted anyone) becomes
+ * camera.greeting: a greeting that was switched on keeps asking Claude ('claude'); otherwise the
+ * new default, the quick spoken hello.
  * @param {Record<string, any>} raw @param {number} fromVersion @param {string} platform
  * @returns {string[]} what changed (for the log)
  */
@@ -115,6 +120,12 @@ export function migrateSettings(raw, fromVersion, platform) {
         notes.push(`hotkeys.${name}: ${legacy} → ${raw.hotkeys[name]} (Ctrl+Alt shortcuts swallow AltGr characters on Windows)`);
       }
     }
+  }
+  if (fromVersion < 3 && isPlainObject(raw.camera) && 'greet' in raw.camera) {
+    const on = raw.camera.greet === true;
+    delete raw.camera.greet;
+    if (raw.camera.greeting === undefined) raw.camera.greeting = on ? 'claude' : 'hello';
+    notes.push(`camera.greet: ${on} → camera.greeting: ${raw.camera.greeting}`);
   }
   return notes;
 }
@@ -269,7 +280,7 @@ const SCHEMA = {
     presence: bool(),
     mirrorExpressions: bool(),
     shareWithClaude: bool(),
-    greet: bool(),
+    greeting: oneOf(['off', 'hello', 'claude']),
     lookToTalk: bool(),
   },
 };

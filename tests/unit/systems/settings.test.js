@@ -230,6 +230,22 @@ describe('Windows hotkey defaults (WIN-5: Ctrl+Alt = AltGr)', () => {
     expect(new SettingsStore({ dir, platform: 'win32' }).load().hotkeys.toggleChat).toBe('CommandOrControl+Alt+C');
   });
 
+  it('v2 → v3: the old camera.greet (off by default) becomes camera.greeting; a greeting that was on keeps asking Claude', () => {
+    const file = path.join(dir, 'settings.json');
+    fs.writeFileSync(file, JSON.stringify({ version: 2, camera: { enabled: true, greet: false } }));
+    const s1 = new SettingsStore({ dir, platform: 'win32' }).load();
+    expect(s1.camera).toMatchObject({ enabled: true, greeting: 'hello' });
+    expect(s1.camera.greet).toBeUndefined();
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(onDisk.version).toBe(SETTINGS_VERSION);
+    expect(onDisk.camera.greet).toBeUndefined();
+    fs.writeFileSync(file, JSON.stringify({ version: 2, camera: { greet: true } }));
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().camera.greeting).toBe('claude');
+    // a v3 file is left alone
+    fs.writeFileSync(file, JSON.stringify({ version: 3, camera: { greeting: 'off' } }));
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().camera.greeting).toBe('off');
+  });
+
   it('does not touch hotkeys on other platforms (but stamps the version)', () => {
     const file = path.join(dir, 'settings.json');
     fs.writeFileSync(file, JSON.stringify({ hotkeys: { toggleChat: 'CommandOrControl+Alt+C' } }));

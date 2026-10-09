@@ -225,6 +225,22 @@ The Kokoro v1.0 export used here has a `duration` output, so these are **real pe
 times**. If an engine only reports the total duration, phonemes are spread across the audible
 span, weighted by class: vowels and diphthongs get the longest slots, stops the shortest.
 
+**Aligned with the audio.** Kokoro's audio runs ahead of the times its durations give. Measured
+on real clips (`af_heart`, `am_michael`, six sentences each, speeds 0.8 / 1.0 / 1.35), acoustic
+onsets after a pause, the level dip of m / b / p between vowels and the cross-correlation of the
+timeline's openness with the level envelope all came 47-62 ms early: about one 25 ms frame plus
+one frame scaled by 1 / speed. Both backends therefore shift the timeline by
+`kokoro_audio_lead(speed)` (50 ms at speed 1, `visemes.py`). Afterwards (median, 12 clips):
+
+| | before | after |
+|---|---|---|
+| closure (m b p between vowels): level dip vs segment centre | -54 ms | -5 ms |
+| onset after a pause: sound vs first segment | -46 ms | +5 ms |
+| openness / level cross-correlation lag | -50 ms | 0 ms |
+
+(negative = the sound comes before the timeline). The PyTorch backend uses the same model and gets
+the same shift; it was not measured separately.
+
 ### 2.2 Fake mode
 
 `python -m lawnmower_voice --fake` needs no models:
@@ -240,9 +256,13 @@ Without `--token` or `LAWNMOWER_VOICE_TOKEN`, a token is generated and included 
 `src/audio/lipsync.js` samples the timeline at the playback clock with a 50 ms visual lead and
 blends neighbouring visemes with the renderer's coarticulation model (`src/audio/articulation.js`,
 dominance functions): closures (`PP`) and tucks (`FF`) stay crisp even when they are only 50 ms
-long, rounding (`O`, `U`) is anticipated by up to ~120 ms, long vowels count as stressed and open
-the jaw a little more, and the measured loudness scales the jaw. The 14 viseme ids above are the
-whole interface; nothing here needs the server to change.
+long, and rounding (`O`, `U`) is anticipated by up to ~120 ms. The renderer also analyses the
+clip's own audio (`src/audio/prosody.js`): its loudness envelope opens the jaw (stressed, louder
+syllables wider), its pitch drives nods, brows, phrase-final lowering and breaths, and a
+phrase-final sound rests where the voice really stops. The 14 viseme ids and the WAV are the
+whole interface. Measured end to end with `tools/visual/lipsync-align.mjs` on real Kokoro clips,
+the rendered mouth now leads the sound by ~35 ms at closures (it trailed by ~12 ms before), which
+the display's own latency (one to two frames) brings close to zero on screen.
 
 When the local voice is not running, the system voice speaks and there is no timeline: the
 renderer predicts one from the words (`src/audio/g2p.js`) and anchors it on the voice's word

@@ -54,6 +54,8 @@ mean absolute RGB error.
 | `w`, `h` | canvas size (CSS px); `ui=0` hides the controls; `stats=1` shows fps/draw calls |
 | `follow=1` | eyes follow the mouse |
 | `press tuck teeth tongue asym` | the speech mouth channels (AnimState `mouthPress` …) |
+| `cheek chin nostril` | the face moving with the mouth (AnimState `cheekRaise`, `chinRaise`, `nostrilFlare`) |
+| `expr=<0..2>` | expressiveness of the speech motion (settings `avatar.expressiveness`) |
 | `vis=<sil\|PP\|FF\|TH\|DD\|kk\|CH\|SS\|RR\|aa\|E\|I\|O\|U>` | one viseme's mouth shape (explicit sliders still win) |
 | `say=<text>&t=<s>` | the system-voice lip-sync path run deterministically to `t` seconds (a scripted voice with word boundaries); `bounds=0`, `rate`, `voiceTempo` (1.1), `jitter` (0.15), `latency` (0.06), `caption=1` (shows the word being said) |
 

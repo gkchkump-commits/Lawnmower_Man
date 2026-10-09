@@ -277,6 +277,7 @@ command line — user text only ever travels over stdin; long prompts go in file
     particles: 1.0,              // density multiplier 0..2
     bloom: 1.0,                  // strength multiplier 0..2
     followCursor: true,
+    expressiveness: 1.0,         // 0..2: how much speech moves the head, brows and face (nods, glances, brows)
   },
   window: {
     sizePreset: 'medium',        // small 300x450, medium 400x600, large 560x840 (avatar area; chat panel extra)
@@ -328,13 +329,16 @@ avatar.setMouth({ jaw, wide, round, press, tuck, teeth, tongue })
                                  // tongue: tongue tip at the teeth (th l)
 avatar.setSpeechLevel(level)     // 0..1 loudness envelope (drives glow/energy)
 avatar.setProsody(cue | cue[])   // speech prosody from the lip-sync: { type: 'accent'|'emphasis'|
-                                 // 'phrase-start'|'phrase-end', strength?, punct?, friendly? } →
-                                 // small nods, brow raises (emphasis, questions), phrase-end blinks,
-                                 // micro-smiles after friendly sentences
+                                 // 'phrase-start'|'phrase-end'|'inhale', strength?, punct?, friendly?,
+                                 // fall?, rise? (final pitch movement, semitones), pause? (s), lead? (s) } →
+                                 // small nods, brow raises (emphasis, questions), final lowering,
+                                 // phrase-end blinks, glances, breaths, micro-smiles after friendly sentences
+avatar.setIntonation({ pitch, voiced }) // the local voice's pitch, semitones re the speaker's usual
+                                 // one (src/audio/prosody.js): the head and brows follow it a little
 avatar.setExpression({ smile, browUp }) // 0..1 (the camera: smile back, wake-up greeting)
 avatar.blink()
 avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); lookAt(null) releases
-avatar.setOptions(partial)       // quality/particles/bloom/colors at runtime
+avatar.setOptions(partial)       // quality/particles/bloom/colors/expressiveness (0..2) at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)
 avatar.advance(dt, { render })   // tests / harness: step a scripted clock with live dynamics
@@ -361,7 +365,10 @@ export default class Head {
 `jawOpen, mouthWide, mouthRound, mouthPress, mouthTuck, mouthTeeth, mouthTongue, mouthAsym (-1..1, lips a
 little lopsided while talking), smile, blinkL, blinkR (0 open → 1 closed), gazeX, gazeY (-1..1),
 browUp, headYaw, headPitch, headRoll (radians, small), breath (0..1 cycle), speech (0..1 loudness),
-energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights)`.
+energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights), cheekRaise,
+chinRaise, nostrilFlare (0..1, the face moving with the mouth: cheeks with spread vowels and
+smiles, the chin under pressed lips, the nostrils on a breath in; 0 at rest)`. A head that does not
+know a channel ignores it.
 
 ## 6. Voice server — `voice/` (Python 3.12, FastAPI + uvicorn)
 
@@ -382,7 +389,7 @@ Errors, including unexpected 500s, are JSON `{error, code}` and carry the CORS h
 |---|---|---|
 | `GET /health` | — | `{ ok, version, device: { cuda: bool, name, capability: "12.0", vramTotalMB, vramFreeMB }, stt: { backend, model, device, loaded, error? }, tts: { backend, device, loaded, voices: [..], error? } }` |
 | `POST /stt` | body = WAV (PCM16 mono, any rate) — or raw little-endian float32 mono with header `X-Sample-Rate`; query `language` optional | `{ text, language, durationSec, processingMs }` |
-| `POST /tts` | JSON `{ text, voice?, speed? }` | `{ sampleRate, audioB64 /* WAV PCM16 mono */, durationSec, processingMs, visemes: [{ start, end, viseme }] or null }` |
+| `POST /tts` | JSON `{ text, voice?, speed? }` | `{ sampleRate, audioB64 /* WAV PCM16 mono */, durationSec, processingMs, visemes: [{ start, end, viseme }] or null }` — viseme times are seconds of the returned audio, aligned with the sound (Kokoro's duration-derived times are shifted by its measured lead, docs/VOICE.md §2.1) |
 | `GET /voices` | — | `[{ id, name, lang, gender }]` |
 | `POST /warmup` | — | `{ ok }` (loads models) |
 

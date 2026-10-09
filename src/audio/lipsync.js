@@ -21,6 +21,7 @@ import {
   toShape,
 } from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
+import { springStep } from '../avatar/motion.js';
 import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms, warmUpAnalysis } from './prosody.js';
 import { base64ToBytes, decodeWav } from './wav.js';
 
@@ -75,8 +76,57 @@ function segmentsFor(tl) {
   return s;
 }
 
-/** Default visual lead: the mouth shapes a sound slightly before it is heard. */
-export const VISEME_LEAD = 0.05;
+/**
+ * Default visual lead: the mouth shapes a sound slightly before it is heard. (58 ms: 50 ms of
+ * lead plus the ~8 ms more the director's mouth springs take to get under way.)
+ */
+export const VISEME_LEAD = 0.058;
+
+/**
+ * Smooth maximum of two values (dB): exact where they are equal (a steady vowel), within `d`
+ * below the larger one when they are far apart (an onset), with no corner where they cross.
+ * @param {number} a @param {number} b @param {number} [d]
+ */
+export function smoothMax(a, b, d = 0.5) {
+  const h = 0.5 * (a - b);
+  return 0.5 * (a + b) + Math.sqrt(h * h + d * d) - d;
+}
+
+/**
+ * The playback clock as the mouth samples it. AudioContext time advances in audio-callback
+ * blocks (~10 ms on Windows), so per frame it steps 10 or 20 ms at 60 Hz and not at all in a
+ * third of the frames at 144 Hz. This clock advances by the frame time and is pulled toward the
+ * reported time by at most 2 ms per frame (a phase-locked loop), never steps backwards, never
+ * runs more than one callback block (12 ms) ahead of the reported time (an audio stall or a
+ * paused clock: it waits) and re-syncs when it is far behind (> 30 ms).
+ */
+export class PlaybackClock {
+  constructor() {
+    this.key = null;
+    this.t = 0;
+    this.started = false;
+  }
+
+  /**
+   * @param {any} key the clip (a new one restarts the clock) @param {number} reported its
+   *   playback time as the player reports it @param {number} dt seconds since the last sample
+   */
+  sample(key, reported, dt) {
+    if (key !== this.key || !this.started) {
+      this.key = key;
+      this.t = reported;
+      this.started = reported > 0;
+      return this.t;
+    }
+    const prev = this.t;
+    const pred = prev + Math.max(0, dt);
+    const err = reported - pred;
+    if (err > 0.03) this.t = reported;
+    else this.t = pred + clamp(err * (1 - Math.exp(-Math.max(0, dt) / 0.1)), -0.002, 0.002);
+    this.t = Math.max(prev, Math.min(this.t, reported + 0.012));
+    return this.t;
+  }
+}
 
 /** Pitch frames analysed per update at most (~25 µs each), and how far ahead of playback. Even
  * at 30 fps that is 6x faster than the clip plays, so the cues' look-ahead fills within frames. */
@@ -232,8 +282,9 @@ export function countSyllables(word) {
 // System voice (Web Speech): plan time driven by word boundaries
 // ---------------------------------------------------------------------------------------------
 
-/** Plan seconds the mouth runs ahead of a word boundary (visual lead). */
-const BOUNDARY_LEAD = 0.035;
+/** Plan seconds the mouth runs ahead of a word boundary (visual lead; it includes the ~15 ms the
+ * director's mouth springs take to get under way). */
+export const BOUNDARY_LEAD = 0.05;
 /** Errors larger than this (plan s) jump instead of catching up. */
 const SNAP = 0.35;
 
@@ -479,6 +530,10 @@ export class LipSync {
     this._now = deps.now || (() => (globalThis.performance?.now?.() ?? Date.now()) / 1000);
     this._freq = new Float32Array(1024);
     this._sm = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0 };
+    /** velocities of the audio-analysis smoothing springs */
+    this._smV = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0 };
+    /** the playback clock the timeline is sampled at (smooths the audio callback blocks) */
+    this.clock = new PlaybackClock();
     /** @type {SpeechTrack|null} */
     this.track = null;
     this._trackClip = null;
@@ -666,20 +721,22 @@ export class LipSync {
     let into = null;
     if (cur && cur.kind === 'audio') {
       const tl = cur.clip.visemes;
+      const time = this.clock.sample(cur.clip, cur.time, dt);
       const prevT = cur.clip === this._prevClip ? this._prevT : NaN;
       const cs = tl && tl.length ? this._clipState(cur) : null;
       const st = cs?.st;
       if (st) {
         // the clip's own analysis: the loudness envelope drives the jaw, the pitch the prosody
-        const tt = cur.time + VISEME_LEAD;
-        st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
+        const tt = time + VISEME_LEAD;
+        st.a.advanceTo(Math.max(time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
         if (st.a.complete && !st.learned) {
           st.learned = true;
           this._learnPitch(st.a);
         }
-        const m = mouthFromVisemes(st.tl, cur.time, { prevT, segs: st.segs });
-        // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it)
-        const e = Math.max(st.a.energyAt(tt - 0.005), st.a.energyAt(tt + 0.015));
+        const m = mouthFromVisemes(st.tl, time, { prevT, segs: st.segs });
+        // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it;
+        // a smooth max, so the jaw target has no corner where the two taps cross)
+        const e = smoothMax(st.a.energyAt(tt - 0.005), st.a.energyAt(tt + 0.015));
         m.jaw = clamp01(m.jaw * energyJaw(e));
         target = { ...m, level: clamp01((st.a.energyAt(tt) + 38) / 30) };
         source = 'visemes';
@@ -687,13 +744,13 @@ export class LipSync {
         into = st.prosody.intonation(tt);
       } else if (tl && tl.length) {
         const level = dbToUnit(toDb(this.player.level()), -50, -14);
-        const m = mouthFromVisemes(tl, cur.time, { prevT });
+        const m = mouthFromVisemes(tl, time, { prevT });
         // louder syllables open the jaw a little more, a dip in the audio a little less
         m.jaw = clamp01(m.jaw * (0.78 + 0.4 * level));
         target = { ...m, level };
         source = 'visemes';
         // (a clip whose analysis is being prepared gets its cues from it in a moment)
-        if (!cs?.preparing) cues = this._clipCues(cur.clip, tl, cur.time + VISEME_LEAD);
+        if (!cs?.preparing) cues = this._clipCues(cur.clip, tl, time + VISEME_LEAD);
       } else {
         const lvl = this.player.level();
         const level = dbToUnit(toDb(lvl), -50, -14);
@@ -705,7 +762,7 @@ export class LipSync {
         source = 'audio';
       }
       this._prevClip = cur.clip;
-      this._prevT = cur.time;
+      this._prevT = time;
     } else if (cur && cur.kind === 'speech' && this.track && cur.clip === this._trackClip) {
       const tr = this.track;
       tr.speed = (tr.rate || 1) * this.speedFactor(tr.rate);
@@ -722,19 +779,24 @@ export class LipSync {
     } else {
       target = { ...SIL, level: 0 };
     }
-    // Timeline sources are already smooth (dominance blending): only take the frame steps off.
-    // Audio analysis is noisy: open fast, close a little slower.
-    const sm = this._sm;
-    const step = (key, tauUp, tauDown) => {
-      const tau = target[key] > sm[key] ? tauUp : tauDown;
-      sm[key] += (target[key] - sm[key]) * (1 - Math.exp(-Math.max(0, dt) / tau));
+    // Timeline sources are already smooth (dominance blending) and the director springs every
+    // channel: they pass through as they are. Audio analysis is noisy: a spring that opens fast
+    // and closes a little slower (velocity-continuous, unlike a one-pole lag).
+    const sm = this._sm, sv = this._smV;
+    const h = Math.max(0, dt);
+    const spring = (key, omega) => {
+      const st = { x: sm[key], v: sv[key] };
+      springStep(st, target[key], omega, h);
+      sm[key] = st.x;
+      sv[key] = st.v;
     };
     const audio = source === 'audio';
     for (const k of CHANNELS) {
-      if (audio || source === 'none') step(k, 0.03, 0.06);
-      else step(k, 0.008, 0.008);
+      if (audio || source === 'none') spring(k, target[k] > sm[k] ? 60 : 40);
+      else { sm[k] = target[k]; sv[k] = 0; }
     }
-    sm.level += (target.level - sm.level) * (1 - Math.exp(-Math.max(0, dt) / 0.08));
+    spring('level', 25);
+    sm.level = clamp01(sm.level);
     // intonation: follows the voiced pitch, holds over a short unvoiced sound, relaxes in a pause
     const k = (tau) => 1 - Math.exp(-Math.max(0, dt) / tau);
     if (into?.voiced) {

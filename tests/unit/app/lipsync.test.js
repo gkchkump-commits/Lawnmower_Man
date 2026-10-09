@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  AUDIO_BANDS, CHANNELS, LipSync, SpeechTrack, VISEME_SHAPES, countSyllables, cuesFromVisemes, mixShapes,
+  AUDIO_BANDS, BOUNDARY_LEAD, CHANNELS, LipSync, SpeechTrack, VISEME_SHAPES, countSyllables, cuesFromVisemes, mixShapes,
   mouthFromAudio, mouthFromVisemes, normalizeVisemes, planSpeech, visemeIndexAt, visemeShape,
 } from '../../../src/audio/lipsync.js';
 import { LEAD_IN, REST } from '../../../src/audio/articulation.js';
@@ -269,7 +269,8 @@ describe('LipSync driver', () => {
   };
 
   it('uses visemes when the clip has them, with every mouth channel', () => {
-    const ls = new LipSync({ player: player({ kind: 'audio', time: 0.2, clip: { visemes: TL } }), now: () => 0 });
+    // (mid-"aa", clear of the PP's anticipation even with the visual lead)
+    const ls = new LipSync({ player: player({ kind: 'audio', time: 0.17, clip: { visemes: TL } }), now: () => 0 });
     let m;
     for (let i = 0; i < 30; i++) m = ls.update(1 / 60, i / 60);
     expect(m.source).toBe('visemes');
@@ -446,7 +447,7 @@ describe('a voice that starts late (after the 0.6 s fallback)', () => {
     const onsets = w.map((x, k) => ({ t: 1.5 + x.t0 - w[0].t0, ci: x.start, k }));
     tr.boundary(onsets[0].t, { charIndex: onsets[0].ci });
     tr.update(1 / 60, 1.5 + 1 / 60);
-    expect(Math.abs(tr.p - (w[0].t0 + 0.035))).toBeLessThan(0.03);
+    expect(Math.abs(tr.p - (w[0].t0 + BOUNDARY_LEAD))).toBeLessThan(0.03);
     let next = 1;
     let frozen = 0;
     let longest = 0;

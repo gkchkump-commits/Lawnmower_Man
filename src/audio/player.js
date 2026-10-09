@@ -118,8 +118,7 @@ export class AudioPlayer extends Emitter {
     if (!p) return null;
     let time;
     if (p.kind === 'audio' && this.ctx) {
-      const latency = (this.ctx.outputLatency || 0) + (this.ctx.baseLatency || 0);
-      time = Math.max(0, this.ctx.currentTime - p.startAt - latency);
+      time = Math.max(0, this._heardTime() - p.startAt);
     } else {
       time = Math.max(0, this._now() - p.startAt);
     }
@@ -127,6 +126,44 @@ export class AudioPlayer extends Emitter {
     const cur = { clip: p.clip, kind: p.kind, time };
     if (p.buffer) cur.buffer = p.buffer;
     return cur;
+  }
+
+  /**
+   * The context time being heard right now. getOutputTimestamp() says which context time the
+   * device was playing at which performance.now(); extrapolated to now, that is free of the
+   * audio-callback blocks currentTime advances in (~10 ms on Windows) and already includes the
+   * output latency. Without it: currentTime minus the latency, smoothed (the browser re-estimates
+   * outputLatency at run time; a median over ~1 s keeps that from jolting the mouth).
+   */
+  _heardTime() {
+    const ctx = /** @type {AudioContext} */ (this.ctx);
+    const now = globalThis.performance?.now?.();
+    if (typeof ctx.getOutputTimestamp === 'function' && Number.isFinite(now)) {
+      try {
+        const ts = ctx.getOutputTimestamp();
+        if (ts && ts.performanceTime > 0 && ts.contextTime > 0) {
+          const heard = ts.contextTime + Math.max(0, now - ts.performanceTime) / 1000;
+          // (a device that reports nonsense falls back to currentTime)
+          if (heard <= ctx.currentTime + 0.05 && heard >= ctx.currentTime - 1) return heard;
+        }
+      } catch { /* fall back */ }
+    }
+    return ctx.currentTime - this._latency(ctx);
+  }
+
+  /** Output + base latency, a running median of the last ~16 readings (one per 64 ms). @param {AudioContext} ctx */
+  _latency(ctx) {
+    const raw = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+    const L = this._lat || (this._lat = { v: [], at: -Infinity, med: raw });
+    const t = ctx.currentTime;
+    if (t - L.at >= 0.064 || t < L.at) {
+      L.at = t;
+      L.v.push(raw);
+      if (L.v.length > 16) L.v.shift();
+      const sorted = [...L.v].sort((a, b) => a - b);
+      L.med = sorted[sorted.length >> 1];
+    }
+    return L.med;
   }
 
   /**

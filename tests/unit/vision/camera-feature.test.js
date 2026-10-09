@@ -217,6 +217,27 @@ describe('CameraFeature: turning the camera on and off', () => {
     expect(h.feat.trackingError).toBe('');
   });
 
+  it('no dozing off while the user types or uses the mouse, even when the camera cannot see the face', async () => {
+    const h = await onWithFace();
+    for (let i = 0; i < 4; i++) h.frame(face());
+    // the face is lost (camera to the side, dark room) while the user keeps typing for 3 minutes
+    for (let i = 0; i < 4 * 180; i++) {
+      if (i % 4 === 0) h.controller.lastActivityAt = h.now(); // a key every second
+      h.frame(null, 250);
+    }
+    expect(h.controller.sleep).not.toHaveBeenCalled();
+    // the typing stops: it dozes off about 2 minutes later, once
+    const stoppedAt = h.controller.lastActivityAt;
+    let sleptAt = null;
+    for (let i = 0; i < 4 * 180; i++) {
+      h.frame(null, 250);
+      if (sleptAt === null && h.controller.sleep.mock.calls.length) sleptAt = h.now();
+    }
+    expect(h.controller.sleep).toHaveBeenCalledTimes(1);
+    expect(sleptAt - stoppedAt).toBeGreaterThanOrEqual(2 * MIN);
+    expect(sleptAt - stoppedAt).toBeLessThan(2 * MIN + 1000);
+  });
+
   it('warns once that the chosen camera is missing, not on every restore; again after it worked', async () => {
     const h = setup({ consent: true, settings: { camera: { deviceId: 'desk' } } });
     let plugged = false;

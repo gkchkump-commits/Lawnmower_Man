@@ -540,6 +540,11 @@ export class Controller extends Emitter {
     return true;
   }
 
+  /** When the user last typed, clicked, moved the pointer or talked (the controller's clock). */
+  get lastActivityAt() {
+    return this._lastActivity;
+  }
+
   /** Pointer/keyboard activity: wakes the avatar and postpones sleep. */
   noteActivity() {
     this._lastActivity = this._now();

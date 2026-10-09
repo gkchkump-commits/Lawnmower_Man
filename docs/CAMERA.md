@@ -29,7 +29,7 @@ Each behaviour has its own switch in *Settings › Camera*:
 | Setting | Default | What happens |
 |---|---|---|
 | **Eye contact** (`camera.followFace`) | on | The eyes look at you. A moving mouse cursor still wins for about 1.5 s, then the gaze comes back to you. Contact is broken now and then by a short glance away, like people do. |
-| **Notice when I leave** (`camera.presence`) | on | Away for more than 2 minutes while nothing is going on: the avatar dozes off. When you are back it wakes up with a little eyebrow flash and a smile. While you are in view it does not doze off. |
+| **Notice when I leave** (`camera.presence`) | on | Away for more than 2 minutes while nothing is going on (no reply, no typing or mouse use): the avatar dozes off. When you are back it wakes up with a little eyebrow flash and a smile. While you are in view it does not doze off. |
 | **Smile back** (`camera.mirrorExpressions`) | on | When you smile, it smiles back gently. |
 | **Let Claude see me** (`camera.shareWithClaude`) | off | Every message you send, typed or spoken, carries one snapshot of you. |
 | **Say hello when I sit down** (`camera.greet`) | off | When you sit down after 10 minutes or more away, the app sends Claude a short hidden note so it greets you. At most every 30 minutes, never during a reply, never while you type; the chat shows a line saying it happened. The note carries no picture, even with *Let Claude see me* on. |

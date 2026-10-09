@@ -396,8 +396,11 @@ export class CameraFeature extends Emitter {
     const wasPresent = this.attention.state.present;
     const wasLooking = this.attention.state.looking;
     const att = this.attention.update(o.obs, t);
+    // typing or using the mouse is presence too: the camera may just not see the face (set up
+    // to the side, a dark room, a closed shutter)
+    const quiet = !(t - (ctl.lastActivityAt ?? -Infinity) < this.presence.o.sleepAfterMs);
 
-    for (const ev of this.presence.update(att.present, t, { idle: this._idle(), sleeping: !!ctl.sleeping, lastSeen: att.lastSeen })) {
+    for (const ev of this.presence.update(att.present, t, { idle: this._idle() && quiet, sleeping: !!ctl.sleeping, lastSeen: att.lastSeen })) {
       if (ev.type === 'away') {
         if (s.presence) ctl.sleep?.();
       } else if (ev.type === 'back') {

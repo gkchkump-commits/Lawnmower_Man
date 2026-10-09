@@ -575,7 +575,7 @@ export class Director {
     const cheekT = clamp01((0.55 * o.mouthWide * (1 - 0.6 * o.jawOpen) + 0.3 * o.mouthTeeth) * faceK * w.speaking + 0.9 * o.smile);
     // pressed lips bunch the chin up a little (mentalis); tucks and puckers less. It rises over
     // ~60 ms, so it does not pump with every m / b / p.
-    const chinT = clamp01((0.5 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
+    const chinT = clamp01((0.58 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
     const nostrilT = clamp01(inhale * faceK);
     const cS = this._s.cheek, chS = this._s.chin, nS = this._s.nostril;
     o.cheekRaise = clamp01(sp(cS, cheekT, cheekT > cS.x ? 26 : 18));
@@ -838,7 +838,7 @@ export class Director {
     o.browUp = browT;
     const faceK = 0.4 + 0.6 * Math.min(ex, 1.5);
     o.cheekRaise = clamp01((0.55 * o.mouthWide * (1 - 0.6 * o.jawOpen) + 0.3 * o.mouthTeeth) * faceK * w.speaking + 0.9 * o.smile);
-    o.chinRaise = clamp01((0.5 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
+    o.chinRaise = clamp01((0.58 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
     o.nostrilFlare = 0;
     const sleepClose = smooth01(w.sleep * 1.15);
     o.blinkL = sleepClose;

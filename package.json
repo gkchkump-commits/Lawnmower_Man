@@ -7,6 +7,7 @@
     "name": "gkchkump-commits",
     "url": "https://github.com/gkchkump-commits"
   },
+  "license": "MIT",
   "homepage": "https://github.com/gkchkump-commits/Lawnmower_Man",
   "repository": {
     "type": "git",
@@ -97,6 +98,10 @@
       {
         "from": "THIRD_PARTY_NOTICES.md",
         "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
       }
     ],
     "asar": true,

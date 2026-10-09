@@ -189,3 +189,7 @@ Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawn
 ## Credits
 
 Third-party models, assets and libraries are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The procedural head is derived from the Lee Perry-Smith head scan by Infinite-Realities (CC BY 3.0).
+
+## License
+
+Lawnmower Man is open source under the [MIT License](LICENSE). The bundled third-party models and assets keep their own licenses (Apache-2.0, CC BY 3.0, …), listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

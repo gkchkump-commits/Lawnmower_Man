@@ -420,6 +420,60 @@ describe('sync with a voice at its own tempo', () => {
   });
 });
 
+describe('a voice that starts late (after the 0.6 s fallback)', () => {
+  const TEXT = 'I can help you write code, answer questions about your files, or just talk about your day.';
+
+  it('its real onstart re-anchors the guessed start: the mouth follows the voice, not the guess', () => {
+    const tr = new SpeechTrack(planSpeech(TEXT), { speed: 1, now: 0 });
+    runTrack(tr, 0, 1.5);
+    expect(tr.mode).toBe('free'); // the fallback guessed at 0.6 s
+    expect(tr.p).toBeGreaterThan(LEAD_IN + 0.5);
+    tr.begin(1.5); // the voice really starts now
+    runTrack(tr, 1.5, 2.0);
+    expect(Math.abs(tr.p - (LEAD_IN + 0.035 + 0.5))).toBeLessThan(0.06);
+    // a second onstart, or one on time, changes nothing
+    const p = tr.p;
+    tr.begin(2.0);
+    expect(tr.p).toBe(p);
+  });
+
+  it('its first boundary pulls a guessed run back to that word, without a long freeze', () => {
+    const plan = planSpeech(TEXT);
+    const w = plan.words;
+    const tr = new SpeechTrack(plan, { speed: 1, now: 0 });
+    runTrack(tr, 0, 1.5);
+    // the voice starts at 1.5 s (no onstart) and reports every word at the plan's tempo
+    const onsets = w.map((x, k) => ({ t: 1.5 + x.t0 - w[0].t0, ci: x.start, k }));
+    tr.boundary(onsets[0].t, { charIndex: onsets[0].ci });
+    tr.update(1 / 60, 1.5 + 1 / 60);
+    expect(Math.abs(tr.p - (w[0].t0 + 0.035))).toBeLessThan(0.03);
+    let next = 1;
+    let frozen = 0;
+    let longest = 0;
+    runTrack(tr, 1.5 + 2 / 60, 3.5, (t) => {
+      for (; next < onsets.length && onsets[next].t <= t; next++) tr.boundary(onsets[next].t, { charIndex: onsets[next].ci });
+      const vp = w[0].t0 + (t - 1.5); // where the voice is in the plan
+      const talking = w.some((x) => vp >= x.t0 && vp < x.t1);
+      frozen = talking && tr.p === tr.pPrev ? frozen + 1 : 0;
+      longest = Math.max(longest, frozen);
+    });
+    expect(longest).toBeLessThanOrEqual(6); // the guess had run ahead: it froze while the voice talked
+  });
+
+  it('no tempo is learned from a start that was only guessed', () => {
+    const player = Object.assign(new Emitter(), { current: null, level: () => 0, spectrum: () => false, sampleRate: 48000 });
+    let t = 0;
+    const ls = new LipSync({ player, now: () => t });
+    const clip = { kind: 'speech', text: TEXT, rate: 1 };
+    player.current = { kind: 'speech', clip, time: 0 };
+    player.emit('start', clip);
+    for (; t < 3; t += 1 / 60) ls.update(1 / 60, t); // never an onstart, never a boundary
+    player.current = null;
+    player.emit('end', clip, { stopped: false });
+    expect(ls.speedFactor(1)).toBe(1);
+  });
+});
+
 describe('a file name in a sentence', () => {
   it('the mouth keeps moving through "package dot json" (one boundary per space-separated token)', () => {
     const text = 'Open package.json and add a start script.';

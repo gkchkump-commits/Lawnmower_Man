@@ -191,6 +191,7 @@ export class SpeechTrack {
     this.anchor = { p: 0, t: o.now ?? 0 };
     this.created = o.now ?? 0;
     this.began = NaN;           // wall time the voice started
+    this.guessed = false;       // began is only the fallback's guess (no onstart, no boundary yet)
     this.confirmed = -1;        // last word whose boundary arrived (or was given up on)
     this.boundaries = 0;
     /** @type {{ k: number, t: number }|null} */
@@ -203,12 +204,25 @@ export class SpeechTrack {
     this.speedSamples = [];
   }
 
-  /** The voice started speaking (utterance onstart). @param {number} now */
-  begin(now) {
-    if (this.mode !== 'waiting') return;
+  /**
+   * The voice started speaking (utterance onstart). `guessed`: the fallback for a voice that has
+   * not reported its start yet. A real start after a guess (a slow audio device, the engine's
+   * first utterance) re-anchors: the free run was only a guess, so the mouth goes back to rest
+   * at the start of the plan instead of leading the voice for the whole utterance.
+   * @param {number} now @param {boolean} [guessed]
+   */
+  begin(now, guessed = false) {
+    const restart = !guessed && this.guessed && this.mode === 'free' && !this.boundaries;
+    if (this.mode !== 'waiting' && !restart) return;
     this.mode = 'free';
+    this.guessed = guessed;
     this.began = now;
     this.anchor = { p: LEAD_IN + BOUNDARY_LEAD, t: now };
+    if (restart) {
+      this.p = this.pPrev = 0;
+      this._cue = 0;
+      this._cues = [];
+    }
   }
 
   /**
@@ -237,8 +251,14 @@ export class SpeechTrack {
     const k = this.wordIndex(ev);
     if (k < 0) return;
     if (this.lastBoundary && k <= this.lastBoundary.k) return; // repeat (e.g. "42" read as two words)
-    if (this.mode === 'waiting') this.began = now;
     const words = this.plan.words;
+    if (this.mode === 'waiting' || (this.guessed && !this.boundaries)) {
+      // the first sign of the voice: it started now; a guessed start may have run ahead of it
+      this.began = now;
+      this.guessed = false;
+      const at = words[k].t0 + BOUNDARY_LEAD;
+      if (this.p > at) this.p = this.pPrev = at;
+    }
     const lb = this.lastBoundary;
     if (lb && lb.k === k - 1 && !(words[lb.k].pause > 0)) {
       // consecutive words without a planned pause: how fast does this voice really speak?
@@ -269,7 +289,7 @@ export class SpeechTrack {
     this.pPrev = this.p;
     if (this.mode === 'waiting') {
       // a voice that never reports its start: assume it started shortly after the request
-      if (now - this.created > 0.6) this.begin(now);
+      if (now - this.created > 0.6) this.begin(now, true);
       else return;
     }
     let limit = this._limit();
@@ -431,7 +451,8 @@ export class LipSync {
       // a voice without boundary events: learn its tempo from the utterance length
       const wall = this._now() - tr.began;
       const planLen = tr.plan.duration - LEAD_IN;
-      if (!tr.boundaries && Number.isFinite(wall) && wall > 0.4 && planLen > 0.3) this._learn(tr.rate, [planLen / wall], 0.5);
+      // (not from a guessed start: that wall time says nothing about the voice)
+      if (!tr.boundaries && !tr.guessed && Number.isFinite(wall) && wall > 0.4 && planLen > 0.3) this._learn(tr.rate, [planLen / wall], 0.5);
     }
     this.track = null;
     this._trackClip = null;

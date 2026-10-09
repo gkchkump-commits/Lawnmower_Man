@@ -30,7 +30,7 @@ import { clear, h, icon } from './dom.js';
 /** The voice character's hint: what it applies to, with the voice that is speaking now. */
 export const VOICE_FX_HINT = Object.freeze({
   server: 'Applies to the local voice',
-  system: 'Applies to the local voice; the system voice speaking now cannot be changed',
+  system: 'Applies to the local voice, not the system voice speaking now',
 });
 
 /** @type {Array<{ id: string, title: string, fields: Field[] }>} */

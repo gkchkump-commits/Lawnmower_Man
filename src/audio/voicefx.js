@@ -528,6 +528,12 @@ export class VoiceFx {
     this.mixTarget = 0;
     this.character = /** @type {VoiceCharacter} */ ('natural');
     this.amount = 0;
+    // declared up front (not added later by _control / the AGC), so every VoiceFx shares one
+    // hidden class and the hot paths are not deoptimised when they first appear
+    /** @type {number|undefined} long-term carrier pitch (semitones from A4) */
+    this.ltSt = undefined;
+    /** @type {number|undefined} the robot's monotone pitch */
+    this.monoSt = undefined;
     this._resetState();
     this.configure(o);
   }
@@ -538,16 +544,24 @@ export class VoiceFx {
    */
   configure(o = {}) {
     const { character, amount } = normalizeFx({ character: o.character ?? this.character, amount: o.amount ?? this.amount });
+    const prev = { character: this.character, amount: this.amount };
     this.character = character;
     this.amount = amount;
     const active = character !== 'natural' && amount > 0;
     this.mixTarget = active ? 1 : 0;
     if (active) {
       this.target = presetParams(character, amount);
+      const changed = character !== prev.character || amount !== prev.amount;
       // from bypass: start from clean state at the new character (the mix ramp fades it in)
       if (this.mix === 0) {
         this._resetState();
         this.cur = { ...this.target };
+        this.agc = estimateGain(character, amount);
+      } else if (changed && this._asleep) {
+        // between clips (asleep, mix still 1): the next clip starts at the new character's gain,
+        // not the old one's (a robot's +4 dB would make a synth's first syllable too loud). In
+        // the middle of a clip the AGC adapts by itself (~0.3 s): a step of its gain there
+        // would click.
         this.agc = estimateGain(character, amount);
       }
     }

@@ -426,6 +426,29 @@ describe('voicefx: changes are smooth; idle costs nothing', () => {
     expect(rms(again)).toBeGreaterThan(0.3 * rms(SPEECH.subarray(0, 0.5 * SR)));
   });
 
+  it('a character chosen between replies starts the next one at its own loudness (AGC re-seeded)', () => {
+    const W = Math.round(0.3 * SR);
+    const level = (y) => db(rms(y, 0, W) / rms(SPEECH, 0, W));
+    const fresh = (c) => {
+      const fx = new VoiceFx(SR, { character: c, amount: 0.6 });
+      fx.setClip(SPEECH, SR, 0);
+      return level(run(fx, SPEECH));
+    };
+    const switched = (from, to) => {
+      const fx = new VoiceFx(SR, { character: from, amount: 0.6 });
+      fx.setClip(SPEECH, SR, 0);
+      run(fx, SPEECH);
+      run(fx, new Float32Array(SR)); // the reply ends; the effect falls asleep
+      expect(fx.idle).toBe(true);
+      fx.configure({ character: to });
+      fx.setClip(SPEECH, SR, 0);
+      return level(run(fx, SPEECH));
+    };
+    expect(Math.abs(switched('robot', 'synth') - fresh('synth'))).toBeLessThan(1);
+    expect(Math.abs(switched('synth', 'robot') - fresh('robot'))).toBeLessThan(1);
+    expect(Math.abs(switched('vocoder', 'robot') - fresh('robot'))).toBeLessThan(1);
+  });
+
   it('keeps up with real time easily (one core, all characters)', () => {
     const x = SPEECH;
     const seconds = x.length / SR;

@@ -117,6 +117,18 @@ describe('audio prosody', () => {
     expect(cb).toBeLessThan(brow);
   });
 
+  it('a phrase-final lowering starts smoothly: no one-frame jump of the head at the cue', () => {
+    const { d, t } = speaking({ expressiveness: 2 });
+    d.setProsody({ type: 'phrase-end', punct: '.', fall: 5, rise: 0, pause: 0.5 });
+    const rec = [d.out.headPitch];
+    let tt = t;
+    for (let i = 0; i < 40; i++) { tt += 1 / 60; rec.push(d.update(1 / 60, tt).headPitch); }
+    const dp = rec.slice(1).map((v, i) => Math.abs(v - rec[i]));
+    expect(dp[0]).toBeLessThanOrEqual(Math.max(...dp.slice(1)));
+    expect(dp[0]).toBeLessThan(0.003);
+    expect(rec[0] - Math.min(...rec)).toBeGreaterThan(0.01); // it does lower the head
+  });
+
   it('an inhale flares the nostrils and parts free lips, once per pause', () => {
     const { d, t } = speaking();
     d.setProsody({ type: 'inhale', strength: 1 });

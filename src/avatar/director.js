@@ -279,7 +279,7 @@ export class Director {
           this._kick({ at: t, kind: 'nod', amp: 0.8 });
         }
         // final lowering: a falling end settles the head a little, held through the pause
-        if (fall > 1 && p !== '?') this._kick({ at: t - 0.1, kind: 'lower', amp: clamp01((fall - 1) / 4) * (/[.!]/.test(p) ? 1 : 0.6) });
+        if (fall > 1 && p !== '?') this._kick({ at: t, kind: 'lower', amp: clamp01((fall - 1) / 4) * (/[.!]/.test(p) ? 1 : 0.6) });
         if (Number(cue.friendly) > 0) this._kick({ at: t + 0.05, kind: 'smile', amp: clamp01(Number(cue.friendly)) });
         // eye contact again at the end of the phrase
         if (this._glance.until > t) this._glance.until = t;

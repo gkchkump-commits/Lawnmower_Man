@@ -344,8 +344,12 @@ export async function createAvatar(canvas, options = {}) {
     /** @param {{smile?:number, browUp?:number}} e */
     setExpression(e) { director.setExpression(e); stage.requestRender(); },
     blink() { director.blink(); stage.requestRender(); },
-    /** @param {number|null} x @param {number} [y] */
-    lookAt(x, y) { director.lookAt(x, y); stage.requestRender(); },
+    /**
+     * @param {number|null} x @param {number} [y]
+     * @param {'cursor'|'face'|'glance'} [kind] what is looked at (the head goes along with a cursor
+     *   or a face, a glance away is the eyes')
+     */
+    lookAt(x, y, kind) { director.lookAt(x, y, kind); stage.requestRender(); },
     /**
      * Run `fn(dt, time)` at the start of every live frame, before the director (the app's
      * lip-sync tick), so mouth targets, the director and the render share one loop and one dt.

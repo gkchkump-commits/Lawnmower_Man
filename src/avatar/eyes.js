@@ -104,9 +104,10 @@ export class EyeController {
    * Advance by dt to time t.
    * @param {number} dt @param {number} t
    * @param {{ x: number, y: number, vx?: number, vy?: number, reactive?: boolean, now?: boolean,
-   *   headShare?: number }} tg  the target (deg, world); vx / vy its velocity as pursuit sees it
-   *   (deg/s, ~100 ms late); reactive: the avatar is following something (a reaction time);
-   *   now: the avatar's own target just moved (saccade at once, whatever the size)
+   *   headShare?: number, headFollow?: boolean }} tg  the target (deg, world); vx / vy its velocity
+   *   as pursuit sees it (deg/s, ~100 ms late); reactive: the avatar is following something (a
+   *   reaction time); now: the avatar's own target just moved (saccade at once, whatever the size);
+   *   headFollow: the head goes along with it (default: when reactive)
    */
   update(dt, t, tg) {
     const o = this.o;
@@ -179,7 +180,7 @@ export class EyeController {
       this._hGoal = { x: ph.x, y: ph.y, at: ph.at, omega: ph.omega };
       this._pendingHead = null;
     }
-    const follow = !!tg.reactive || this.pursuing;
+    const follow = !!(tg.headFollow ?? tg.reactive) || this.pursuing;
     const g = this._hGoal;
     const settle = 1 - Math.exp(-dt / (follow ? o.headFollowTau : o.headSettle));
     // (a moving target: the head anticipates its motion a little, as pursuit itself does)

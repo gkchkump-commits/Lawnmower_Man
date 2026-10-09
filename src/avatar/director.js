@@ -209,6 +209,8 @@ export class Director {
     this._expr = { smile: 0, browUp: 0 };
     /** @type {null | {x:number,y:number}} the lookAt target (gaze units) */
     this._look = null;
+    /** @type {'cursor'|'face'|'glance'} what lookAt is on */
+    this._lookKind = 'cursor';
     // blink scheduler
     this._nextBlink = 0;
     this._blinkStart = -Infinity;
@@ -236,7 +238,7 @@ export class Director {
     this._lookSeg = null;
     this._lookLastT = -Infinity;
     this._lookHist = { t: new Float64Array(96), x: new Float64Array(96), y: new Float64Array(96), n: 0, i: 0 };
-    this._tg = { x: 0, y: 0, vx: 0, vy: 0, reactive: false, now: false, headShare: 0.3 };
+    this._tg = { x: 0, y: 0, vx: 0, vy: 0, reactive: false, now: false, headShare: 0.3, headFollow: false };
     this.eyes = new EyeController();
     // springs
     /** @type {Record<string, Spring>} */
@@ -436,10 +438,13 @@ export class Director {
   /**
    * Cursor gaze target in canvas space, -1..1 (x right, y up). null releases (idle saccades).
    * Updates may come at any rate (12 Hz camera, 30 Hz cursor): the eyes see a target that moves
-   * continuously between them.
-   * @param {number|null} x @param {number} [y]
+   * continuously between them. `kind`: what is looked at ('cursor', the default; 'face': eye
+   * contact; 'glance': a look away from the user's face). The head goes along with a cursor or a
+   * face; a glance away is the eyes' (the head turns only a little, as with the avatar's own looks).
+   * @param {number|null} x @param {number} [y] @param {'cursor'|'face'|'glance'} [kind]
    */
-  lookAt(x, y) {
+  lookAt(x, y, kind) {
+    this._lookKind = kind === 'glance' ? 'glance' : kind === 'face' ? 'face' : 'cursor';
     if (x === null || x === undefined) {
       if (this._look) this._selfJump = true;
       this._look = null;
@@ -758,8 +763,11 @@ export class Director {
     tg.reactive = !!look && !jump;
     tg.now = jump;
     // the head goes along with a followed target (cursor, face: a 20 deg look ends with ~7 deg of
-    // head, as before the eye controller) more than with the avatar's own looks
-    tg.headShare = look ? HEAD_SHARE_FOLLOW : gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
+    // head, as before the eye controller) more than with the avatar's own looks; a glance away
+    // from the user is the eyes' own look
+    const follow = !!look && this._lookKind !== 'glance';
+    tg.headFollow = follow;
+    tg.headShare = follow ? HEAD_SHARE_FOLLOW : gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
     this.eyes.update(dt, time, tg);
   }
 

@@ -179,7 +179,8 @@ async function boot() {
   app.avatarHost = avatarHost;
   Object.defineProperty(app, 'avatar', { get: () => avatarHost.avatar });
   // where the eyes look: the cursor, or (camera) the user's face — see src/vision/gaze.js
-  const gaze = new GazeArbiter({ apply: (t) => (t ? avatarHost.avatar.lookAt(t[0], t[1]) : avatarHost.avatar.lookAt(null)) });
+  // (the arbiter has decided what the target is when it applies it: cursor, face or glance)
+  const gaze = new GazeArbiter({ apply: (t) => (t ? avatarHost.avatar.lookAt(t[0], t[1], gaze.source ?? 'cursor') : avatarHost.avatar.lookAt(null)) });
   app.gaze = gaze;
   /** @type {CameraFeature|null} the camera (created after the controller) */
   let camera = null;

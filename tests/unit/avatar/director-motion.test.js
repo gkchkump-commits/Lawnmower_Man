@@ -229,6 +229,20 @@ describe('director motion: gaze', () => {
     expect(Math.max(...rec.gazeX.map(Math.abs))).toBeLessThan(1);
   });
 
+  it('a glance away from the user\'s face is the eyes\' look; the head goes along with a cursor there', () => {
+    const yawAt = (kind) => {
+      const rec = record({ idleMotion: 0 }, 2.5, 60, (t, d) => {
+        if (Math.abs(t - 1 / 60) < 1e-6) d.lookAt(0, 0, 'face');
+        if (Math.abs(t - 1) < 1e-6) d.lookAt(0.8, 0, kind);
+      }, ['headYaw']);
+      return rec.headYaw[Math.round(2.0 * 60) - 1] * DEG; // 1 s into the look
+    };
+    const cursor = yawAt('cursor'), glance = yawAt('glance');
+    expect(cursor).toBeGreaterThan(3.5);  // 0.38 of 11.7 deg, most of the way there
+    expect(glance).toBeLessThan(0.65 * cursor);
+    expect(glance).toBeGreaterThan(0.5);   // (the head still turns a little)
+  });
+
   it('idle sway: ~0.8 deg rms yaw over 2 min, moving at ~0.5 deg/s (the documented amplitudes)', () => {
     for (const seed of [1, 2, 3]) {
       const d = new Director({ seed });

@@ -650,6 +650,9 @@ function applyWindowLayout() {
   win.setResizable(true);
   win.setBounds(next);
   win.setResizable(false);
+  // resized mid-drag (Ctrl+wheel, the chat hotkey): the drag goes on with the new size
+  const drag = state.drag;
+  if (drag) drag.start = { x: drag.start.x + next.x - cur.x, y: drag.start.y + next.y - cur.y, width: next.width, height: next.height };
 }
 
 /** Work area of the display the window is on (primary before it exists). */

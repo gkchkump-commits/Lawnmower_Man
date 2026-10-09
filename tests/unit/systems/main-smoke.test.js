@@ -394,6 +394,29 @@ describe('electron/main.js wiring', () => {
     }
   });
 
+  it('a size change during a drag sticks (the drag goes on with the new size)', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true } });
+    win.setBounds({ x: 600, y: 100, width: 400, height: 840 });
+    Object.assign(m.cursor, { x: 700, y: 200 });
+    drag('drag-start');
+    Object.assign(m.cursor, { x: 650, y: 200 });
+    await sleep(40);
+    expect(win.bounds.x).toBe(550);
+    m.listeners.get('lm:window:set-size-preset')(trusted(), 'large'); // Ctrl + wheel over the head
+    const large = windowLayout('large', true, m.display.workArea);
+    await sleep(60);
+    expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: large.width, height: large.height });
+    const x = win.bounds.x;
+    Object.assign(m.cursor, { x: 630, y: 200 }); // still following the cursor, from where it is
+    await sleep(40);
+    expect(win.bounds.x).toBe(x - 20);
+    drag('drag-end');
+    expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: large.width, height: large.height });
+    expect((await invoke('lm:settings:get')).window.sizePreset).toBe('large');
+  });
+
   it('cancel IPC validates the turn id', async () => {
     await expect(invoke('lm:claude:cancel', '../x')).rejects.toThrow(/turn id/);
     expect(await invoke('lm:claude:cancel', 'turn-1-unknown')).toEqual({ cancelled: false, interrupted: false });

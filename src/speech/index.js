@@ -56,6 +56,8 @@ export function createSpeechServices(deps) {
             visemes: normalizeVisemes(r.visemes),
             text,
             durationSec: r.durationSec,
+            // the voice that spoke it: the lip-sync learns each voice's usual pitch separately
+            voice: v.ttsVoice || '',
           };
         } catch (err) {
           if (isAbortError(err)) throw err;

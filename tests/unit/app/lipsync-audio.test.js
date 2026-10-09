@@ -143,6 +143,41 @@ describe('audio prosody through the lip-sync', () => {
   });
 });
 
+describe('the speaker\'s usual pitch', () => {
+  it('starts over when the voice changes (a male voice after a female one is not -10 st)', () => {
+    const player = Object.assign(new Emitter(), { current: null, sampleRate: 48000, level: () => 0.05, spectrum: () => false });
+    let now = 0;
+    const ls = new LipSync({ player, now: () => now });
+    const dt = 1 / 60;
+    const mk = (f, voice) => {
+      const samples = concat(silence(0.1), buzz(0.7, f, 0.2), silence(0.3));
+      return {
+        kind: 'audio', samples, sampleRate: SR, dur: samples.length / SR, text: '', voice,
+        visemes: [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.8, viseme: 'aa' }, { start: 0.8, end: 1.1, viseme: 'sil' }],
+      };
+    };
+    const play = (clip) => {
+      const pitches = [];
+      for (let t = 0; t <= clip.dur + 0.2; t += dt) {
+        now += dt;
+        player.current = t < clip.dur ? { clip, kind: 'audio', time: t } : null;
+        const m = ls.update(dt, now);
+        if (m.intonation.voiced) pitches.push(m.intonation.pitch);
+      }
+      expect(pitches.length).toBeGreaterThan(10); // the voice was heard as voiced
+      return pitches.sort((x, y) => x - y)[pitches.length >> 1];
+    };
+    for (let k = 0; k < 10; k++) play(mk(200, 'af_heart'));
+    expect(Math.abs(ls.f0Ref - 200)).toBeLessThan(4);
+    const male = play(mk(110, 'am_michael'));
+    expect(Math.abs(male)).toBeLessThan(2);
+    expect(Math.abs(ls.f0Ref - 110)).toBeLessThan(3);
+    // the same voice again keeps what it learned
+    play(mk(110, 'am_michael'));
+    expect(Math.abs(ls.f0Ref - 110)).toBeLessThan(3);
+  });
+});
+
 describe('preparing a clip', () => {
   it('spreads the analysis over the first frames (no frame does it all) and plays the timeline meanwhile', () => {
     const clip = makeClip();

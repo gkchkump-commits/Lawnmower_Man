@@ -494,6 +494,8 @@ export class LipSync {
     this.f0Ref = 0;
     this._f0Pool = new Float32Array(3000);
     this._poolI = 0;
+    /** @type {string|undefined} the voice the pitch pool belongs to (clip.voice) */
+    this._speaker = undefined;
     this._pitch = 0;
     this._voicedAt = -Infinity;
     /** @type {Array<() => void>} */
@@ -616,6 +618,16 @@ export class LipSync {
    * @param {any} clip @param {{ samples: Float32Array, sampleRate: number }} src
    */
   _buildClip(clip, src) {
+    // another voice (Settings > Voice): its usual pitch is not the last one's, so start over (the
+    // first clip of the new voice then uses its own median until the pool has learned it)
+    const spk = String(clip.voice ?? '');
+    if (spk !== this._speaker) {
+      if (this._speaker !== undefined) {
+        this._poolI = 0;
+        this.f0Ref = 0;
+      }
+      this._speaker = spk;
+    }
     const a = new VoiceAnalysis(src.samples, src.sampleRate, { refHz: this.f0Ref });
     // the speaker's usual pitch: the median of the clips heard so far; before the first clip
     // is analysed, the median of what has been (refreshed every 10 frames)

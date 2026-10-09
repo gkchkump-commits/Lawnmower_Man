@@ -3,7 +3,8 @@
 // cues, phrase-final sounds rest when the voice stops, and the player's decoded buffer is used
 // when it offers one (else the clip's WAV is decoded).
 import { describe, expect, it } from 'vitest';
-import { LipSync, clipSamples, energyJaw, stressJawScale, textEnds } from '../../../src/audio/lipsync.js';
+import { FRAMES_PER_UPDATE, LipSync, clipSamples, energyJaw, stressJawScale, textEnds } from '../../../src/audio/lipsync.js';
+import { warmUpAnalysis } from '../../../src/audio/prosody.js';
 import { bytesToBase64, encodeWav } from '../../../src/audio/wav.js';
 import { Emitter } from '../../../src/app/emitter.js';
 
@@ -139,6 +140,45 @@ describe('audio prosody through the lip-sync', () => {
     expect(hi).toBeGreaterThan(3.5);
     // and it relaxes back toward 0 in the pause after the voice
     expect(Math.abs(p[p.length - 1].pitch)).toBeLessThan(hi);
+  });
+});
+
+describe('preparing a clip', () => {
+  it('spreads the analysis over the first frames (no frame does it all) and plays the timeline meanwhile', () => {
+    const clip = makeClip();
+    const player = Object.assign(new Emitter(), { current: null, sampleRate: 48000, level: () => 0.05, spectrum: () => false });
+    const ls = new LipSync({ player, now: () => 0 });
+    const stages = [];
+    for (let f = 0; f < 6; f++) {
+      player.current = { clip, kind: 'audio', time: f / 60 };
+      const m = ls.update(1 / 60, f / 60);
+      const p = ls._clips.get(clip);
+      stages.push([p.stage, p.st?.a?.done ?? -1, m.source, m.cues]);
+    }
+    // one step per frame: base64 → WAV → envelope + plan; then the pitch, FRAMES_PER_UPDATE a frame
+    expect(stages.map((s) => s[0])).toEqual(['base64', 'bytes', 'samples', 'ready', 'ready', 'ready']);
+    expect(stages[3][1]).toBe(0);
+    expect(stages[4][1]).toBe(FRAMES_PER_UPDATE);
+    expect(stages[5][1]).toBe(2 * FRAMES_PER_UPDATE);
+    // the timeline-only mouth plays meanwhile, without its own cues (they come from the audio)
+    expect(stages.every((s) => s[2] === 'visemes')).toBe(true);
+    expect(stages.slice(0, 4).every((s) => s[3] === null)).toBe(true);
+    expect(stages[4][3]?.[0]?.type).toBe('inhale');
+    // with the player's decoded buffer, two frames
+    const clip2 = makeClip();
+    const buffer = { sampleRate: SR, getChannelData: () => clip2._raw };
+    const st2 = [];
+    for (let f = 0; f < 3; f++) {
+      player.current = { clip: clip2, kind: 'audio', time: f / 60, buffer };
+      ls.update(1 / 60, f / 60);
+      st2.push(ls._clips.get(clip2).stage);
+    }
+    expect(st2).toEqual(['samples', 'ready', 'ready']);
+  });
+
+  it('warms the analysis up once', () => {
+    expect(typeof warmUpAnalysis()).toBe('boolean');
+    expect(warmUpAnalysis()).toBe(false);
   });
 });
 

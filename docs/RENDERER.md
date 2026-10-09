@@ -81,10 +81,13 @@ of it is pure and unit-tested (`tests/unit/app/{g2p,articulation,lipsync}.test.j
 
 **Prosody from the voice itself (local voice).** For a clip with audio, `src/audio/prosody.js`
 measures the loudness envelope (all at once, under a millisecond) and the pitch: YIN on a 1 kHz
-low-passed copy decimated to ~6 kHz, octave slips folded back, ~25 µs per 10 ms frame, analysed
-0.4 s at the clip's start and then at most 30 frames per frame of the app, up to 0.8 s ahead of
-playback (measured on the real clips: 3 ms on a clip's first frame, 0.04 ms on the others). From
-the pitch and the timeline it derives the cues that replace the text's for these clips:
+low-passed copy decimated to ~6 kHz, octave slips folded back, ~25 µs per 10 ms frame, at most 20
+frames per frame of the app, up to 0.8 s ahead of playback. A clip's analysis is prepared one step
+per frame over its first frames (the WAV's base64, the WAV, then the envelope and the cue plan;
+the first two are skipped when the player offers its decoded buffer), while the timeline-only
+mouth plays its leading silence, and the analysis code is compiled once while the app is idle, so
+no frame pays for it all. From the pitch and the timeline it derives the cues that replace the
+text's for these clips:
 
 | Cue | From the audio | The face |
 |---|---|---|

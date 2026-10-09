@@ -1,6 +1,8 @@
 // System-voice lip-sync end to end in the browser app (mock bridge): a fake speechSynthesis
 // speaks the reply with word-boundary events, and the hologram's mouth must follow the words —
 // the real WebSpeechTTS → AudioPlayer → LipSync → controller.tick → avatar path.
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { boot, expect, send, test, waitIdle } from './helpers.js';
 
 /**
@@ -81,3 +83,41 @@ for (const boundaries of [true, false]) {
     await expect.poll(() => page.evaluate(() => window.__app.avatar.animState().jawOpen)).toBeLessThan(0.02);
   });
 }
+
+// Local voice on REAL speech in the browser: the avatar harness plays a Kokoro clip (the voice
+// server's /tts output, tests/fixtures/kokoro) through the real LipSync, director and relief head
+// (its new face rig compiled by Chromium): the lips close on m / b / p, the jaw opens with the
+// syllables, the face regions and the head move, and it all rests afterwards.
+test('local voice on a real Kokoro clip (avatar harness): mouth, face and head follow the audio', async ({ page }) => {
+  test.setTimeout(120_000);
+  const dir = path.resolve('tests/fixtures/kokoro');
+  const json = JSON.parse(readFileSync(path.join(dir, 'maybe_af_heart.json'), 'utf8'));
+  json.audioB64 = readFileSync(path.join(dir, 'maybe_af_heart.wav')).toString('base64');
+  await page.route('**/__clips/0.json', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(json) }));
+  await page.goto('/dev/avatar.html?ui=0&particles=0&quality=low&w=196&h=292&clip=__clips/0.json&t=0');
+  await page.waitForFunction(() => window.__ready === true || window.__error, null, { timeout: 60_000 });
+  expect(await page.evaluate(() => window.__error || null)).toBeNull();
+  const track = await page.evaluate((dur) => {
+    const out = [];
+    for (let t = 0.02; t < dur + 0.8; t += 1 / 30) {
+      window.__seek(t);
+      const a = window.__avatar.animState();
+      out.push({ t, jaw: a.jawOpen, press: a.mouthPress, cheek: a.cheekRaise, chin: a.chinRaise, nostril: a.nostrilFlare, pitch: a.headPitch, state: window.__avatar.state });
+    }
+    return out;
+  }, json.durationSec);
+  const max = (k) => Math.max(...track.map((x) => x[k]));
+  expect(max('jaw')).toBeGreaterThan(0.45);
+  expect(max('press')).toBeGreaterThan(0.75);
+  expect(max('cheek')).toBeGreaterThan(0.2);
+  expect(max('chin')).toBeGreaterThan(0.5);
+  expect(max('nostril')).toBeGreaterThan(0.2);
+  let cycles = 0;
+  for (let i = 1; i < track.length; i++) if (track[i - 1].jaw < 0.15 && track[i].jaw >= 0.15) cycles++;
+  expect(cycles).toBeGreaterThan(8);
+  const pitches = track.filter((x) => x.state === 'speaking').map((x) => x.pitch);
+  expect(Math.max(...pitches) - Math.min(...pitches)).toBeGreaterThan(0.02);
+  const end = track[track.length - 1];
+  expect(end.jaw).toBeLessThan(0.02);
+  expect(end.state).toBe('idle');
+});

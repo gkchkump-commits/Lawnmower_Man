@@ -21,7 +21,7 @@ import {
   toShape,
 } from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
-import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms } from './prosody.js';
+import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms, warmUpAnalysis } from './prosody.js';
 import { base64ToBytes, decodeWav } from './wav.js';
 
 export { CHANNELS, VISEME_SHAPES, planSpeech };
@@ -78,10 +78,9 @@ function segmentsFor(tl) {
 /** Default visual lead: the mouth shapes a sound slightly before it is heard. */
 export const VISEME_LEAD = 0.05;
 
-/** Seconds of a clip's pitch analysed at once when it starts (its first cues are due at once). */
-export const PRE_ANALYSE = 0.4;
-/** Pitch frames analysed per update at most (~25 µs each), and how far ahead of playback. */
-export const FRAMES_PER_UPDATE = 30;
+/** Pitch frames analysed per update at most (~25 µs each), and how far ahead of playback. Even
+ * at 30 fps that is 6x faster than the clip plays, so the cues' look-ahead fills within frames. */
+export const FRAMES_PER_UPDATE = 20;
 export const LOOKAHEAD = 0.8;
 
 /**
@@ -499,6 +498,8 @@ export class LipSync {
     this._voicedAt = -Infinity;
     /** @type {Array<() => void>} */
     this._offs = [];
+    // compile the analysis while the app is idle, not on the first clip's frames (browser only)
+    if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(() => warmUpAnalysis(), { timeout: 5000 });
     const p = this.player;
     if (p && typeof p.on === 'function') {
       this._offs.push(
@@ -572,36 +573,66 @@ export class LipSync {
   }
 
   /**
-   * Analysis state of a server-voiced clip (built on its first frame, then cached).
+   * Analysis state of a server-voiced clip, prepared over the clip's first frames so that no
+   * frame pays for all of it: the WAV's base64, the WAV itself (both skipped when the player
+   * offers its decoded buffer), then the loudness envelope, the trimmed timeline, its segments
+   * and the cue plan; the pitch follows a bounded number of frames per update. While it is being
+   * prepared (the clip's leading silence: a few tens of ms) `preparing` is true and the
+   * timeline-only mouth plays; null for a clip without usable samples.
    * @param {{ clip: any, buffer?: any }} cur
+   * @returns {{ st: any, preparing: boolean }}
    */
   _clipState(cur) {
     const clip = cur.clip;
-    if (this._clips.has(clip)) return this._clips.get(clip);
-    let st = null;
-    const src = clipSamples(cur);
-    if (src && src.samples.length >= src.sampleRate * 0.05) {
-      const a = new VoiceAnalysis(src.samples, src.sampleRate, { refHz: this.f0Ref });
-      a.advanceTo(PRE_ANALYSE);
-      // the speaker's usual pitch: the median of the clips heard so far; before the first clip
-      // is analysed, the median of what has been (refreshed every 10 frames)
-      const own = { done: -1, hz: 0 };
-      const ref = () => {
-        if (this.f0Ref > 0) return this.f0Ref;
-        if (a.done - own.done >= 10 || (a.complete && own.done !== a.done)) { own.done = a.done; own.hz = a.medianPitch(); }
-        return own.hz || 160;
-      };
-      const tl = trimPhraseEnds(clip.visemes, a);
-      const norms = vowelNorms(a, tl);
-      const segs = segmentsFromVisemes(tl, {
-        jawScale: (s) => stressJawScale(peakEnergy(a, s.start, s.end) - norms.energy, (s.end - s.start) / norms.dur),
-        vary: hashText(clip.text || String(tl.length)),
-      });
-      const prosody = new ClipProsody(a, tl, { ref, ends: textEnds(clip.text || '') });
-      st = { a, tl, segs, prosody, learned: false, fresh: true };
+    let p = this._clips.get(clip);
+    if (!p) {
+      p = { stage: 'none', st: null };
+      const b = cur.buffer;
+      if (b && typeof b.getChannelData === 'function' && b.sampleRate > 0) p = { stage: 'samples', src: clipSamples(cur) };
+      else if (clip.samples?.length && clip.sampleRate > 0) p = { stage: 'samples', src: { samples: clip.samples, sampleRate: clip.sampleRate } };
+      else if (clip.wav) p = { stage: 'bytes', bytes: new Uint8Array(clip.wav) };
+      else if (clip.audioB64) p = { stage: 'base64' };
+      this._clips.set(clip, p);
+    } else if (p.stage === 'base64') {
+      try { p = { stage: 'bytes', bytes: base64ToBytes(clip.audioB64) }; } catch { p = { stage: 'none', st: null }; }
+      this._clips.set(clip, p);
+    } else if (p.stage === 'bytes') {
+      let src = null;
+      try { const d = decodeWav(p.bytes); src = { samples: d.samples, sampleRate: d.sampleRate }; } catch { /* not a WAV */ }
+      p = src ? { stage: 'samples', src } : { stage: 'none', st: null };
+      this._clips.set(clip, p);
+    } else if (p.stage === 'samples') {
+      const ok = p.src && p.src.samples.length >= p.src.sampleRate * 0.05;
+      p = ok ? { stage: 'ready', st: this._buildClip(clip, p.src) } : { stage: 'none', st: null };
+      this._clips.set(clip, p);
+    } else {
+      return { st: p.st, preparing: false };
     }
-    this._clips.set(clip, st);
-    return st;
+    return { st: null, preparing: p.stage !== 'none' };
+  }
+
+  /**
+   * The analysis state of a clip from its samples (pitch not analysed yet).
+   * @param {any} clip @param {{ samples: Float32Array, sampleRate: number }} src
+   */
+  _buildClip(clip, src) {
+    const a = new VoiceAnalysis(src.samples, src.sampleRate, { refHz: this.f0Ref });
+    // the speaker's usual pitch: the median of the clips heard so far; before the first clip
+    // is analysed, the median of what has been (refreshed every 10 frames)
+    const own = { done: -1, hz: 0 };
+    const ref = () => {
+      if (this.f0Ref > 0) return this.f0Ref;
+      if (a.done - own.done >= 10 || (a.complete && own.done !== a.done)) { own.done = a.done; own.hz = a.medianPitch(); }
+      return own.hz || 160;
+    };
+    const tl = trimPhraseEnds(clip.visemes, a);
+    const norms = vowelNorms(a, tl);
+    const segs = segmentsFromVisemes(tl, {
+      jawScale: (s) => stressJawScale(peakEnergy(a, s.start, s.end) - norms.energy, (s.end - s.start) / norms.dur),
+      vary: hashText(clip.text || String(tl.length)),
+    });
+    const prosody = new ClipProsody(a, tl, { ref, ends: textEnds(clip.text || '') });
+    return { a, tl, segs, prosody, learned: false };
   }
 
   /**
@@ -624,13 +655,12 @@ export class LipSync {
     if (cur && cur.kind === 'audio') {
       const tl = cur.clip.visemes;
       const prevT = cur.clip === this._prevClip ? this._prevT : NaN;
-      const st = tl && tl.length ? this._clipState(cur) : null;
+      const cs = tl && tl.length ? this._clipState(cur) : null;
+      const st = cs?.st;
       if (st) {
         // the clip's own analysis: the loudness envelope drives the jaw, the pitch the prosody
         const tt = cur.time + VISEME_LEAD;
-        // (not on the clip's first frame: it already paid for the decode and PRE_ANALYSE)
-        if (st.fresh) st.fresh = false;
-        else st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
+        st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
         if (st.a.complete && !st.learned) {
           st.learned = true;
           this._learnPitch(st.a);
@@ -650,7 +680,8 @@ export class LipSync {
         m.jaw = clamp01(m.jaw * (0.78 + 0.4 * level));
         target = { ...m, level };
         source = 'visemes';
-        cues = this._clipCues(cur.clip, tl, cur.time + VISEME_LEAD);
+        // (a clip whose analysis is being prepared gets its cues from it in a moment)
+        if (!cs?.preparing) cues = this._clipCues(cur.clip, tl, cur.time + VISEME_LEAD);
       } else {
         const lvl = this.player.level();
         const level = dbToUnit(toDb(lvl), -50, -14);

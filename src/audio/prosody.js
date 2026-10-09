@@ -286,6 +286,27 @@ export class VoiceAnalysis {
 }
 const _med = new Float32Array(5);
 
+let _warm = false;
+/**
+ * Run the analysis once on a short synthetic voice so the JavaScript engine has compiled its hot
+ * loops before the first real clip (cold, the first clip's frames cost several times more).
+ * Idempotent. @returns {boolean} true when it ran now
+ */
+export function warmUpAnalysis() {
+  if (_warm) return false;
+  _warm = true;
+  const sr = 24000;
+  const x = new Float32Array(Math.round(0.6 * sr));
+  for (let i = 0; i < x.length; i++) {
+    const t = i / sr;
+    x[i] = 0.2 * Math.sin(2 * Math.PI * (150 + 40 * t) * t) + 0.1 * Math.sin(4 * Math.PI * 150 * t);
+  }
+  const a = new VoiceAnalysis(x, sr);
+  a.advance();
+  a.medianPitch();
+  return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Speech events from a clip's analysis and its viseme timeline
 // ---------------------------------------------------------------------------------------------

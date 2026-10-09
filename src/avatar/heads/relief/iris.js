@@ -108,9 +108,10 @@ export function locateIris(px, w, h, guess) {
  * Where the plate shows the inside of the open eye (eye white or iris) and not a lid or the
  * glowing lid margins: 0..255 per texel (row 0 = the image's top row). From the lid coordinate
  * of masks_c (w = 2 r - 1: 0 on the lid lines, rising to 1 on the closed-eye line, falling below
- * it): inside means at least ~2 px below the level where the upper margin's glow ends (w = 0.13)
- * and above the band around the closed-eye line where the lower margin glows (w = 0.88), measured
- * in px along w's vertical gradient. Packs without masks_c: masks_b's eye aperture.
+ * it): inside means at least ~2 px below the level where the upper margin's glow ends (w = 0.13),
+ * down across the closed-eye line to where the lower margin's glow begins, just below it (w = 0.9
+ * on its far side: on the reference plate the iris' lower rim, the eye white's glow starts a pixel
+ * lower), measured in px along w's vertical gradient. Packs without masks_c: masks_b's eye aperture.
  * @param {ArrayLike<number>|null} lids RGBA of masks_c (or null)
  * @param {ArrayLike<number>|null} aperture RGBA of masks_b (used without masks_c)
  * @param {number} w @param {number} h
@@ -130,8 +131,11 @@ export function openMap(lids, aperture, w, h) {
       const v = W(x, y);
       if (v <= 0.1) continue;
       const gy = (W(x, y + 2) - W(x, y - 2)) / 4; // per px, > 0 above the closed-eye line
-      if (gy < 0.004) continue;
-      out[y * w + x] = Math.round(255 * step(0, 2, (v - 0.13) / gy) * step(0, 2, (0.88 - v) / gy));
+      let k;
+      if (gy >= 0.004) k = step(0, 2, (v - 0.13) / gy);
+      else if (gy <= -0.004) k = step(0, 2, (v - 0.9) / -gy);
+      else k = v > 0.9 ? 1 : 0; // on the closed-eye line
+      out[y * w + x] = Math.round(255 * k);
     }
   }
   return out;
@@ -143,17 +147,43 @@ export function openMap(lids, aperture, w, h) {
  * 2 px reproduces the image exactly). The base of each row runs from the texels just beyond the
  * iris on its left to those on its right (3-9 px out, past the glow; smoothed over five rows): the
  * eye white beside the iris, and the lid margins that cross the disc near its top and bottom, run
- * on. Where `open` says both a texel and its source are inside the open eye, the fine detail
- * (texel minus its 7 x 7 mean) of the eye white beside the iris is added, mirrored back and forth
- * within a 10 px strip beyond the rim: the grid lines that cross the eye white run on, with the
- * same texture.
+ * on. The fine detail (texel minus its 7 x 7 mean) beside the iris is added, mirrored back and
+ * forth within a 10 px strip beyond the rim, where `open` says the texel and its source are the
+ * same kind of place (both inside the open eye, or both on a lid margin's glow): the grid lines
+ * that cross the eye white and the lid glows run on, with the same texture. With the lid
+ * coordinate (masks_c), a texel on a lid margin's glow takes the glow beyond the disc at the same
+ * lid coordinate instead (the margin runs on along its own curve, not along the row, which near
+ * the top of an arched lid would smear the lid line into a flat band).
  * @param {Uint8ClampedArray|Uint8Array} px RGBA, `w` x `h`
  * @param {number} w @param {number} h
  * @param {Array<{ cx: number, cy: number, r: number }>} eyes iris centres and outer radii (px)
  * @param {ArrayLike<number>|null} [open] openMap() (0..255 per texel)
+ * @param {ArrayLike<number>|null} [lids] RGBA of masks_c (the lid coordinate in r)
  */
-export function fillIrises(px, w, h, eyes, open = null) {
+export function fillIrises(px, w, h, eyes, open = null, lids = null) {
   const src = Uint8ClampedArray.from(px);
+  const lidW = (x, y) => (lids[(y * w + x) * 4] / 255) * 2 - 1;
+  const lidSide = (x, y) => Math.sign(lidW(x, Math.min(h - 1, y + 1)) - lidW(x, Math.max(0, y - 1)));
+  /** the glow beyond the disc (columns `x0`.. outward by `dir`) at lid coordinate w0 on the same
+   * side of the closed-eye line as the texel: RGB, or null */
+  const alongLid = (x0, dir, y, w0, side) => {
+    const c = [0, 0, 0];
+    let n = 0;
+    for (let j = 0; j < 4; j++) {
+      const x = x0 + dir * j;
+      if (x < 0 || x >= w) continue;
+      let best = 0.06, by = -1;
+      for (let yy = Math.max(1, y - 16); yy <= Math.min(h - 2, y + 16); yy++) {
+        if (lidSide(x, yy) !== side) continue;
+        const d = Math.abs(lidW(x, yy) - w0);
+        if (d < best) { best = d; by = yy; }
+      }
+      if (by < 0) continue;
+      const i = (by * w + x) * 4;
+      c[0] += src[i]; c[1] += src[i + 1]; c[2] += src[i + 2]; n++;
+    }
+    return n ? c.map((v) => v / n) : null;
+  };
   const smooth = (e0, e1, x) => {
     const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
     return t * t * (3 - 2 * t);
@@ -187,7 +217,16 @@ export function fillIrises(px, w, h, eyes, open = null) {
         for (let k = GAP; k <= GAP + 6; k++) {
           const x = Math.floor(e.cx + dir * (half + k));
           if (x < 0 || x >= w) continue;
-          const i = (y * w + x) * 4;
+          // (inside the open eye, the eye white: where the lid glow is beside a row near the top or
+          // bottom of the disc, the nearest open texel toward the eye's middle)
+          let yy = y;
+          if (open && openAt(x, y) >= 0.5) {
+            // already the eye white
+          } else if (open && openAt(Math.floor(e.cx), y) >= 0.5) {
+            const sy = Math.sign(e.cy - (y + 0.5)) || 1;
+            for (let q = 1; q <= 12; q++) if (openAt(x, y + sy * q) >= 0.5) { yy = y + sy * q; break; }
+          }
+          const i = (yy * w + x) * 4;
           c[0] += src[i]; c[1] += src[i + 1]; c[2] += src[i + 2]; n++;
         }
         return n ? c.map((v) => v / n) : null;
@@ -219,13 +258,22 @@ export function fillIrises(px, w, h, eyes, open = null) {
         // sources of the texture: back and forth within the strip beyond each side's rim
         const pp = (o) => { const t = ((o % (2 * P)) + 2 * P) % (2 * P); return t < P ? t : 2 * P - t; };
         const ml = Math.floor(xl - GAP - pp(x + 0.5 - xl)), mr = Math.floor(xr + GAP + pp(xr - (x + 0.5)));
-        const kt = openAt(x, y);
-        const kl = kt * openAt(ml, y) * (1 - s), kr = kt * openAt(mr, y) * s;
+        // (the detail of the same kind of place: eye white for eye white, lid glow for lid glow)
+        const kt = openAt(x, y), same = (o) => (open ? kt * o + (1 - kt) * (1 - o) : 0);
+        const kl = same(openAt(ml, y)) * (1 - s), kr = same(openAt(mr, y)) * s;
         const i = (y * w + x) * 4;
+        // a lid margin's glow: the same glow beyond the disc, along the lid
+        let lid = null;
+        if (lids && kt < 1) {
+          const w0 = lidW(x, y), side = lidSide(x, y);
+          const gl = alongLid(Math.floor(e.cx - r - GAP), -1, y, w0, side), gr = alongLid(Math.ceil(e.cx + r + GAP), 1, y, w0, side);
+          if (gl || gr) lid = [0, 1, 2].map((c) => (gl || gr)[c] + ((gr || gl)[c] - (gl || gr)[c]) * s);
+        }
         for (let c = 0; c < 3; c++) {
           let f = L[c] + (R[c] - L[c]) * u;
           if (kl > 0) f += kl * detail(ml, y, c);
           if (kr > 0) f += kr * detail(mr, y, c);
+          if (lid) f += (lid[c] - f) * (1 - kt);
           px[i + c] = src[i + c] + (f - src[i + c]) * a;
         }
       }
@@ -278,7 +326,8 @@ export function irisLayer(image, pack, masks = {}) {
       g.drawImage(img, 0, 0, c.width, c.height);
       return g.getImageData(0, 0, c.width, c.height).data;
     };
-    const open = openMap(read(masks.lids), masks.lids ? null : read(masks.aperture), c.width, c.height);
+    const lidPx = read(masks.lids);
+    const open = openMap(lidPx, masks.lids ? null : read(masks.aperture), c.width, c.height);
     g.clearRect(0, 0, c.width, c.height);
     g.drawImage(image, 0, 0);
     const all = g.getImageData(0, 0, c.width, c.height);
@@ -286,7 +335,7 @@ export function irisLayer(image, pack, masks = {}) {
       const hit = locateIris(all.data, c.width, c.height, guess(k));
       if (hit) eyes[k] = { cx: hit.cx, cy: hit.cy, r: hit.r, disc: hit.r + IRIS_GLOW_PX, found: true };
     }
-    fillIrises(all.data, c.width, c.height, [eyes.L, eyes.R].map((e) => ({ cx: e.cx, cy: e.cy, r: e.disc })), open);
+    fillIrises(all.data, c.width, c.height, [eyes.L, eyes.R].map((e) => ({ cx: e.cx, cy: e.cy, r: e.disc })), open, lidPx);
     g.putImageData(all, 0, 0);
     return { canvas: c, open, eyes };
   } catch {

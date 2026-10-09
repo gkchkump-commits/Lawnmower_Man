@@ -173,37 +173,50 @@ float openEye(vec2 uv) {
   if (uHasLids > 0.5) return smoothstep(0.03, 0.09, texture2D(tMaskC, uv).r * 2.0 - 1.0);
   return smoothstep(0.3, 0.75, texture2D(tMaskB, uv).r);
 }
-// The moved iris at a texel whose rest source is src. Where the plate shows lid or lid glow at the
-// source (tOpen), its mirror image across the iris' horizontal axis stands in (an iris looks alike
-// all round), else the same radius turned toward the horizontal (which the lids never hide): two
-// thirds, one third, or all the way.
-float seen(vec2 uv) { return smoothstep(0.1, 0.6, texture2D(tOpen, uv).r); }
+// tOpen: the plate shows the inside of the open eye here (eye white or iris), not a lid or the
+// glowing lid margins, which lie over the eyeball.
+float seen(vec2 uv) { return smoothstep(0.05, 0.85, texture2D(tOpen, uv).r); }
+// The same radius of the iris turned toward the horizontal (which the lids never hide), on side
+// sx: a third, two thirds or all the way, whichever is the nearest seen.
 vec3 irisTurned(vec4 eye, vec2 asp, float rho, float th, float sx, vec2 gdx, vec2 gdy) {
   vec2 p = eye.xy + vec2(sx, 0.0) * rho / asp.x;
   vec3 c = textureGrad(tPlate, p, gdx, gdy).rgb;
-  p = eye.xy + vec2(sx * cos(0.33 * th), sin(0.33 * th)) * rho / asp;
-  c = mix(c, textureGrad(tPlate, p, gdx, gdy).rgb, seen(p));
   p = eye.xy + vec2(sx * cos(0.67 * th), sin(0.67 * th)) * rho / asp;
+  c = mix(c, textureGrad(tPlate, p, gdx, gdy).rgb, seen(p));
+  p = eye.xy + vec2(sx * cos(0.33 * th), sin(0.33 * th)) * rho / asp;
   return mix(c, textureGrad(tPlate, p, gdx, gdy).rgb, seen(p));
 }
+// The moved iris at a texel whose rest source is src: the plate where the source was seen at rest;
+// where a lid or its glow hid it, the iris rebuilt from what was seen (an iris looks alike all
+// round): its mirror image across the horizontal axis, which is exact near the axis, blended
+// toward the turned radius farther from it (the two meet without a seam).
 vec3 irisAt(vec2 src, vec4 eye, vec2 asp, vec2 gdx, vec2 gdy) {
+  vec3 own = textureGrad(tPlate, src, gdx, gdy).rgb;
+  float sSrc = seen(src);
+  if (sSrc >= 1.0) return own;
   vec2 dv = (src - eye.xy) * asp;
   float rho = length(dv);
   float th = atan(dv.y, abs(dv.x));         // from the horizontal, on its side
   float side = smoothstep(-0.25, 0.25, dv.x / max(1e-5, rho));
-  vec3 c = mix(irisTurned(eye, asp, rho, th, -1.0, gdx, gdy), irisTurned(eye, asp, rho, th, 1.0, gdx, gdy), side);
+  vec3 turned = mix(irisTurned(eye, asp, rho, th, -1.0, gdx, gdy), irisTurned(eye, asp, rho, th, 1.0, gdx, gdy), side);
   vec2 mir = vec2(src.x, 2.0 * eye.y - src.y);
-  c = mix(c, textureGrad(tPlate, mir, gdx, gdy).rgb, seen(mir));
-  return mix(c, textureGrad(tPlate, src, gdx, gdy).rgb, seen(src));
+  float near = 1.0 - smoothstep(0.25, 0.6, abs(dv.y) / max(1e-5, eye.z));
+  vec3 rebuilt = mix(turned, textureGrad(tPlate, mir, gdx, gdy).rgb, seen(mir) * near);
+  return mix(rebuilt, own, sSrc);
 }
-// eye: uv centre, disc radius (plate heights: iris + glow; the fill's rim), feather
-vec3 eyeLayer(vec2 uv, vec4 eye, vec2 gdx, vec2 gdy) {
+// eye: uv centre, disc radius (plate heights: iris + glow; the fill's rim), feather; plate: this
+// texel of the plate. The moved iris shows only where the eye's inside is seen; on the lid
+// margins' glow the plate stays (the iris it had there at rest) as far as the moved disc still
+// covers it, and the eye white (the fill) where the disc has left.
+vec3 eyeLayer(vec2 uv, vec4 eye, vec3 plate, vec2 gdx, vec2 gdy) {
   vec2 asp = vec2(uPlateSize.x / uPlateSize.y, 1.0);
   vec2 src = uv - uGaze;                    // where this texel of the moved iris comes from
   float inIris = 1.0 - smoothstep(eye.z, eye.z + eye.w, length((src - eye.xy) * asp));
   vec3 sclera = textureGrad(tSclera, uv, gdx, gdy).rgb;
   if (inIris <= 0.0) return sclera;
-  return mix(sclera, irisAt(src, eye, asp, gdx, gdy), inIris);
+  float vis = seen(uv);
+  vec3 iris = vis > 0.0 ? mix(plate, irisAt(src, eye, asp, gdx, gdy), vis) : plate;
+  return mix(sclera, iris, inIris);
 }
 // (packs whose plate cannot be read back: the old uv warp around the iris)
 vec2 gazeWarp(vec2 uv, vec4 eye) {
@@ -250,8 +263,12 @@ void main() {
   vec3 col = texture2D(tPlate, suv, -0.6).rgb;
   if (lipWarp) col = textureGrad(tPlate, suv, gdx, gdy).rgb;
   if (uIrisLayer > 0.5 && abs(uGaze.x) + abs(uGaze.y) > 1e-6 && mB.g > 0.001) {
-    float open = openEye(vUv);
-    if (open > 0.001) col = mix(col, eyeLayer(vUv, vUv.x < 0.5 ? uEyeL : uEyeR, gdx, gdy), open);
+    vec4 eye = vUv.x < 0.5 ? uEyeL : uEyeR;
+    // (fading in over the first ~6 % of the disc radius of travel: the plate itself at rest and a
+    // sub-pixel blend just off it, never a pop when the gaze crosses zero)
+    float moved = smoothstep(0.0, 0.06, length(uGaze * vec2(uPlateSize.x / uPlateSize.y, 1.0)) / eye.z);
+    float open = openEye(vUv) * moved;
+    if (open > 0.001) col = mix(col, eyeLayer(vUv, eye, textureGrad(tPlate, vUv, gdx, gdy).rgb, gdx, gdy), open);
   }
   col *= 1.0 - 0.14 * contact;    // the line where pressed lips meet
   // Parted lips: their inner edges roll into the mouth (a soft shadow over the last ~4 px) and

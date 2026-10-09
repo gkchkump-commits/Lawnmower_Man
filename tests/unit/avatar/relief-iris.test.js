@@ -82,20 +82,51 @@ describe('fillIrises', () => {
   });
 });
 
+describe('fillIrises along the lids', () => {
+  it('a lid margin crossing the disc runs on along its own curve, not along the row', () => {
+    // an arched upper lid: its glowing margin (w 0..0.13, bright) follows y = 30 + 0.02 (x - 100)^2;
+    // skin above it, the dark eye white below; the disc's top overlaps the margin
+    const yb = (x) => 30 + 0.02 * (x + 0.5 - 100) ** 2;
+    const wAt = (x, y) => Math.max(-1, Math.min(1, (y + 0.5 - yb(x)) / 30));
+    const px = new Uint8ClampedArray(W * H * 4), lids = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const v = wAt(x, y), i = (y * W + x) * 4;
+        const l = v < 0 ? 100 : v < 0.13 ? 200 : 70;
+        px[i] = px[i + 1] = px[i + 2] = l; px[i + 3] = 255;
+        lids[i] = Math.round(255 * (0.5 + 0.5 * v)); lids[i + 3] = 255;
+      }
+    }
+    const open = openMap(lids, null, W, H);
+    const disc = [{ cx: 100, cy: 48, r: 20 }];
+    const rows = Uint8ClampedArray.from(px), along = Uint8ClampedArray.from(px);
+    fillIrises(rows, W, H, disc, open);
+    fillIrises(along, W, H, disc, open, lids);
+    // on the margin at the disc's top: the row beyond the disc is skin there (the lid is lower at
+    // the sides), the margin itself is bright
+    expect(lum(rows, 100, 31)).toBeLessThan(150);
+    expect(lum(along, 100, 31)).toBeGreaterThan(180);
+    // the eye white inside the disc stays the eye white
+    for (const y of [40, 60]) expect(Math.abs(lum(along, 100, y) - 70)).toBeLessThan(4);
+  });
+});
+
 describe('openMap', () => {
-  it('is the inside of the open eye: in from both lid glows, nothing below the closed-eye line', () => {
+  it('is the inside of the open eye: in from the upper lid glow, down to where the lower one begins', () => {
     // a column of the lid coordinate: 0 on the upper lid line (y 20), 1 on the closed line (y 60),
-    // back down to -1 just below it
+    // back down to 0 on the lower lid line (y 70) and below
     const w = 4, h = 80;
     const lids = new Uint8ClampedArray(w * h * 4);
-    const wAt = (y) => (y < 20 ? -1 + y / 20 : y <= 60 ? (y - 20) / 40 : Math.max(-1, 1 - (y - 60) / 2));
+    const wAt = (y) => (y < 20 ? -1 + y / 20 : y <= 60 ? (y - 20) / 40 : Math.max(-1, 1 - (y - 60) / 10));
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) lids[(y * w + x) * 4] = Math.round(255 * (0.5 + 0.5 * wAt(y)));
     const m = openMap(lids, null, w, h);
     const col = Array.from({ length: h }, (_, y) => m[y * w + 1]);
     expect(col[22]).toBe(0);          // the upper lid's glow (w < 0.13)
     expect(col[40]).toBe(255);        // the middle of the eye
-    expect(col[57]).toBe(0);          // the band at the closed line (the lower lid glows there)
-    expect(col[63]).toBe(0);          // below it
+    expect(col[57]).toBe(255);        // above the closed line (the iris' lower part on the plate)
+    expect(col[60]).toBe(255);        // on it
+    expect(col[64]).toBe(0);          // the lower lid's glow below it (w < 0.9 there)
+    expect(col[72]).toBe(0);          // below the lower lid
     expect(Math.max(...col.slice(0, 20))).toBe(0);
   });
 

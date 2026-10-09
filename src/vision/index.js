@@ -480,11 +480,14 @@ export class CameraFeature extends Emitter {
   // ------------------------------------------------------------------------------------------
   // snapshots for Claude
 
-  /** @param {{ hidden?: boolean }} o */
+  /**
+   * A picture goes only with a message the user sends (and so sees in the chat, with its
+   * thumbnail): never with the app's own hidden prompts such as the greeting.
+   * @param {{ hidden?: boolean }} o
+   */
   _wantsSnapshot(o) {
-    if (!this.active || !this.camera.video) return false;
-    const share = !!this._settings.camera?.shareWithClaude;
-    return share || (!o?.hidden && this.shotArmed);
+    if (!this.active || !this.camera.video || o?.hidden) return false;
+    return !!this._settings.camera?.shareWithClaude || this.shotArmed;
   }
 
   /** @param {{ hidden?: boolean }} o */

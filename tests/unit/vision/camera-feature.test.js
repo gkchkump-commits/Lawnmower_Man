@@ -314,7 +314,7 @@ describe('CameraFeature: behaviours', () => {
   });
 
   it('greets (opt-in) after ≥ 10 min away: a hidden prompt with a transcript note, rate-limited, never when busy', async () => {
-    const h = await onWithFace({ settings: { camera: { greet: true } } });
+    const h = await onWithFace({ settings: { camera: { greet: true, shareWithClaude: true } } });
     const away = (minutes) => {
       for (let i = 0; i < 4; i++) h.frame(face());
       h.frame(null, minutes * MIN);
@@ -331,6 +331,7 @@ describe('CameraFeature: behaviours', () => {
     expect(text).toBe(greetingPrompt(12));
     expect(opts).toMatchObject({ source: 'camera', hidden: true });
     expect(opts.note).toMatch(/back after 12 min/);
+    expect(h.controller.provider.wants(opts)).toBe(false); // even with "Let Claude see me" on
     // again 15 min later: rate limit (30 min)
     away(15);
     back();
@@ -386,7 +387,7 @@ describe('CameraFeature: behaviours', () => {
 });
 
 describe('CameraFeature: pictures for Claude', () => {
-  it('nothing without the camera; "Let Claude see me" adds one to every message, hidden ones too', async () => {
+  it('nothing without the camera; "Let Claude see me" adds one to every message you send, not to hidden ones', async () => {
     const h = setup({ consent: true, settings: { camera: { shareWithClaude: true } } });
     const p = h.controller.provider;
     expect(p.wants({ source: 'text', hidden: false })).toBe(false); // camera off
@@ -394,7 +395,8 @@ describe('CameraFeature: pictures for Claude', () => {
     await h.flush();
     expect(p.wants({ source: 'text', hidden: false })).toBe(true);
     expect(p.wants({ source: 'voice', hidden: false })).toBe(true);
-    expect(p.wants({ source: 'camera', hidden: true })).toBe(true);
+    // the greeting is the app's own prompt: no bubble, no thumbnail, so no picture either
+    expect(p.wants({ source: 'camera', hidden: true })).toBe(false);
     const shots = await p.capture({ source: 'text', hidden: false });
     expect(shots).toEqual([expect.objectContaining({ mediaType: 'image/jpeg', data: '/9j/AAAA', thumb: expect.stringMatching(/^data:image\/jpeg/) })]);
     expect(h.capture).toHaveBeenCalledWith(h.camera.video);

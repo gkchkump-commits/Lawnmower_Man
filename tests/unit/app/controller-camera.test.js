@@ -1,8 +1,10 @@
 // Controller additions for the camera (src/vision): pictures with messages through the snapshot
 // provider, hidden prompts (the camera greeting), the look-to-talk listen gate, sleep().
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Controller } from '../../../src/app/controller.js';
+import { Emitter } from '../../../src/app/emitter.js';
 import { DEFAULT_SETTINGS, deepMerge } from '../../../src/app/settings-defaults.js';
+import { CONSENT_KEY, CameraFeature, greetingPrompt } from '../../../src/vision/index.js';
 import { fakeAvatar, fakeBridge, fakeMic, fakePlayer, fakeStt, fakeTts, fakeView, tick, waitFor } from './helpers.js';
 
 function setup(o = {}) {
@@ -157,6 +159,40 @@ describe('Controller: hidden prompts (camera greeting)', () => {
     c.setSnapshotProvider(p);
     c.sendText('greet', { source: 'camera', hidden: true });
     expect(p.asked).toEqual([{ source: 'camera', hidden: true }]);
+  });
+
+  it('with the real camera feature and "Let Claude see me" on, the greeting carries no picture', async () => {
+    const { c, bridge, view } = setup();
+    await c.start();
+    const settings = deepMerge(DEFAULT_SETTINGS, { camera: { enabled: true, shareWithClaude: true, greet: true } });
+    const camera = Object.assign(new Emitter(), {
+      label: 'Fake Cam', video: null,
+      start: async () => { camera.video = { readyState: 4, videoWidth: 640, videoHeight: 480 }; },
+      stop: () => { camera.video = null; },
+    });
+    const tracker = Object.assign(new Emitter(), { start: async () => {}, setVideo() {}, setRate() {}, dispose() {} });
+    const capture = vi.fn(async () => SHOT);
+    const feat = new CameraFeature({
+      getSettings: () => settings, saveSettings: async () => {}, controller: c, getAvatar: () => null,
+      gaze: { setFace() {} }, camera, createTracker: () => tracker, capture,
+      storage: { get: (k) => (k === CONSENT_KEY ? 'yes' : null), set() {} }, listCameras: async () => [],
+    });
+    feat.applySettings(settings);
+    await waitFor(() => feat.active);
+    // what CameraFeature._greet sends
+    c.sendText(greetingPrompt(12), { source: 'camera', hidden: true, note: "You're back after 12 min, so the camera asked Claude to say hello." });
+    await waitFor(() => sends(bridge).length === 1);
+    expect(sends(bridge)[0]).toEqual(['send', greetingPrompt(12)]); // no images argument
+    expect(capture).not.toHaveBeenCalled();
+    bridge.emit({ type: 'turn_start', turnId: 't1', text: 'x' });
+    bridge.emit({ type: 'turn_end', turnId: 't1', result: 'Hi again!', isError: false });
+    // a message the user sends still gets one, with its thumbnail in the transcript
+    c.sendText('how do I look?');
+    await waitFor(() => sends(bridge).length === 2);
+    expect(sends(bridge)[1][2].images).toHaveLength(1);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(view.of('attachUserImages')).toHaveLength(1);
+    feat.dispose();
   });
 });
 

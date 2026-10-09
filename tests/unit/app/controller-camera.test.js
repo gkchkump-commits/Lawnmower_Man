@@ -225,6 +225,26 @@ describe('Controller: look-to-talk gate and sleep()', () => {
     expect(mic.paused).toBe(true); // half-duplex as always
   });
 
+  it('a discarded snippet re-applies a gate that closed meanwhile (no listening while looking away)', async () => {
+    const { c, mic } = setup({ settings: { voice: { handsFree: true } } });
+    await c.start();
+    await tick();
+    mic.emit('speechstart'); // looking at the screen, starts to talk
+    expect(c.state).toBe('listening');
+    c.setListenGate(false); // turns away
+    expect(mic.paused).toBe(false);
+    mic.emit('discard', { reason: 'too-short' }); // just a cough
+    expect(c.state).toBe('idle');
+    expect(mic.paused).toBe(true);
+    c.setListenGate(true);
+    expect(mic.paused).toBe(false);
+    // with the gate open a discard keeps listening
+    mic.emit('speechstart');
+    mic.emit('discard', { reason: 'steady-noise' });
+    expect(c.state).toBe('idle');
+    expect(mic.paused).toBe(false);
+  });
+
   it('sleep() dozes off only when nothing is going on; activity wakes it', async () => {
     const busy = setup();
     await busy.c.start();

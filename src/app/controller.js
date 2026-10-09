@@ -957,6 +957,8 @@ export class Controller extends Emitter {
       this._maybeIdle();
     } else if (this.handsFree && !this.listen && this.state === 'listening') {
       this._setState('idle');
+      // the look-to-talk gate may have closed while the user spoke: pause the mic now
+      this._armHandsFree();
     }
   }
 

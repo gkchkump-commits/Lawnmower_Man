@@ -116,7 +116,7 @@ export function clipSamples(cur) {
  * @param {number} eRel @param {number} durRel
  */
 export function stressJawScale(eRel, durRel) {
-  return clamp(0.84 + 0.035 * eRel + 0.12 * (durRel - 1), 0.62, 1.16);
+  return clamp(0.96 + 0.035 * eRel + 0.12 * (durRel - 1), 0.66, 1.24);
 }
 
 /**
@@ -491,8 +491,10 @@ export class LipSync {
     this._prevT = NaN;
     /** per audio clip: its analysis, trimmed timeline, segments and prosody (null: no samples) */
     this._clips = new WeakMap();
-    /** the speaker's usual pitch (Hz), learned over the clips (0 = not yet) */
+    /** the speaker's usual pitch (Hz): the median voiced pitch of the clips heard (0 = none yet) */
     this.f0Ref = 0;
+    this._f0Pool = new Float32Array(3000);
+    this._poolI = 0;
     this._pitch = 0;
     this._voicedAt = -Infinity;
     /** @type {Array<() => void>} */
@@ -553,6 +555,23 @@ export class LipSync {
   }
 
   /**
+   * Add a fully analysed clip's voiced frames to the speaker's pitch pool (the last ~30 s of
+   * voice) and update the reference: their median.
+   * @param {VoiceAnalysis} a
+   */
+  _learnPitch(a) {
+    const pool = this._f0Pool;
+    for (let i = 0; i < a.n; i++) {
+      if (!(a.f0[i] > 0)) continue;
+      pool[this._poolI++ % pool.length] = a.f0[i];
+    }
+    const n = Math.min(this._poolI, pool.length);
+    if (n < 20) return;
+    const v = Array.from(pool.subarray(0, n)).sort((x, y) => x - y);
+    this.f0Ref = v[n >> 1];
+  }
+
+  /**
    * Analysis state of a server-voiced clip (built on its first frame, then cached).
    * @param {{ clip: any, buffer?: any }} cur
    */
@@ -564,14 +583,21 @@ export class LipSync {
     if (src && src.samples.length >= src.sampleRate * 0.05) {
       const a = new VoiceAnalysis(src.samples, src.sampleRate, { refHz: this.f0Ref });
       a.advanceTo(PRE_ANALYSE);
-      if (!this.f0Ref) this.f0Ref = a.medianPitch();
+      // the speaker's usual pitch: the median of the clips heard so far; before the first clip
+      // is analysed, the median of what has been (refreshed every 10 frames)
+      const own = { done: -1, hz: 0 };
+      const ref = () => {
+        if (this.f0Ref > 0) return this.f0Ref;
+        if (a.done - own.done >= 10 || (a.complete && own.done !== a.done)) { own.done = a.done; own.hz = a.medianPitch(); }
+        return own.hz || 160;
+      };
       const tl = trimPhraseEnds(clip.visemes, a);
       const norms = vowelNorms(a, tl);
       const segs = segmentsFromVisemes(tl, {
         jawScale: (s) => stressJawScale(peakEnergy(a, s.start, s.end) - norms.energy, (s.end - s.start) / norms.dur),
         vary: hashText(clip.text || String(tl.length)),
       });
-      const prosody = new ClipProsody(a, tl, { ref: () => this.f0Ref || a.medianPitch() || 160, ends: textEnds(clip.text || '') });
+      const prosody = new ClipProsody(a, tl, { ref, ends: textEnds(clip.text || '') });
       st = { a, tl, segs, prosody, learned: false };
     }
     this._clips.set(clip, st);
@@ -605,8 +631,7 @@ export class LipSync {
         st.a.advanceTo(Math.max(cur.time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
         if (st.a.complete && !st.learned) {
           st.learned = true;
-          const m = st.a.medianPitch();
-          if (m > 0) this.f0Ref = this.f0Ref > 0 ? 2 ** (0.7 * Math.log2(this.f0Ref) + 0.3 * Math.log2(m)) : m;
+          this._learnPitch(st.a);
         }
         const m = mouthFromVisemes(st.tl, cur.time, { prevT, segs: st.segs });
         // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it)

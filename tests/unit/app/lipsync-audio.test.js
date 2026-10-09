@@ -68,8 +68,8 @@ describe('jaw from the audio', () => {
   it('stressJawScale: louder and longer vowels open wider, within bounds', () => {
     expect(stressJawScale(4, 1)).toBeGreaterThan(stressJawScale(0, 1));
     expect(stressJawScale(0, 1.6)).toBeGreaterThan(stressJawScale(0, 1));
-    expect(stressJawScale(-30, 0.2)).toBe(0.62);
-    expect(stressJawScale(30, 5)).toBe(1.16);
+    expect(stressJawScale(-30, 0.2)).toBe(0.66);
+    expect(stressJawScale(30, 5)).toBe(1.24);
   });
 
   it('the louder syllable opens the jaw clearly wider than the quiet one with the same viseme', () => {
@@ -123,18 +123,19 @@ describe('audio prosody through the lip-sync', () => {
   });
 
   it('the intonation rises above the speaker\'s usual pitch on a high syllable', () => {
-    const samples = concat(silence(0.1), buzz(0.3, 150, 0.2), silence(0.05), buzz(0.3, 150 * 2 ** (5 / 12), 0.2), silence(0.3));
+    // mostly at 150 Hz (the speaker's usual pitch, learned from the clip), one syllable 5 st higher
+    const samples = concat(silence(0.1), buzz(0.6, 150, 0.2), silence(0.05), buzz(0.25, 150 * 2 ** (5 / 12), 0.2), silence(0.3));
     const clip = {
       kind: 'audio', samples, sampleRate: SR, dur: samples.length / SR, text: '',
-      visemes: [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.4, viseme: 'aa' }, { start: 0.4, end: 0.45, viseme: 'kk' },
-        { start: 0.45, end: 0.75, viseme: 'E' }, { start: 0.75, end: 1.05, viseme: 'sil' }],
+      visemes: [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.7, viseme: 'aa' }, { start: 0.7, end: 0.75, viseme: 'kk' },
+        { start: 0.75, end: 1.0, viseme: 'E' }, { start: 1.0, end: 1.3, viseme: 'sil' }],
     };
     const { ls, run } = rig(clip);
-    ls.f0Ref = 150;
     const p = [];
-    run(0.9, (t, m) => p.push({ t, pitch: m.intonation.pitch }));
-    const lo = p.find((q) => q.t > 0.3).pitch, hi = p.find((q) => q.t > 0.65).pitch;
-    expect(Math.abs(lo)).toBeLessThan(1.5);
+    run(1.3, (t, m) => p.push({ t, pitch: m.intonation.pitch }));
+    expect(Math.abs(ls.f0Ref - 150)).toBeLessThan(3);
+    const lo = p.find((q) => q.t > 0.5).pitch, hi = p.find((q) => q.t > 0.92).pitch;
+    expect(Math.abs(lo)).toBeLessThan(1);
     expect(hi).toBeGreaterThan(3.5);
     // and it relaxes back toward 0 in the pause after the voice
     expect(Math.abs(p[p.length - 1].pitch)).toBeLessThan(hi);

@@ -54,6 +54,9 @@ const SLIDERS = [
   ['teeth', ['mouthTeeth'], 0, 1, 0.01],
   ['tongue', ['mouthTongue'], 0, 1, 0.01],
   ['asym', ['mouthAsym'], -1, 1, 0.01],
+  ['cheek', ['cheekRaise'], 0, 1, 0.01],
+  ['chin', ['chinRaise'], 0, 1, 0.01],
+  ['nostril', ['nostrilFlare'], 0, 1, 0.01],
   ['smile', ['smile'], 0, 1, 0.01],
   ['browUp', ['browUp'], 0, 1, 0.01],
   ['blink', ['blinkL', 'blinkR'], 0, 1, 0.01],
@@ -90,6 +93,7 @@ const options = {
   fixedTime: q.has('fixedTime') && !scripted ? num('fixedTime', 0) : undefined,
   transparent,
   idleMotion: num('idle', 1),
+  expressiveness: num('expr', 1),
   zoom: num('zoom', 1),
   // say / clip modes drive a scripted clock through avatar.advance(): no render loop of their own
   autoStart: !scripted,
@@ -417,6 +421,7 @@ async function clipSimulation(urls) {
     avatar.setMouth(m);
     avatar.setSpeechLevel(m.level);
     if (m.cues) avatar.setProsody(m.cues);
+    avatar.setIntonation(m.intonation);
     avatar.advance(dt, { render: false });
   };
   return {

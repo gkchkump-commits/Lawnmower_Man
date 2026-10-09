@@ -48,6 +48,7 @@ export function normalizeOptions(o = {}) {
     transparent: o.transparent !== false,
     opacity: num(o.opacity, 0.88, 0, 1),
     idleMotion: num(o.idleMotion, 1, 0, 3),
+    expressiveness: num(o.expressiveness, 1, 0, 2),
     zoom: num(o.zoom, 1, 0.2, 5),
     colors: o.colors && typeof o.colors === 'object' ? { ...o.colors } : {},
     autoStart: o.autoStart !== false,
@@ -104,7 +105,7 @@ export async function createAvatar(canvas, options = {}) {
   /** @type {Partial<AnimState>} */
   let overrides = {};
 
-  const director = new Director({ seed: opts.seed, idleMotion: opts.idleMotion });
+  const director = new Director({ seed: opts.seed, idleMotion: opts.idleMotion, expressiveness: opts.expressiveness });
   const governor = new QualityGovernor();
   let motionLimits = null;
   let head = /** @type {any} */ (null);
@@ -322,6 +323,12 @@ export async function createAvatar(canvas, options = {}) {
     setProsody(cue) { director.setProsody(cue); stage.requestRender(); },
     /** @param {number} level */
     setSpeechLevel(level) { director.setSpeechLevel(level); stage.requestRender(); },
+    /**
+     * Intonation of the voice being spoken (the local voice's pitch, from the lip-sync):
+     * semitones above / below the speaker's usual pitch; the head and brows follow it a little.
+     * @param {{ pitch?: number, voiced?: boolean }|null} v
+     */
+    setIntonation(v) { director.setIntonation(v); },
     /** @param {{smile?:number, browUp?:number}} e */
     setExpression(e) { director.setExpression(e); stage.requestRender(); },
     blink() { director.blink(); stage.requestRender(); },
@@ -341,6 +348,7 @@ export async function createAvatar(canvas, options = {}) {
         head.setOptions?.({ palette: ctx.palette });
       }
       if (p.idleMotion !== undefined) director.setIdleMotion(p.idleMotion);
+      if (p.expressiveness !== undefined) director.setExpressiveness(p.expressiveness);
       if (p.zoom !== undefined) { stage.setZoom(p.zoom); syncParticleView(); }
       stage.requestRender();
     },

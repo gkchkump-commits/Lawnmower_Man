@@ -69,6 +69,8 @@ export const SECTIONS = [
       { type: 'range', path: 'avatar.particles', label: 'Particles', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'range', path: 'avatar.bloom', label: 'Glow', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'toggle', path: 'avatar.followCursor', label: 'Eyes follow the cursor' },
+      // how much the voice moves the head, brows and face (nods, glances, brows on questions)
+      { type: 'range', path: 'avatar.expressiveness', label: 'Expressiveness', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
     ],
   },
   {

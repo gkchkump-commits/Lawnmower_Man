@@ -193,7 +193,7 @@ export class Director {
     this._mouth = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, at: -Infinity };
     this._speechTarget = 0;
     // speech prosody (secondary motion): active impulses { at, kind, amp, ... }
-    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number }>} */
+    /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number, size?: number, extra?: boolean }>} */
     this._kicks = [];
     this._lastAccent = -Infinity;
     this._lastCue = -Infinity;
@@ -380,12 +380,17 @@ export class Director {
 
   /**
    * A nod; one started moments ago (an accent and an emphasis together) takes the larger size
-   * instead of adding up. @param {number} t @param {number} amp
+   * instead of adding up. A nod already under way grows by a second pulse from now (raising its
+   * amplitude mid-pulse would step its velocity). @param {number} t @param {number} amp
    */
   _nod(t, amp) {
-    const prev = this._kicks.find((q) => q.kind === 'nod' && t - q.at < 0.12);
+    const prev = this._kicks.find((q) => q.kind === 'nod' && !q.extra && t - q.at < 0.12);
     if (prev) {
-      prev.amp = Math.max(prev.amp, amp);
+      const had = prev.size ?? prev.amp;
+      if (amp <= had) return;
+      prev.size = amp;
+      if (t - prev.at < 1e-6) prev.amp += amp - had;   // (the same frame: it has not moved yet)
+      else this._kick({ at: t, kind: 'nod', amp: amp - had, k: prev.k, yaw: prev.yaw, roll: prev.roll, extra: true });
       return;
     }
     const r = this.rng2;
@@ -410,7 +415,7 @@ export class Director {
     this.expressiveness = Number.isFinite(n) ? clamp(n, 0, EXPRESSIVENESS_MAX) : 1;
   }
 
-  /** @param {{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number }} k */
+  /** @param {{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number, size?: number, extra?: boolean }} k */
   _kick(k) {
     this._kicks.push(k);
     if (this._kicks.length > 24) this._kicks.shift();
@@ -666,6 +671,12 @@ export class Director {
       this._gazeNext = null;
       this._gazeNextAt = Infinity;
       jump = true;
+      if (this._gazeState === 'speaking') {
+        // starting to speak: the first look goes to the listener (not to an old idle or thinking
+        // look-around drawn at full roam), the next look-around comes later
+        this._saccade.x = 0; this._saccade.y = 0;
+        this._saccadeAt = Math.max(this._saccadeAt, time + 0.8 + 0.7 * this.rng3());
+      }
     }
     const gs = this._gazeState;
     const roam = Math.min(1, im);

@@ -92,6 +92,27 @@ describe('director motion: smooth channels', () => {
     expect(both).toBeLessThan(0.75 * (accent + emph)); // added up, it would be ~1x the sum
   });
 
+  it('an emphasis a few frames into an accent\'s nod grows it without a velocity step', () => {
+    // (the system voice sends 'emphasis' at the word start and 'accent' at its stressed vowel)
+    const run = (accent, later) => record({ idleMotion: 0 }, 2, 60, (t, d) => {
+      if (t > 0.5 && d.state !== 'speaking') d.setState('speaking');
+      if (accent && Math.abs(t - 1.2) < 1e-6) d.setProsody({ type: 'accent', strength: 0.3 });
+      if (later && Math.abs(t - (1.2 + 3 / 60)) < 1e-6) d.setProsody({ type: 'emphasis', strength: 1 });
+    }, ['headPitch']);
+    /** the largest one-frame change of the head's pitch velocity (deg/s) */
+    const steps = (r) => {
+      let m = 0;
+      for (let i = 2; i < r.headPitch.length; i++) m = Math.max(m, Math.abs(r.headPitch[i] - 2 * r.headPitch[i - 1] + r.headPitch[i - 2]));
+      return m * 60 * DEG;
+    };
+    const one = run(true, false), alone = run(false, true), grown = run(true, true);
+    const dip = (r) => r.headPitch[70] - Math.min(...r.headPitch.slice(70));
+    expect(dip(grown)).toBeGreaterThan(1.5 * dip(one));
+    // as smooth as the emphasis' own nod (raising the running nod's amplitude stepped its speed
+    // by ~5x that)
+    expect(steps(grown)).toBeLessThan(1.3 * steps(alone));
+  });
+
   it('60 and 144 Hz show the same motion (no frame-rate dependent ticks)', () => {
     const keys = ['headPitch', 'headYaw', 'jawOpen', 'mouthPress', 'energy'];
     const mouth = (t, d) => {
@@ -224,6 +245,23 @@ describe('director motion: gaze', () => {
       expect(sp, `seed ${seed}`).toBeGreaterThan(0.35);
       expect(sp, `seed ${seed}`).toBeLessThan(0.9);
     }
+  });
+
+  it('starting to speak, the first look goes to the listener, not to an old look-around', () => {
+    let worst = 0;
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
+      const d = new Director({ seed });
+      const dt = 1 / 60;
+      let t = 0;
+      const go = (s, secs, f) => { d.setState(s); for (let i = 0; i < secs * 60; i++) { t += dt; const a = d.update(dt, t); if (f) f(i * dt, a); } };
+      go('idle', 6);
+      go('thinking', 4);
+      go('speaking', 1, (s) => {
+        // (after the ~0.1-0.25 s the eyes take to follow the state, before the next look-around)
+        if (s > 0.45 && s < 0.8) worst = Math.max(worst, Math.abs(d.eyes.x));
+      });
+    }
+    expect(worst).toBeLessThan(1.5); // deg; an idle look-around reaches ~4.8
   });
 
   it('a state change brings a saccade to the new gaze ~0.1-0.35 s later', () => {

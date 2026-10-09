@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { defaultHotkeys } from '../../../electron/settings.js';
+import { windowLayout } from '../../../electron/window-manager.js';
 
 const m = vi.hoisted(() => {
   const handlers = new Map();
@@ -16,10 +17,11 @@ const m = vi.hoisted(() => {
   const display = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 };
   const userData = { dir: '' };
   const cursor = { x: 0, y: 0 };
-  return { handlers, listeners, appEvents, windows, display, userData, cursor, protocolHandler: null, sessionHandlers: {} };
+  return { handlers, listeners, appEvents, windows, display, extraDisplays: [], userData, cursor, protocolHandler: null, sessionHandlers: {} };
 });
 
-vi.mock('electron', () => {
+vi.mock('electron', async () => {
+  const { pickDisplay } = await import('../../../electron/window-manager.js');
   const fn = () => vi.fn();
   class FakeWebContents {
     constructor() {
@@ -93,7 +95,13 @@ vi.mock('electron', () => {
     },
     nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })) },
     protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn((scheme, h) => { m.protocolHandler = h; }) },
-    screen: { getPrimaryDisplay: () => m.display, getAllDisplays: () => [m.display], getDisplayMatching: () => m.display, getCursorScreenPoint: () => ({ ...m.cursor }), on: vi.fn() },
+    screen: {
+      getPrimaryDisplay: () => m.display,
+      getAllDisplays: () => [m.display, ...m.extraDisplays],
+      getDisplayMatching: (r) => pickDisplay(r, [m.display, ...m.extraDisplays]) || m.display,
+      getCursorScreenPoint: () => ({ ...m.cursor }),
+      on: vi.fn(),
+    },
     session: {
       defaultSession: {
         webRequest: {
@@ -296,6 +304,7 @@ describe('electron/main.js wiring', () => {
     };
     const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
     const wa = m.display.workArea;
+    await invoke('lm:settings:set', { window: { sizePreset: 'medium' } }); // 400×840 with chat
     win.setBounds({ x: 900, y: 300, width: 400, height: 840 });
     const start = win.getBounds();
     Object.assign(m.cursor, { x: 1000, y: 400 });
@@ -350,6 +359,39 @@ describe('electron/main.js wiring', () => {
     const tray = main.__test.state.tray;
     expect(tray.menu.template.some((i) => i.label === 'Lock position' && i.type === 'checkbox')).toBe(true);
     expect(tray.menu.template.some((i) => i.label === 'Reset position')).toBe(true);
+  });
+
+  it('a drop on a shorter display refits the 2:3 avatar + chat to it; back on the big one it grows again', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    // a 1080p laptop at 150 % to the right of the primary: 1280×720 DIP, 672 px of work area
+    const laptop = { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 720 }, workArea: { x: 1920, y: 0, width: 1280, height: 672 }, scaleFactor: 1.5 };
+    m.extraDisplays.push(laptop);
+    try {
+      await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true, lockPosition: false } });
+      win.setBounds({ x: 1400, y: 100, width: 400, height: 840 });
+      Object.assign(m.cursor, { x: 1500, y: 200 });
+      drag('drag-start');
+      Object.assign(m.cursor, { x: 1500 + 900, y: 200 });
+      await sleep(60);
+      drag('drag-end');
+      const fit = windowLayout('medium', true, laptop.workArea);
+      expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: fit.width, height: fit.height });
+      expect(win.bounds.x).toBeGreaterThanOrEqual(laptop.workArea.x);
+      expect(win.bounds.y + win.bounds.height).toBeLessThanOrEqual(laptop.workArea.y + laptop.workArea.height);
+      expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+      // dragged back onto the primary display: the full medium + chat size again
+      Object.assign(m.cursor, { x: win.bounds.x + 50, y: 300 });
+      drag('drag-start');
+      Object.assign(m.cursor, { x: 900, y: 300 });
+      await sleep(60);
+      drag('drag-end');
+      expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: 400, height: 840 });
+      expect(win.bounds.x + win.bounds.width).toBeLessThanOrEqual(1920);
+    } finally {
+      m.extraDisplays.length = 0;
+      await invoke('lm:settings:set', { window: { sizePreset: 'large' } }); // as the tests below expect
+    }
   });
 
   it('cancel IPC validates the turn id', async () => {

@@ -8,6 +8,7 @@ import {
   clampToWorkArea,
   defaultBounds,
   dragBounds,
+  initialBounds,
   pickDisplay,
   placeWindow,
   reclamp,
@@ -77,6 +78,21 @@ describe('placement', () => {
   it('resets when the saved monitor is gone', () => {
     const b = placeWindow({ saved: { x: 3000, y: 100 }, size, displays: [primary], primary });
     expect(b).toEqual(defaultBounds(size, primary.workArea));
+  });
+  it('sizes the window for the display it opens on (a shorter second screen gets a smaller one)', () => {
+    // a 1080p laptop at 150 % next to the primary: 1280×720 DIP, 672 px of work area
+    const laptop = { id: 3, bounds: { x: 1920, y: 0, width: 1280, height: 720 }, workArea: { x: 1920, y: 0, width: 1280, height: 672 } };
+    const displays = [primary, laptop];
+    const there = initialBounds({ saved: { x: 2400, y: 0 }, preset: 'medium', showChat: true, displays, primary });
+    expect(there.layout).toEqual(windowLayout('medium', true, laptop.workArea));
+    expect(there.bounds).toEqual({ x: 2400, y: 0, width: there.layout.width, height: there.layout.height });
+    expect(there.layout.avatar.height + there.layout.chat.height).toBeLessThanOrEqual(672);
+    expect(there.layout.avatar.height / there.layout.avatar.width).toBe(1.5);
+    // on the primary (or with nothing saved) it is the primary's layout
+    const here = initialBounds({ saved: { x: 100, y: 100 }, preset: 'medium', showChat: true, displays, primary });
+    expect(here.bounds).toEqual({ x: 100, y: 100, width: 400, height: 840 });
+    expect(initialBounds({ saved: null, preset: 'large', showChat: false, displays, primary }).bounds)
+      .toEqual(placeWindow({ saved: null, size: windowLayout('large', false, primary.workArea), displays, primary }));
   });
   it('pickDisplay uses overlap, then nearest centre', () => {
     expect(pickDisplay({ x: 1900, y: 0, width: 400, height: 400 }, [primary, second]).id).toBe(2);

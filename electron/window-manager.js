@@ -154,6 +154,25 @@ export function placeWindow({ saved, size, displays, primary }) {
 }
 
 /**
+ * Size and place the window at start: placeWindow, with the layout fitted to the display the
+ * window opens on. A saved position on a shorter second screen needs a smaller window (2:3 avatar
+ * + chat) than the primary display would give.
+ * @param {{ saved: {x:number,y:number}|null|undefined, preset: unknown, showChat: boolean, displays: DisplayLike[], primary: DisplayLike }} o
+ * @returns {{ layout: ReturnType<typeof windowLayout>, bounds: Rect }}
+ */
+export function initialBounds({ saved, preset, showChat, displays, primary }) {
+  let layout = windowLayout(preset, showChat, primary.workArea);
+  let bounds = placeWindow({ saved, size: layout, displays, primary });
+  const d = pickDisplay(bounds, displays) || primary;
+  const fitted = windowLayout(preset, showChat, d.workArea);
+  if (fitted.width !== layout.width || fitted.height !== layout.height) {
+    layout = fitted;
+    bounds = placeWindow({ saved, size: layout, displays, primary });
+  }
+  return { layout, bounds };
+}
+
+/**
  * Resize keeping the corner nearest the screen edge fixed (a window docked bottom-right grows
  * up and to the left), then clamp onto the display.
  * @param {Rect} old @param {{ width: number, height: number }} size @param {Rect} wa @returns {Rect}

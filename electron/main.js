@@ -48,7 +48,7 @@ import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.
 import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
-import { windowLayout, placeWindow, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, DRAG_MAX_MS } from './window-manager.js';
+import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, DRAG_MAX_MS } from './window-manager.js';
 import {
   APP_HOST,
   APP_ORIGIN,
@@ -397,9 +397,9 @@ function appIcon() {
 
 function createWindow() {
   const s = /** @type {SettingsStore} */ (state.settings).get();
-  const primary = screen.getPrimaryDisplay();
-  const layout = windowLayout(s.window.sizePreset, s.window.showChat, primary.workArea);
-  const bounds = placeWindow({ saved: s.window.position, size: layout, displays: screen.getAllDisplays(), primary });
+  const { bounds } = initialBounds({
+    saved: s.window.position, preset: s.window.sizePreset, showChat: s.window.showChat, displays: screen.getAllDisplays(), primary: screen.getPrimaryDisplay(),
+  });
 
   const win = new BrowserWindow({
     ...bounds,
@@ -606,6 +606,7 @@ function stepDragFinal(win, drag) {
   const last = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), true) || win.getBounds();
   const next = settleDrop(last, screen.getAllDisplays(), screen.getPrimaryDisplay());
   win.setBounds(next);
+  applyWindowLayout(); // dropped on a display of another size: the 2:3 avatar + chat must fit it
   savePosition();
 }
 
@@ -663,6 +664,7 @@ function reclampWindow() {
   if (!win || win.isDestroyed()) return;
   const next = reclamp(win.getBounds(), screen.getAllDisplays(), screen.getPrimaryDisplay());
   win.setBounds(next);
+  applyWindowLayout(); // moved to another display, or this one's resolution / scaling changed
 }
 
 /**

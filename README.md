@@ -122,6 +122,8 @@ Nothing is ever approved automatically (in assistant mode only web *searches* an
 
 Both share a GPU particle aura (cyan and amber motes, cyan wisps) and bloom, and both output premultiplied alpha, so black is fully transparent on the desktop.
 
+**Voice character.** The local voice now sounds like a hologram AI: *Settings → Voice → Character* is **Synth** by default (the voice with a pitch-locked vocoder layer, a doubler, a metallic sheen and digital air, still easy to understand), **Vocoder** (fully synthetic, the pitch snapped to notes), **Robot** (monotone, ring-modulated) or **Natural** (unprocessed). *Settings → Voice → Intensity* sets how strong it is (default 60 %). It runs on the audio thread with no added delay and the mouth follows the unprocessed voice, so the lip-sync is unchanged. The system voice (used while the local voice is not running) cannot be processed. Details and measurements: [docs/VOICE.md](docs/VOICE.md#24-voice-character).
+
 **Lip-sync.** The mouth follows the actual words, with either voice. With the local voice it plays the viseme timeline that comes with the audio; with a Windows (system) voice it works the sounds out from the text and keeps them in step with the voice's word timing. The lips close on *m*, *b* and *p*, the lower lip tucks under the teeth on *f* and *v*, the lips round ahead of *o* and *oo*, the tongue shows on *th* and *l*, and the mouth rests at commas and full stops. While talking, the head nods slightly on stressed words, the brows lift on questions, blinks fall between phrases, and a friendly sentence ends with a small smile. [docs/RENDERER.md](docs/RENDERER.md#lip-sync) has the details; see also the [visemes](docs/screenshots/mouth_visemes.jpg) and a [speech film strip](docs/screenshots/mouth_speech.jpg).
 
 ![Both renderers over a light desktop, a wallpaper and a dark checkerboard](docs/screenshots/transparency.jpg)
@@ -162,6 +164,7 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `src/vision/` | the camera: capture, face tracking (MediaPipe, in a worker), attention, presence, eye contact, snapshots ([docs/CAMERA.md](docs/CAMERA.md)) |
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
+| `tools/voicefx/` | renders the voice characters offline with the app's own DSP (demos, tuning) |
 | `docs/ARCHITECTURE.md` | the interface contract between all of the above |
 | `.github/workflows/release.yml` | Windows installer build, install + end-to-end test of the installed app, publishing on `v*` tags / GitHub releases |
 

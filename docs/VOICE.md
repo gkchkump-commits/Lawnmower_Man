@@ -317,7 +317,14 @@ fully intelligible to listeners: Shannon et al. 1995, Friesen et al. 2001), so t
 relative measure. The synth default was tuned
 on these numbers: a louder vocoder layer, or 20 bands instead of 28, smears the formants enough to
 cost ~10 points of recogniser accuracy. Cost: 1.9 % of the audio thread in Chromium (~0.05 ms per
-2.7 ms block); the main thread only hands the clip over (~0.1 ms). A clip start (decode + graph) takes
+2.7 ms block) on average; the main thread only hands the clip over (~0.1 ms). Cold start: the
+first voiced clip of a session used to run the pitch analysis and the voiced DSP before V8 had
+compiled them, on the audio thread (its first 200 ms of audio took 85-120 ms of CPU, single blocks
+4-7 ms against the 2.7 ms budget: a possible crackle at the start of the first reply). While the
+node idles, the processor now warms up a scratch effect on a synthetic voice (one block per idle
+block, synth then vocoder and robot, ~1.2 s, never output, dropped as soon as a clip arrives):
+18-30 ms for the first clip against 11-21 ms for the second, with at most a few blocks just over
+budget (`node tools/voicefx/coldstart.mjs`, Node on a shared 2.1 GHz vCPU). A clip start (decode + graph) takes
 p50 1.6 ms / max 6.1 ms for a 7-second sentence, with the native base64 decoder and a typed 16-bit
 WAV path in `src/audio/wav.js`.
 

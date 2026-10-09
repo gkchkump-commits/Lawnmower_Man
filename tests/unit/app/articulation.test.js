@@ -7,6 +7,7 @@ import {
 } from '../../../src/audio/articulation.js';
 import { textToWords } from '../../../src/audio/g2p.js';
 import { Director } from '../../../src/avatar/director.js';
+import { rigUniforms } from '../../../src/avatar/heads/relief/rig.js';
 
 const ch = (name) => CHANNELS.indexOf(name);
 const at = (segs, t) => toShape(sampleSegments(segs, t));
@@ -247,6 +248,13 @@ describe('speech plans (system voice)', () => {
 
 describe('through the director (what the head shows)', () => {
   /** Drive a director with the dominance output of `segs` at `fps`; return the AnimState samples. */
+  // the reference pack's relief rig: the lip opening at the mouth's centre in plate px
+  const RIG = { faceH: 651.945 / 1168, mouthHalfW: 100.261 / 1168, px: 1 / 1168, plateW: 784 / 1168, lidTravel: 0,
+    eyes: { L: { height: 0.02, irisR: 0.02 }, R: { height: 0.02, irisR: 0.02 } } };
+  const lipGapPx = (a) => {
+    const u = rigUniforms(RIG, a, {});
+    return (Math.max(0, u.upperLift) + Math.max(0, u.jawDrop + u.lowerDrop)) / RIG.px;
+  };
   function drive(segs, fps, t0, t1) {
     const d = new Director({ seed: 3, idleMotion: 0 });
     d.setState('speaking');
@@ -257,7 +265,7 @@ describe('through the director (what the head shows)', () => {
       d.setMouth(toShape(sampleSegments(segs, Number.isFinite(c) ? c : t)));
       prev = t;
       const a = d.update(1 / fps, t);
-      out.push({ t, press: a.mouthPress, jaw: a.jawOpen, tuck: a.mouthTuck });
+      out.push({ t, press: a.mouthPress, jaw: a.jawOpen, tuck: a.mouthTuck, ap: lipGapPx(a) });
     }
     return out;
   }
@@ -267,7 +275,8 @@ describe('through the director (what the head shows)', () => {
     const segs = segmentsFromVisemes(tl);
     for (const fps of [60, 30]) {
       const frames = drive(segs, fps, 0, 1.2).filter((f) => f.t > 0.6 && f.t < 0.8);
-      const closed = frames.filter((f) => f.press >= 0.8 && f.jaw <= 0.06);
+      // (the relief lips sealed: under 1 plate px apart; the jaw may still be on its way up)
+      const closed = frames.filter((f) => f.press >= 0.8 && f.ap < 1);
       expect(closed.length, `${fps} fps`).toBeGreaterThanOrEqual(1);
     }
   });

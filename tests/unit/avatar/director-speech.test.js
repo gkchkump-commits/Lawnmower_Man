@@ -55,7 +55,7 @@ describe('Director: speech channels', () => {
     for (const k of Object.values(CH)) expect(a[k], k).toBeLessThan(0.01);
   });
 
-  it('presses and tucks fast, rounds slower; the jaw closes fast into a closure', () => {
+  it('presses and tucks fast, rounds slower; the jaw follows into a closure faster than into rest', () => {
     let time = 0;
     const step = (d, m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time); };
     const d1 = new Director({ seed: 3 });
@@ -68,9 +68,17 @@ describe('Director: speech channels', () => {
     // jaw closing: plain (vowel → rest) vs into an m
     const d3 = new Director({ seed: 4 }), d4 = new Director({ seed: 4 });
     for (let i = 0; i < 30; i++) { step(d3, { jaw: 0.7 }); step(d4, { jaw: 0.7 }); }
-    let plain = 1, closure = 1;
-    for (let i = 0; i < 3; i++) { plain = step(d3, { jaw: 0 }).jawOpen; closure = step(d4, { jaw: 0, press: 1 }).jawOpen; }
-    expect(closure).toBeLessThan(0.06);
+    let plain = 1, closure = 1, press = 0;
+    for (let i = 0; i < 3; i++) {
+      plain = step(d3, { jaw: 0 }).jawOpen;
+      const a = step(d4, { jaw: 0, press: 1 });
+      closure = a.jawOpen; press = a.mouthPress;
+    }
+    // the lips seal at once (the rigs bring the lower lip up over a jaw still open); the jaw comes
+    // up behind them, faster than it closes into rest but without snapping shut in a frame or two
+    expect(press).toBeGreaterThan(0.95);
+    expect(closure).toBeLessThan(0.8 * plain);
+    expect(closure).toBeGreaterThan(0.1);
     expect(plain).toBeGreaterThan(0.15);
   });
 

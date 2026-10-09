@@ -78,13 +78,15 @@ const DEG = 180 / Math.PI;
  * Mouth channel springs: [opening, closing] natural frequency (rad/s; t90 = 3.89 / omega). The
  * lip-sync output is already coarticulated, so these only add the inertia of real tissue: lips
  * press and tuck fast (t90 35-45 ms), rounding is slower; the jaw opens in ~70 ms and closes a
- * bit slower, except into a closure (m b p, f v), where it rises as fast as the lips close.
+ * bit slower, a little faster into a closure (m b p, f v). The lips seal a closure on their own
+ * (the rigs bring the lower lip up over a jaw still on its way), so the heavier jaw follows them
+ * as it does in speech, without snapping shut within a frame.
  */
 export const MOUTH_OMEGA = Object.freeze({
   jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [110, 55], tuck: [90, 50], teeth: [50, 33], tongue: [55, 33],
 });
-/** The jaw's closing spring into a closure (a 50 ms "m" really closes). */
-const JAW_INTO_CLOSURE = 110;
+/** The jaw's closing spring into a closure (t90 78 ms; the lips have sealed by then). */
+const JAW_INTO_CLOSURE = 50;
 const MOUTH_IN = /** @type {const} */ (['jaw', 'wide', 'round', 'press', 'tuck', 'teeth', 'tongue']);
 const MOUTH_OUT = /** @type {const} */ ({
   jaw: 'jawOpen', wide: 'mouthWide', round: 'mouthRound', press: 'mouthPress', tuck: 'mouthTuck',
@@ -551,8 +553,8 @@ export class Director {
     }
     // the lips part a little for a breath in, unless they are closing for a sound
     if (inhale > 0) mt.jaw = Math.max(mt.jaw, 0.07 * inhale * (1 - clamp01(Math.max(mt.press, mt.tuck) * 2)));
-    // into a closure (lips pressing for m b p, tucking for f v) the jaw rises as fast as the
-    // lips close: a 50 ms "m" must really close, not just dip
+    // into a closure (lips pressing for m b p, tucking for f v) the jaw rises a little faster
+    // behind the lips (which seal a 50 ms "m" by themselves)
     const closing = clamp01(Math.max(mt.press, mt.tuck) * 1.6 - 0.4);
     for (const c of MOUTH_IN) {
       const s = this._sm[c];

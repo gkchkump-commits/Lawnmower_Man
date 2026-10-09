@@ -113,13 +113,11 @@ describe('pinkNoise', () => {
     let zeros = 0;
     for (let k = 0; k < 200; k++) if (Math.abs(pinkNoise(k / 0.07, 3)) < 1e-6) zeros++;
     expect(zeros).toBe(0);
-    // rms ~0.3, and its autocorrelation has no strong period
+    // its autocorrelation has no strong period
     const dt = 1 / 10;
     const x = Array.from({ length: 3000 }, (_, i) => pinkNoise(i * dt, 3));
     const m = x.reduce((a, b) => a + b, 0) / x.length;
     const v = x.reduce((a, b) => a + (b - m) ** 2, 0) / x.length;
-    expect(Math.sqrt(v)).toBeGreaterThan(0.15);
-    expect(Math.sqrt(v)).toBeLessThan(0.6);
     let best = 0;
     for (let lag = 50; lag < 1500; lag += 5) {
       let c = 0;
@@ -127,6 +125,20 @@ describe('pinkNoise', () => {
       best = Math.max(best, c / (x.length - lag) / v);
     }
     expect(best).toBeLessThan(0.6);
+  });
+
+  it('has unit rms for any octave count (the sway amplitudes are rms values)', () => {
+    const rms = (o) => {
+      let s = 0, n = 0;
+      for (let seed = 1; seed <= 5; seed++) {
+        for (let t = 0; t < 3000; t += 0.1) { const v = pinkNoise(t, seed, o); s += v * v; n++; }
+      }
+      return Math.sqrt(s / n);
+    };
+    for (const o of [{}, { f0: 0.1 }, { f0: 0.6, octaves: 2 }, { octaves: 1, f0: 1 }]) {
+      expect(rms(o)).toBeGreaterThan(0.9);
+      expect(rms(o)).toBeLessThan(1.1);
+    }
   });
 
   it('log-normal draws: median and spread, clamped', () => {

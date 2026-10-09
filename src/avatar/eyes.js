@@ -8,11 +8,12 @@
 //   fixation   between saccades the eyes hold still (no slow drifting toward a target)
 //   pursuit    a moving target is followed smoothly (gain ~0.9, at most 30 deg/s, ~100 ms
 //              latency), with catch-up saccades when it gets away (> 1.5 deg)
-//   head       the head takes a share of large shifts (none below ~8 deg), starting ~30 ms after
-//              the eyes and arriving later; over seconds it turns part of the way toward where
-//              the eyes keep looking. The director counter-rotates the eyes against the head
-//              (vestibulo-ocular reflex): the world gaze stays on the target while the head
-//              moves, so eye + head never overshoot.
+//   head       a share of where the eyes look. A target the avatar follows (cursor, face) or
+//              pursues: the head goes along a few hundred ms behind the eyes (never against them).
+//              Its own looks: large shifts take the head along, starting ~30 ms after the eyes
+//              and arriving later; small ones turn it over seconds. The director counter-rotates
+//              the eyes against the head (vestibulo-ocular reflex): the world gaze stays on the
+//              target while the head moves, so eye + head never overshoot.
 
 import { Spring, minJerk, minJerkVel } from './motion.js';
 
@@ -49,6 +50,17 @@ export const EYE_DEFAULTS = Object.freeze({
   /** pursuit starts only after the target has kept moving this long (s); a brief ramp or a
    * step gets a saccade instead */
   pursuitOnset: 0.12,
+  /** the head's goal follows a followed or pursued target with this time constant (s); the
+   * avatar's own looks: over `headSettle` */
+  headFollowTau: 0.1,
+  headSettle: 3,
+  /** the head's spring (rad/s) toward a followed target (t50 = 1.68 / omega: 0.24 s), and its
+   * resting one between the avatar's own looks */
+  headFollowOmega: 7,
+  headOmega: 2.5,
+  /** a moving target: the head's goal leads the eyes by its velocity times this (s), so the head
+   * pursues ~0.2 s behind the eyes instead of ~0.45 s */
+  headLead: 0.25,
 });
 
 export class EyeController {
@@ -63,10 +75,12 @@ export class EyeController {
     this._errSince = NaN;
     this._lastSac = -Infinity;
     this._movingSince = NaN;
+    /** smooth pursuit is on (a moving target) */
+    this.pursuing = false;
     /** the head's share of the gaze (deg): a spring toward a goal set by the saccades */
     this.hx = new Spring();
     this.hy = new Spring();
-    this._hGoal = { x: 0, y: 0, at: -Infinity, omega: 2.5 };
+    this._hGoal = { x: 0, y: 0, at: -Infinity, omega: 0 };
     this._pendingHead = null;
     /** saccades started since the last take(): their amplitudes (deg), for gaze-evoked blinks */
     this.started = /** @type {number[]} */ ([]);
@@ -78,8 +92,9 @@ export class EyeController {
     this.sac = null;
     this._errSince = NaN;
     this._movingSince = NaN;
+    this.pursuing = false;
     this.hx.set(0); this.hy.set(0);
-    this._hGoal = { x: 0, y: 0, at: -Infinity, omega: 2.5 };
+    this._hGoal = { x: 0, y: 0, at: -Infinity, omega: 0 };
     this._pendingHead = null;
   }
 
@@ -118,6 +133,7 @@ export class EyeController {
       if (!fast) this._movingSince = NaN;
       else if (!Number.isFinite(this._movingSince)) this._movingSince = t;
       const moving = fast && t - this._movingSince >= o.pursuitOnset;
+      this.pursuing = moving;
       const ex = tg.x - this.x, ey = tg.y - this.y;
       const err = Math.hypot(ex, ey);
       const tol = tg.now ? 0.1 : moving ? o.pursuitTol : o.fixTol;
@@ -153,22 +169,29 @@ export class EyeController {
         this.y += this.vy * dt;
       }
     }
-    // ---- the head: starts ~30 ms after a saccade, faster for larger shifts; between them it
-    // turns slowly part of the way toward where the eyes keep looking
+    // ---- the head: a share of where the eyes look (or are landing). A followed or pursued target:
+    // the goal goes with it at once and the head follows as a spring (t50 ~0.24 s), so it lags the
+    // eyes but never runs against them. The avatar's own looks: a large shift moves the goal ~30 ms
+    // after the saccade starts (_start), and in between it turns over a few seconds toward where
+    // the eyes keep looking.
     const ph = this._pendingHead;
     if (ph && t >= ph.at) {
       this._hGoal = { x: ph.x, y: ph.y, at: ph.at, omega: ph.omega };
       this._pendingHead = null;
     }
+    const follow = !!tg.reactive || this.pursuing;
     const g = this._hGoal;
-    const settle = 1 - Math.exp(-dt / 3);
-    const fx = this.sac ? this.sac.x1 : this.x, fy = this.sac ? this.sac.y1 : this.y;
+    const settle = 1 - Math.exp(-dt / (follow ? o.headFollowTau : o.headSettle));
+    // (a moving target: the head anticipates its motion a little, as pursuit itself does)
+    const fx = (this.sac ? this.sac.x1 : this.x) + o.headLead * (tg.vx || 0);
+    const fy = (this.sac ? this.sac.y1 : this.y) + o.headLead * (tg.vy || 0);
     const share = tg.headShare ?? 0.3;
     g.x += (share * fx - g.x) * settle;
     g.y += (0.5 * share * fy - g.y) * settle;
     const age = t - g.at;
-    const omega = 2.5 + (g.omega - 2.5) * Math.exp(-Math.max(0, age) / 0.6);
-    // (the fast goal relaxes toward the sustained share over a few seconds, above)
+    const base = follow ? o.headFollowOmega : o.headOmega;
+    // (a large shift's quick start fades into the resting spring over ~0.6 s)
+    const omega = base + Math.max(0, g.omega - base) * Math.exp(-Math.max(0, age) / 0.6);
     this.hx.step(g.x, omega, dt);
     this.hy.step(g.y, omega, dt);
     return this;
@@ -183,13 +206,12 @@ export class EyeController {
     this._errSince = NaN;
     this.started.push(amp);
     if (this.started.length > 8) this.started.shift();
-    // large shifts: the head takes a share of the remaining way, quickly
+    // large shifts: the head takes its share of where the eyes land (in the world, so a head
+    // still on its way from the last look is never sent backwards), quickly
     const big = smooth(8, 30, amp);
     if (big > 0) {
       const s = Math.max(share, 0.1 + 0.25 * big);
-      this._pendingHead = {
-        at: t + 0.03, x: this.hx.x + s * (x1 - this.hx.x), y: this.hy.x + 0.5 * s * (y1 - this.hy.x), omega: 4 + 8 * big,
-      };
+      this._pendingHead = { at: t + 0.03, x: s * x1, y: 0.5 * s * y1, omega: 4 + 8 * big };
     }
   }
 

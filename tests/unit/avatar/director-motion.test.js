@@ -177,6 +177,55 @@ describe('director motion: gaze', () => {
     expect(Math.min(...iv)).toBeGreaterThanOrEqual(8 - 1e-9);
   });
 
+  it('the head goes along with a followed cursor: with the sweep, a share of a flick, never against the eyes', () => {
+    // a 30 Hz sample-and-hold cursor: a 2 s sweep across (-0.8 -> 0.8), a 2 s hold, a flick to -0.6
+    const q = (t) => Math.floor(t * 30) / 30;
+    const cursor = (t) => {
+      const s = q(t) - 1;
+      if (s < 2) return -0.8 + 1.6 * (0.5 - 0.5 * Math.cos((Math.PI * Math.max(0, s)) / 2));
+      return s < 4 ? 0.8 : -0.6;
+    };
+    let last = NaN;
+    const rec = record({ idleMotion: 0 }, 7, 60, (t, d) => {
+      if (t < 1) return;
+      const x = cursor(t);
+      if (x !== last) { d.lookAt(x, 0); last = x; }
+    }, ['headYaw', 'gazeX']);
+    const yaw = rec.headYaw.map((v) => v * DEG);
+    const at = (t) => yaw[Math.round(t * 60) - 1];
+    // late in the sweep (the cursor and the eyes moving right) the head turns right too
+    for (let t = 1.8; t < 3; t += 1 / 60) expect(at(t + 1 / 60) - at(t), `t = ${t.toFixed(2)}`).toBeGreaterThan(-0.005);
+    // it keeps up: within 0.5 s of the sweep's end it is most of the way to its share of the hold
+    // (0.38 x 11.7 deg), not seconds later
+    expect(at(3.5)).toBeGreaterThan(3.5);
+    expect(at(4.9)).toBeGreaterThan(3.8);
+    expect(at(4.9)).toBeLessThan(5.2);
+    // a 20 deg flick takes ~7 deg of head along (not ~2), late but within a second
+    const flick = at(4.98) - at(6.2);
+    expect(flick).toBeGreaterThan(6);
+    expect(flick).toBeLessThan(9);
+    // the eyes do most of it and never pass the clamp
+    expect(Math.max(...rec.gazeX.map(Math.abs))).toBeLessThan(1);
+  });
+
+  it('idle sway: ~0.8 deg rms yaw over 2 min, moving at ~0.5 deg/s (the documented amplitudes)', () => {
+    for (const seed of [1, 2, 3]) {
+      const d = new Director({ seed });
+      const dt = 1 / 60;
+      const yaw = [];
+      for (let i = 1; i <= 120 * 60; i++) yaw.push(d.update(dt, i * dt).headYaw * DEG);
+      const m = yaw.reduce((a, b) => a + b, 0) / yaw.length;
+      const rms = Math.sqrt(yaw.reduce((a, b) => a + (b - m) ** 2, 0) / yaw.length);
+      let sp = 0;
+      for (let i = 1; i < yaw.length; i++) sp += Math.abs(yaw[i] - yaw[i - 1]) / dt;
+      sp /= yaw.length - 1;
+      expect(rms, `seed ${seed}`).toBeGreaterThan(0.6);
+      expect(rms, `seed ${seed}`).toBeLessThan(1.2);
+      expect(sp, `seed ${seed}`).toBeGreaterThan(0.35);
+      expect(sp, `seed ${seed}`).toBeLessThan(0.9);
+    }
+  });
+
   it('a state change brings a saccade to the new gaze ~0.1-0.35 s later', () => {
     const rec = record({ idleMotion: 0 }, 2, 60, (t, d) => { if (Math.abs(t - 0.5) < 1e-6) d.setState('thinking'); }, ['gazeY', 'headPitch']);
     const w = rec.gazeY.map((g, i) => g * GAZE_DEG.y + rec.headPitch[i] * DEG);

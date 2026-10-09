@@ -148,6 +148,8 @@ export function worldGaze(a) {
 const ENERGY = { idle: 0.5, listening: 0.78, thinking: 0.62, speaking: 0.55, error: 0.32, sleep: 0.14 };
 /** lookAt(x, y) at +-1 (the stage's edges): this many degrees of world gaze */
 const LOOK_DEG = { x: 0.85 * GAZE_DEG.x, y: 8 };
+/** The head's share of a target the avatar follows (lookAt: cursor, camera face). */
+const HEAD_SHARE_FOLLOW = 0.38;
 /** Settled renders keep the original gaze units (6.78 deg vertically per unit, before the relief's
  * vertical iris range was widened): the same on-screen pose. */
 const SETTLED_GY = 6.78 / GAZE_DEG.y;
@@ -155,8 +157,10 @@ const WEIGHTED = /** @type {const} */ (['listening', 'thinking', 'speaking', 'er
 const WEIGHT_OMEGA = { listening: 8, thinking: 8, speaking: 8, error: 14, sleep: 3.2 };
 /** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
 const BLINK_MEDIAN = { idle: 2.8, listening: 4.0, thinking: 2.4, speaking: 2.3, error: 2.6, sleep: 3 };
-/** Idle sway (rad): 1/f-like noise, about 1.2 deg rms yaw, 0.75 pitch, 0.4 roll. */
-const SWAY = { yaw: 0.06, pitch: 0.037, roll: 0.02, fast: 0.005 };
+/** Idle sway (rad, rms: pinkNoise has unit rms): 1/f-like noise from 0.1 Hz (yaw, pitch) and
+ * 0.09 Hz (roll) up, 1 deg yaw, 0.45 pitch, 0.26 roll (over 2 min: ~0.8 / 0.45 / 0.25 deg rms,
+ * 0.5 deg/s mean yaw speed), and a faint fast tremor (0.07 deg). */
+const SWAY = { yaw: 1.0 / DEG, pitch: 0.45 / DEG, roll: 0.26 / DEG, fast: 0.07 / DEG };
 
 /** Probabilistic OR of 0..1 values (smooth where max() would kink). */
 const softOr = (a, b) => 1 - (1 - a) * (1 - b);
@@ -587,14 +591,14 @@ export class Director {
 
     // ---- breathing -------------------------------------------------------------------------------
     // the period wanders around 4 s (3.4-4.6), the depth varies, and now and then a sigh
-    const per = (4 + 0.6 * pinkNoise(time, this.seed + 71, { f0: 0.03, octaves: 2 }) * 2.5) * lerp(1, 1.55, w.sleep);
+    const per = (4 + 0.35 * pinkNoise(time, this.seed + 71, { f0: 0.03, octaves: 2 })) * lerp(1, 1.55, w.sleep);
     this._breathPhase += (dt / clamp(per, 3, 7)) * Math.PI * 2;
     if (time >= this._nextSigh) {
       this._sighAt = time;
       this._nextSigh = time + 40 + 80 * this.rng3();
     }
     const sigh = envelope(time - this._sighAt, 1.4, 0.6, 2.4);
-    const depth = clamp(0.82 + 0.25 * pinkNoise(time, this.seed + 73, { f0: 0.05, octaves: 2 }) + 0.18 * sigh, 0.55, 1);
+    const depth = clamp(0.82 + 0.06 * pinkNoise(time, this.seed + 73, { f0: 0.05, octaves: 2 }) + 0.18 * sigh, 0.55, 1);
     const breathIdle = 0.5 - 0.5 * Math.cos(this._breathPhase) * depth;
     // while speaking, breaths come at the pauses (the inhale cues), not on a clock
     o.breath = clamp01(lerp(breathIdle, 0.25 + 0.6 * this._s.speechBreath.x, w.speaking));
@@ -602,9 +606,9 @@ export class Director {
     // ---- head --------------------------------------------------------------------------------------
     const s = this.seed;
     const sway = im * (1 - 0.6 * w.sleep);
-    // 1/f-like sway (a handful of octaves from ~0.07 Hz, never repeating) plus a faint fast tremor
-    const yawSway = (SWAY.yaw * pinkNoise(time, s + 11) + SWAY.fast * pinkNoise(time, s + 12, { f0: 0.6, octaves: 2 })) * sway;
-    const pitchSway = (SWAY.pitch * pinkNoise(time, s + 23) + SWAY.fast * pinkNoise(time, s + 24, { f0: 0.7, octaves: 2 })) * sway;
+    // 1/f-like sway (a handful of octaves from ~0.1 Hz, never repeating) plus a faint fast tremor
+    const yawSway = (SWAY.yaw * pinkNoise(time, s + 11, { f0: 0.1 }) + SWAY.fast * pinkNoise(time, s + 12, { f0: 0.6, octaves: 2 })) * sway;
+    const pitchSway = (SWAY.pitch * pinkNoise(time, s + 23, { f0: 0.1 }) + SWAY.fast * pinkNoise(time, s + 24, { f0: 0.7, octaves: 2 })) * sway;
     const rollSway = SWAY.roll * pinkNoise(time, s + 37, { f0: 0.09 }) * sway;
     const spk = o.speech * w.speaking * ex;
     // posture: the state's (through the weight springs) plus speech motion (through a spring)
@@ -739,7 +743,9 @@ export class Director {
     tg.x = x; tg.y = y;
     tg.reactive = !!look && !jump;
     tg.now = jump;
-    tg.headShare = gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
+    // the head goes along with a followed target (cursor, face: a 20 deg look ends with ~7 deg of
+    // head, as before the eye controller) more than with the avatar's own looks
+    tg.headShare = look ? HEAD_SHARE_FOLLOW : gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
     this.eyes.update(dt, time, tg);
   }
 

@@ -171,25 +171,29 @@ function vgNoise(x, seed) {
   return 0.55 * val + 1.1 * grad;
 }
 
+/** rms of one octave of vgNoise (measured over 8 seeds x 4000 s: 0.3206) */
+const VG_RMS = 0.3206;
+
 /**
  * 1/f-like noise of time: `octaves` layers from `f0` Hz up, each `lacunarity` x faster (a
  * non-integer ratio, and a random phase per layer and seed, so their lattice points never line
  * up) and `gain` x weaker (gain = lac^(-beta/2) for a position spectrum ~ 1/f^beta). Smooth
- * (C2), deterministic, non-repeating; rms about 0.35 for the defaults.
+ * (C2), deterministic, non-repeating; unit rms for any octave count (the layers are independent,
+ * so it is normalised by their root-sum-square), peaks about +-3.
  * @param {number} t seconds @param {number} seed
  * @param {{ f0?: number, octaves?: number, lacunarity?: number, gain?: number }} [o]
  */
 export function pinkNoise(t, seed, o = {}) {
   const f0 = o.f0 ?? 0.07, n = o.octaves ?? 5, lac = o.lacunarity ?? 1.93, gain = o.gain ?? 0.62;
-  let sum = 0, amp = 1, f = f0, norm = 0;
+  let sum = 0, amp = 1, f = f0, norm2 = 0;
   for (let k = 0; k < n; k++) {
     const s = (seed | 0) * 31 + k * 1013;
     sum += amp * vgNoise(t * f + 97.3 * hash(k, s), s);
-    norm += amp;
+    norm2 += amp * amp;
     amp *= gain;
     f *= lac;
   }
-  return sum / norm;
+  return sum / (Math.sqrt(norm2) * VG_RMS);
 }
 
 /** Standard normal from a uniform generator (Box-Muller, one value). @param {() => number} rng */

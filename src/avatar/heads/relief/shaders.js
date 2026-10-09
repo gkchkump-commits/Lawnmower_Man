@@ -32,8 +32,12 @@ uniform float uLowerClose; // the part of uLowerDrop that closes the lips over t
 
 // The lips part as a lens: fully in the middle, tapering to closed corners (the commissures move
 // together, down by a share of the jaw drop), never as a flat-topped slot running into the
-// corners. lensUp / lensLo: 1 at the centre, 0 at and beyond the (current) corners.
-float lensOf(float u, float e) { return pow(clamp(1.0 - u * u, 0.0, 1.0), e); }
+// corners. lensUp / lensLo: 1 at the centre, 0 at and beyond the (current) corners. Over the last
+// LENS_END of the way the lips close smoothly into the seam (the contours meet it without a kink
+// and the mesh, ~5 px apart there, resolves the end: no sharp dark tip).
+#define LENS_END 0.72
+float lensEnd(float u) { return 1.0 - smoothstep(LENS_END, 1.0, u); }
+float lensOf(float u, float e) { return pow(clamp(1.0 - u * u, 0.0, 1.0), e) * lensEnd(u); }
 
 // slitD: rest plate px below the closed-mouth slit (+ below, - above)
 vec3 applyRig(vec3 p, float slitD) {
@@ -276,7 +280,7 @@ void main() {
   float openC = uOpen.x + uOpen.y;
   if (openC > 0.5 && abs(vLip.y) < 1.3 && abs(vLip.x) < 12.0) {
     float mu = abs(vLip.y) / max(0.05, uOpen.z);
-    float lensAt = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6);
+    float lensAt = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6) * (1.0 - smoothstep(0.72, 1.0, mu));
     float k = smoothstep(0.5, 6.0, openC * lensAt) * mB.b;
     float ad = abs(vLip.x);
     col *= 1.0 - 0.55 * k * (1.0 - smoothstep(0.0, 4.5, ad));
@@ -405,7 +409,7 @@ varying vec2 vTongue;
 // warmly by the lips near their edges; open vowels show the body of the tongue low in the mouth.
 vec2 openingAt() {
   float mu = abs(vTongue.x) / max(0.05, uOpen.z);
-  float lens = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6);
+  float lens = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6) * (1.0 - smoothstep(0.72, 1.0, mu));   // (as the rig's lensOf)
   float up = uOpen.x * lens, lo = uOpen.y * lens;
   return vec2(clamp((vTongue.y + up) / max(1.0, up + lo), 0.0, 1.0), lens);
 }

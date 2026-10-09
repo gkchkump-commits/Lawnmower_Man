@@ -7,7 +7,8 @@
 //   { type: 'clip', samples, rate, startTime }  the dry clip about to play at context time
 //                                               `startTime`: its pitch is analysed ahead
 //   { type: 'stats', id }                       → { type: 'stats', id, character, amount,
-//                                                  blocks, inSq, outSq, diffSq, pitchSource }
+//                                                  blocks, clipBlocks, inSq, outSq, diffSq,
+//                                                  pitchSource, failed }
 // A bug in the DSP must never silence the voice: the processor then passes the input through
 // and reports { type: 'error', message } once.
 /* global AudioWorkletProcessor, registerProcessor, sampleRate, currentFrame */
@@ -23,9 +24,10 @@ class LawnmowerVoiceFxProcessor extends AudioWorkletProcessor {
     /** @type {null | { samples: Float32Array, rate: number, startTime: number }} */
     this.pendingClip = null;
     this.failed = false;
-    // what the effect did to the voice (tests and diagnostics): blocks with input, and the
-    // energy of the input, the output and their difference over those blocks
-    this.stats = { blocks: 0, inSq: 0, outSq: 0, diffSq: 0 };
+    // what the effect did to the voice (tests and diagnostics): blocks with input, how many of
+    // them had the pitch from the clip's look-ahead analysis, and the energy of the input, the
+    // output and their difference over those blocks
+    this.stats = { blocks: 0, clipBlocks: 0, inSq: 0, outSq: 0, diffSq: 0 };
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
 
@@ -78,6 +80,7 @@ class LawnmowerVoiceFxProcessor extends AudioWorkletProcessor {
       if (a > 0) {
         const s = this.stats;
         s.blocks++;
+        if (this.fx.pitchSource === 'clip') s.clipBlocks++;
         s.inSq += a;
         s.outSq += b;
         s.diffSq += d;

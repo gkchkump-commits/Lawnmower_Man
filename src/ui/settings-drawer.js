@@ -27,6 +27,12 @@ import { clear, h, icon } from './dom.js';
  * @property {string} [variant]
  */
 
+/** The voice character's hint: what it applies to, with the voice that is speaking now. */
+export const VOICE_FX_HINT = Object.freeze({
+  server: 'Applies to the local voice',
+  system: 'Applies to the local voice; the system voice speaking now cannot be changed',
+});
+
 /** @type {Array<{ id: string, title: string, fields: Field[] }>} */
 export const SECTIONS = [
   {
@@ -53,6 +59,9 @@ export const SECTIONS = [
       // shown instead of the Kokoro list while the local voice is not running (Web Speech voices)
       { type: 'select', path: 'voice.systemVoice', label: 'Voice', options: [['', 'Automatic (most natural voice)']] },
       { type: 'range', path: 'voice.ttsSpeed', label: 'Speed', min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
+      // the local voice's character (src/audio/voicefx.js); the system voice cannot be processed
+      { type: 'select', path: 'voice.character', label: 'Character', hint: VOICE_FX_HINT.server, options: [['synth', 'Synth — hologram AI'], ['vocoder', 'Vocoder — fully synthetic'], ['robot', 'Robot — monotone, metallic'], ['natural', 'Natural — unprocessed']] },
+      { type: 'range', path: 'voice.fxAmount', label: 'Intensity', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'select', path: 'voice.device', label: 'Device', options: [['auto', 'Auto'], ['cuda', 'GPU (CUDA)'], ['cpu', 'CPU']] },
       { type: 'text', path: 'voice.sttModel', label: 'Speech model', suggestions: ['large-v3-turbo', 'distil-large-v3', 'medium.en', 'small.en', 'base.en'] },
       { type: 'button', label: 'Restart voice server', action: 'restartVoice', variant: 'ghost' },
@@ -174,6 +183,14 @@ export class SettingsDrawer {
       const v = getPath(settings, path);
       if (v !== undefined) c.set(v);
     }
+    // the intensity of 'natural' means nothing
+    const amount = this.controls.get('voice.fxAmount');
+    if (amount) {
+      const off = getPath(settings, 'voice.character') === 'natural';
+      amount.row.classList.toggle('disabled', off);
+      /** @type {HTMLInputElement} */ (amount.el).disabled = off;
+      amount.row.title = off ? 'Natural plays the voice unprocessed' : '';
+    }
   }
 
   /** Replace the content of an info block. @param {string} id @param {...any} nodes */
@@ -251,6 +268,8 @@ export class SettingsDrawer {
     const system = this.controls.get('voice.systemVoice');
     if (server) server.row.hidden = source !== 'server';
     if (system) system.row.hidden = source === 'server';
+    const hint = this.controls.get('voice.character')?.row.querySelector('.field-hint');
+    if (hint) hint.textContent = source === 'server' ? VOICE_FX_HINT.server : VOICE_FX_HINT.system;
   }
 
   /** Relabel / hide / disable an action button. @param {string} action @param {{ label?: string, hidden?: boolean, disabled?: boolean, title?: string }} o */
@@ -313,6 +332,8 @@ export class SettingsDrawer {
     const path = /** @type {string} */ (f.path);
     const id = `set-${path.replace(/\./g, '-')}`;
     const label = h('label', { class: 'field-label', for: id }, f.label);
+    // a select or slider with a hint stacks the hint under its label (like a toggle)
+    const labelled = () => (f.hint ? h('div', { class: 'field-text' }, label, h('div', { class: 'field-hint' }, f.hint)) : label);
     const row = h('div', { class: `field field-${f.type}`, dataset: { path } });
     const commit = (v) => this.onChange(patchFor(path, v), path, v);
     let el;
@@ -327,7 +348,7 @@ export class SettingsDrawer {
           if ([...sel.options].every((o) => o.value !== String(v))) sel.append(h('option', { value: v }, String(v)));
           sel.value = String(v);
         };
-        row.append(label, el);
+        row.append(labelled(), el);
         break;
       }
       case 'segmented': {
@@ -382,7 +403,7 @@ export class SettingsDrawer {
           if (document.activeElement !== el) /** @type {HTMLInputElement} */ (el).value = String(v);
           out.textContent = fmt(Number(v));
         };
-        row.append(label, h('div', { class: 'range-wrap' }, el, out));
+        row.append(labelled(), h('div', { class: 'range-wrap' }, el, out));
         break;
       }
       case 'text': {

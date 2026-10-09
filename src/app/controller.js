@@ -244,6 +244,8 @@ export class Controller extends Emitter {
   applySettings(settings) {
     const prev = this.settings;
     this.settings = withDefaults(settings);
+    // the local voice's character (ramped by the player's effect, also mid-sentence)
+    this.player.setVoiceFx?.({ character: this.settings.voice.character, amount: this.settings.voice.fxAmount });
     if (prev.voice.speakReplies && !this.settings.voice.speakReplies && this.speech.busy) this.stopSpeaking();
     this._syncHandsFree();
   }

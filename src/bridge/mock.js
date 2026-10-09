@@ -123,6 +123,7 @@ export function mockHotkeyConflicts(hotkeys) {
 /** Numeric settings are clamped like electron/settings.js does. */
 const NUMBER_RANGES = /** @type {Record<string, [number, number]>} */ ({
   'voice.ttsSpeed': [0.5, 2],
+  'voice.fxAmount': [0, 1],
   'avatar.particles': [0, 2],
   'avatar.bloom': [0, 2],
 });

@@ -47,6 +47,18 @@ describe('Controller: text conversation', () => {
     expect(avatar.states).toEqual(['idle', 'thinking', 'speaking', 'idle']);
   });
 
+  it('passes the voice character to the player (also a player without one: the fakes)', async () => {
+    const { c, player } = setup();
+    const calls = [];
+    player.setVoiceFx = (o) => calls.push(o);
+    c.applySettings(deepMerge(DEFAULT_SETTINGS, { voice: { character: 'robot', fxAmount: 0.8 } }));
+    expect(calls.at(-1)).toEqual({ character: 'robot', amount: 0.8 });
+    c.applySettings(deepMerge(DEFAULT_SETTINGS, {}));
+    expect(calls.at(-1)).toEqual({ character: 'synth', amount: 0.6 });
+    delete player.setVoiceFx;
+    expect(() => c.applySettings(deepMerge(DEFAULT_SETTINGS, {}))).not.toThrow();
+  });
+
   it('ignores empty messages and unknown events', async () => {
     const { c, bridge, view } = setup();
     await c.start();

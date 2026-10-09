@@ -45,6 +45,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     showChat: true,
     skipTaskbar: false,
     lockPosition: false,
+    snapToEdges: true,
   },
   hotkeys: {
     toggleListen: 'CommandOrControl+Alt+Space',

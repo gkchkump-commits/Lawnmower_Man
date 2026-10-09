@@ -140,13 +140,19 @@ test.describe('app (mock bridge)', () => {
     await page.waitForFunction(() => window.__app.avatar.renderer === 'relief', null, { timeout: 45_000 });
   });
 
-  test('minimal mode: hiding the chat strip floats the panel over the avatar', async ({ page }) => {
+  test('minimal mode: the panel drops down below the face when needed, never over it', async ({ page }) => {
     await boot(page);
+    const stage = await page.locator('#stage').boundingBox();
     await page.locator('#btn-chat').click();
     await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
     expect(await page.evaluate(() => window.__app.settings().window.showChat)).toBe(false);
+    // the avatar area keeps its size and place (no resize, no jump)
+    expect(await page.locator('#stage').boundingBox()).toEqual(stage);
     await send(page, 'hi');
     await expect(page.locator('body')).toHaveAttribute('data-panel', 'shown');
+    await expect.poll(() => page.locator('#panel').evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    const panel = await page.locator('#panel').boundingBox();
+    expect(panel.y).toBeGreaterThanOrEqual(stage.y + stage.height - 1); // below the avatar area
     await waitIdle(page);
     await page.locator('#btn-chat').click();
     await expect(page.locator('body')).toHaveAttribute('data-chat', 'full');

@@ -48,7 +48,7 @@ import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.
 import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
-import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, DRAG_MAX_MS } from './window-manager.js';
+import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, snapToEdges, DRAG_MAX_MS } from './window-manager.js';
 import {
   APP_HOST,
   APP_ORIGIN,
@@ -581,13 +581,19 @@ function stepDrag() {
     endDrag();
     return;
   }
-  const next = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), drag.moving);
-  if (!next) return;
+  const raw = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), drag.moving);
+  if (!raw) return;
   drag.moving = true;
+  const next = snapWanted() ? snapToEdges(raw, screen.getAllDisplays()) : raw;
   const cur = win.getBounds();
   // setBounds (not setPosition): on Windows with fractional display scaling setPosition can
   // grow the window by a pixel per call; fixed width/height keep the 2:3 avatar exact.
   if (cur.x !== next.x || cur.y !== next.y || cur.width !== next.width || cur.height !== next.height) win.setBounds(next);
+}
+
+/** settings.window.snapToEdges: lock flush against screen edges and corners while dragging. */
+function snapWanted() {
+  return state.settings?.get().window.snapToEdges !== false;
 }
 
 /** Pointer released (or the drag was abandoned): settle fully onto a display and save. */
@@ -603,7 +609,8 @@ function endDrag() {
 
 /** @param {import('electron').BrowserWindow} win @param {NonNullable<typeof state.drag>} drag */
 function stepDragFinal(win, drag) {
-  const last = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), true) || win.getBounds();
+  const raw = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), true) || win.getBounds();
+  const last = snapWanted() ? snapToEdges(raw, screen.getAllDisplays()) : raw;
   const next = settleDrop(last, screen.getAllDisplays(), screen.getPrimaryDisplay());
   win.setBounds(next);
   applyWindowLayout(); // dropped on a display of another size: the 2:3 avatar + chat must fit it

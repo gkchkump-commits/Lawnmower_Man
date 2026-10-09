@@ -92,10 +92,11 @@ export const SECTIONS = [
     title: 'Window',
     fields: [
       { type: 'segmented', path: 'window.sizePreset', label: 'Size', options: [['small', 'S'], ['medium', 'M'], ['large', 'L']], hint: 'Or Ctrl + mouse wheel over the head' },
-      { type: 'toggle', path: 'window.showChat', label: 'Chat panel', hint: 'Off = minimal mode (panel appears when needed)' },
+      { type: 'toggle', path: 'window.showChat', label: 'Chat panel', hint: 'Off = the panel drops down below the face only when needed' },
       { type: 'toggle', path: 'window.alwaysOnTop', label: 'Always on top' },
       { type: 'toggle', path: 'window.clickThrough', label: 'Click-through', hint: 'Clicks on empty space reach the desktop' },
       { type: 'toggle', path: 'window.lockPosition', label: 'Lock position', hint: 'Off = drag the head to move the avatar' },
+      { type: 'toggle', path: 'window.snapToEdges', label: 'Snap to screen edges', hint: 'Locks flush against edges and corners while you drag' },
       { type: 'button', label: 'Reset position', action: 'resetPosition', variant: 'ghost' },
     ],
   },

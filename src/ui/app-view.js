@@ -2,7 +2,7 @@
 // (src/app/controller.js ControllerView) on top of the transcript, permission cards, toasts,
 // status line and composer, and keeps body[data-*] attributes in sync for CSS:
 //   data-state      idle | listening | transcribing | thinking | speaking
-//   data-chat       full | minimal (no chat strip; the panel floats over the avatar)
+//   data-chat       full | minimal (the panel drops down below the face only when needed)
 //   data-panel      shown | hidden (minimal mode auto-hides the panel when idle)
 //   data-attention  permission (a card is waiting)
 //   data-listen     ptt | utterance while the mic records

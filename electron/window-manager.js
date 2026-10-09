@@ -3,8 +3,11 @@
 // Pure functions (no Electron import); main.js feeds them screen.getAllDisplays().
 //
 // Layout contract with the renderer: the window is the avatar area (W×H, always 2:3) on top,
-// plus — when settings.window.showChat is true — a chat panel strip of `chat.height` pixels
-// BELOW it, full width. The renderer can derive this from window.innerWidth/innerHeight
+// plus a chat panel strip of `chat.height` pixels BELOW it, full width. With
+// settings.window.showChat the panel always fills the strip; without it (minimal mode) the
+// panel drops down into the strip only when needed and the strip is transparent and
+// click-through otherwise — so the chat never covers the face and the window never resizes
+// when the mode changes. The renderer can derive this from window.innerWidth/innerHeight
 // (avatarHeight = innerWidth * 1.5; chat = the rest) or read it from app.info().layout.
 
 /** @typedef {{ x: number, y: number, width: number, height: number }} Rect */
@@ -33,16 +36,18 @@ export function normalizePreset(p) {
 }
 
 /**
- * Window size for a preset, with the chat panel when shown. If a work area is given and the
- * window would not fit vertically, the chat panel shrinks first (down to MIN_CHAT_PANEL_HEIGHT).
- * @param {unknown} preset @param {boolean} showChat @param {Rect} [workArea]
+ * Window size for a preset: the avatar area plus the chat strip below it (always reserved: in
+ * minimal mode the panel drops down into it when needed). If a work area is given and the
+ * window would not fit vertically, the chat strip shrinks first (down to MIN_CHAT_PANEL_HEIGHT).
+ * @param {unknown} preset @param {boolean} showChat  panel always shown (false: drop-down)
+ * @param {Rect} [workArea]
  */
 export function windowLayout(preset, showChat, workArea) {
   const p = normalizePreset(preset);
   let avatar = { ...SIZE_PRESETS[p] };
-  let chatHeight = showChat ? CHAT_PANEL_HEIGHT[p] : 0;
+  let chatHeight = CHAT_PANEL_HEIGHT[p];
   if (workArea) {
-    if (showChat && avatar.height + chatHeight > workArea.height) {
+    if (avatar.height + chatHeight > workArea.height) {
       chatHeight = Math.max(MIN_CHAT_PANEL_HEIGHT, workArea.height - avatar.height);
     }
     // Still too tall (short screens, high display scaling: a 1080p laptop at 150% has ~670 px):
@@ -59,7 +64,12 @@ export function windowLayout(preset, showChat, workArea) {
     width: avatar.width,
     height: avatar.height + chatHeight,
     avatar,
-    chat: showChat ? { position: /** @type {'bottom'} */ ('bottom'), width: avatar.width, height: chatHeight } : null,
+    chat: {
+      position: /** @type {'bottom'} */ ('bottom'),
+      width: avatar.width,
+      height: chatHeight,
+      mode: /** @type {'full'|'dropdown'} */ (showChat ? 'full' : 'dropdown'),
+    },
   };
 }
 
@@ -219,6 +229,33 @@ export function dragBounds(start, from, to, moving) {
   const dy = Math.round(to.y - from.y);
   if (!moving && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return null;
   return { x: start.x + dx, y: start.y + dy, width: start.width, height: start.height };
+}
+
+/** Within this distance (DIP) of a screen edge a dragged window locks flush against it. */
+export const SNAP_DISTANCE = 24;
+
+/**
+ * Magnetic screen edges, like a normal window on Windows: while dragging, a window that comes
+ * within SNAP_DISTANCE of an edge of the work area it is on locks flush against that edge (two
+ * edges at once: a corner), and lets go again once the cursor pulls it further away. Stateless:
+ * it is applied to the raw drag position on every step, so releasing is just moving on.
+ * @param {Rect} b @param {DisplayLike[]} displays @param {number} [dist]
+ * @returns {Rect}
+ */
+export function snapToEdges(b, displays, dist = SNAP_DISTANCE) {
+  const d = pickDisplay(b, displays);
+  if (!d || !(dist > 0)) return b;
+  const wa = d.workArea;
+  let { x, y } = b;
+  const left = Math.abs(b.x - wa.x);
+  const right = Math.abs(wa.x + wa.width - (b.x + b.width));
+  if (left <= dist && left <= right) x = wa.x;
+  else if (right <= dist) x = wa.x + wa.width - b.width;
+  const top = Math.abs(b.y - wa.y);
+  const bottom = Math.abs(wa.y + wa.height - (b.y + b.height));
+  if (top <= dist && top <= bottom) y = wa.y;
+  else if (bottom <= dist) y = wa.y + wa.height - b.height;
+  return x === b.x && y === b.y ? b : { ...b, x, y };
 }
 
 /**

@@ -85,7 +85,7 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | **Ctrl+Shift+F10** (global; Linux/macOS: Ctrl+Alt+X) | stop speaking |
 | **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
-| drag the head (or the chat's status bar) | move the window; it settles fully on the screen you drop it on (sized to fit that screen) and remembers the place |
+| drag the head (or the chat's status bar) | move the window; near a screen edge or corner it snaps flush against it like a normal window, settles fully on the screen you drop it on (sized to fit that screen) and remembers the place |
 | **Ctrl + mouse wheel** over the head | bigger / smaller (small, medium, large) |
 | tray icon | show/hide, always on top, click-through, lock / reset position, camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 

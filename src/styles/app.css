@@ -104,9 +104,6 @@ textarea {
   height: 100vh;
   width: 100vw;
 }
-body[data-chat="minimal"] #app {
-  grid-template-rows: minmax(0, 1fr) 0;
-}
 
 /* ------------------------------------------------------------------ stage (avatar area) */
 
@@ -278,23 +275,21 @@ body[data-chat="minimal"] #btn-chat {
 body[data-state="listening"] .panel { box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 8px rgba(127, 227, 255, 0.24); }
 body[data-state="speaking"] .panel { box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 8px rgba(255, 184, 103, 0.18); }
 
-/* minimal mode: the panel floats over the bottom of the avatar and hides when idle */
+/* minimal mode: the panel drops down from under the chin when needed (a reply, typing, a card)
+   and folds back up when idle. It lives in the chat strip below the avatar, never over the
+   face; while it is folded the strip is transparent and click-through. */
 body[data-chat="minimal"] .panel {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 8px;
-  max-height: 46%;
-  margin: 0;
-  z-index: 4;
+  align-self: start;
+  max-height: calc(100% - 8px);
+  transform-origin: top center;
 }
-/* caption-like: only the latest message, so the face stays visible */
+/* compact: only the latest message */
 body[data-chat="minimal"] .transcript .msg:not(:last-child) {
   display: none;
 }
 body[data-chat="minimal"][data-panel="hidden"] .panel {
   opacity: 0;
-  transform: translateY(10px);
+  transform: translateY(-16px) scaleY(0.94);
   pointer-events: none;
 }
 body[data-chat="minimal"][data-attention="permission"] .panel {

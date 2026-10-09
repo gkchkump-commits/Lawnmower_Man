@@ -37,7 +37,8 @@ describe('layout', () => {
     expect(computeLayout({ width: 560, height: 1120, showChat: true, electron: true })).toEqual({ mode: 'full', chatHeight: 280 });
     // not resized yet after turning the chat on
     expect(computeLayout({ width: 400, height: 600, showChat: true, electron: true }).chatHeight).toBe(180);
-    expect(computeLayout({ width: 400, height: 600, showChat: false, electron: true })).toEqual({ mode: 'minimal', chatHeight: 0 });
+    // minimal mode keeps the strip: the panel drops down into it below the face
+    expect(computeLayout({ width: 400, height: 840, showChat: false, electron: true })).toEqual({ mode: 'minimal', chatHeight: 240 });
   });
 
   it('browser: about a third of the height, clamped', () => {

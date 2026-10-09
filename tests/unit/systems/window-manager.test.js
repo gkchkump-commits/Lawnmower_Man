@@ -14,6 +14,8 @@ import {
   reclamp,
   resizeAnchored,
   settleDrop,
+  snapToEdges,
+  SNAP_DISTANCE,
   windowLayout,
 } from '../../../electron/window-manager.js';
 
@@ -29,8 +31,9 @@ describe('windowLayout', () => {
   it('adds the chat panel below the avatar', () => {
     const l = windowLayout('medium', true);
     expect(l).toMatchObject({ width: 400, height: 600 + CHAT_PANEL_HEIGHT.medium, avatar: { width: 400, height: 600 } });
-    expect(l.chat).toEqual({ position: 'bottom', width: 400, height: CHAT_PANEL_HEIGHT.medium });
-    expect(windowLayout('medium', false)).toMatchObject({ width: 400, height: 600, chat: null });
+    expect(l.chat).toEqual({ position: 'bottom', width: 400, height: CHAT_PANEL_HEIGHT.medium, mode: 'full' });
+    // minimal mode keeps the strip (the panel drops down into it), so toggling never resizes
+    expect(windowLayout('medium', false)).toEqual({ ...l, chat: { ...l.chat, mode: 'dropdown' } });
   });
   it('falls back to medium for unknown presets', () => {
     expect(windowLayout('huge', false).preset).toBe('medium');
@@ -53,8 +56,10 @@ describe('windowLayout', () => {
       expect(l.height).toBe(l.avatar.height + l.chat.height);
     }
     expect(windowLayout('medium', true, { x: 0, y: 0, width: 1280, height: 672 }).avatar).toEqual({ width: 354, height: 531 });
-    // without the chat strip the avatar alone must fit too (large preset on a short screen)
-    expect(windowLayout('large', false, { x: 0, y: 0, width: 1280, height: 720 })).toMatchObject({ width: 480, height: 720, chat: null });
+    // minimal mode fits the same way (the strip is always there)
+    const mini = windowLayout('large', false, { x: 0, y: 0, width: 1280, height: 720 });
+    expect(mini).toEqual({ ...windowLayout('large', true, { x: 0, y: 0, width: 1280, height: 720 }), chat: { ...mini.chat, mode: 'dropdown' } });
+    expect(mini.height).toBeLessThanOrEqual(720);
     // roomy screens are unchanged
     expect(windowLayout('medium', true, { x: 0, y: 0, width: 1920, height: 1032 })).toMatchObject({ width: 400, height: 840 });
   });
@@ -144,5 +149,31 @@ describe('dragging', () => {
     expect(settleDrop({ ...start, x: 2500, y: -400 }, [primary, second], primary)).toEqual({ ...start, x: 2500, y: -200 });
     // nowhere near any display: nearest one
     expect(settleDrop({ ...start, x: -9000, y: 0 }, [primary, second], primary)).toEqual({ ...start, x: 0, y: 0 });
+  });
+});
+
+describe('snapping to screen edges (like a normal window)', () => {
+  const size = { width: 400, height: 840 };
+  it('locks flush against an edge within SNAP_DISTANCE and lets go beyond it', () => {
+    const d = [primary, second];
+    expect(snapToEdges({ ...size, x: SNAP_DISTANCE, y: 100 }, d)).toEqual({ ...size, x: 0, y: 100 });
+    expect(snapToEdges({ ...size, x: SNAP_DISTANCE + 1, y: 100 }, d)).toEqual({ ...size, x: SNAP_DISTANCE + 1, y: 100 });
+    // right edge, also from slightly past it
+    expect(snapToEdges({ ...size, x: 1920 - 400 + 10, y: 100 }, d).x).toBe(1520);
+    // bottom edge = above the taskbar (work area), top edge
+    expect(snapToEdges({ ...size, x: 600, y: 1032 - 840 - 20 }, d).y).toBe(1032 - 840);
+    expect(snapToEdges({ ...size, x: 600, y: -12 }, d).y).toBe(0);
+  });
+  it('snaps into a corner when near two edges, on the display the window is on', () => {
+    expect(snapToEdges({ ...size, x: 1920 - 400 - 7, y: 1032 - 840 + 5 }, [primary, second])).toEqual({ ...size, x: 1520, y: 192 });
+    // second monitor with negative y: its own top-left corner
+    expect(snapToEdges({ ...size, x: 1930, y: -190 }, [primary, second])).toEqual({ ...size, x: 1920, y: -200 });
+  });
+  it('a window wider than the gap between two near edges takes the nearer one; dist 0 turns it off', () => {
+    const narrow = { id: 9, bounds: { x: 0, y: 0, width: 420, height: 900 }, workArea: { x: 0, y: 0, width: 420, height: 900 } };
+    expect(snapToEdges({ ...size, x: 4, y: 0 }, [narrow]).x).toBe(0);
+    expect(snapToEdges({ ...size, x: 16, y: 0 }, [narrow]).x).toBe(20);
+    const b = { ...size, x: 5, y: 5 };
+    expect(snapToEdges(b, [primary], 0)).toBe(b);
   });
 });

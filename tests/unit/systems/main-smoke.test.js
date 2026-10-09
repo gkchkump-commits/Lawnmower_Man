@@ -323,6 +323,11 @@ describe('electron/main.js wiring', () => {
     m.listeners.get('lm:window:set-ignore-mouse')(trusted(), true);
     expect(win.setIgnoreMouseEvents).not.toHaveBeenCalledWith(true, expect.anything());
     expect(main.__test.state.ignoreMouse).toBe(false);
+    // near the left edge it locks flush against it (like a normal window) and lets go further out
+    Object.assign(m.cursor, { x: 1000 - (start.x - wa.x) + 15, y: 370 });
+    await until(() => win.bounds.x === wa.x);
+    Object.assign(m.cursor, { x: 1000 - (start.x - wa.x) + 60, y: 370 });
+    await until(() => win.bounds.x === wa.x + 60);
 
     // dropped half off-screen: settles fully onto the work area and saves the position
     Object.assign(m.cursor, { x: 1000 + 5000, y: 400 - 5000 });

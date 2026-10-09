@@ -47,6 +47,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     showChat: true,
     skipTaskbar: false, // extension to §4: hide the taskbar button (tray icon stays)
     lockPosition: false, // true: pressing on the head does not move the window
+    snapToEdges: true, // a dragged window locks flush against screen edges and corners
   },
   hotkeys: {
     // Linux/macOS defaults; Windows uses WIN32_HOTKEYS (see defaultSettings()).
@@ -253,6 +254,7 @@ const SCHEMA = {
     showChat: bool(),
     skipTaskbar: bool(),
     lockPosition: bool(),
+    snapToEdges: bool(),
   },
   hotkeys: {
     toggleListen: accelerator(),

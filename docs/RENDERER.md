@@ -106,11 +106,12 @@ system-voice path at 60 Hz (a scripted voice sends word boundaries at its own te
 | **Esc** | close settings · cancel listening · stop speaking · otherwise stop the reply |
 | send button while busy | becomes Stop |
 | global hotkeys (Settings › Shortcuts) | talk / interrupt, stop speaking, show/hide chat |
-| drag the head (or the status line) | move the window |
+| drag the head (or the status line) | move the window (snaps to screen edges and corners) |
 
-The window is the 2:3 avatar area plus, when the chat panel is on, a strip below it. With the
-panel off (minimal mode) the panel floats over the avatar while something happens or the pointer
-is near, and hides when idle. With click-through on (Windows/macOS), clicks on transparent
+The window is the 2:3 avatar area plus a chat strip below it. With the chat panel on, the panel
+fills the strip; with it off (minimal mode) the panel drops down from under the chin while
+something happens or the pointer is near, and folds away when idle. It never covers the face,
+and the window keeps its size when the mode changes; the folded strip is transparent. With click-through on (Windows/macOS), clicks on transparent
 pixels reach the desktop; the head, the panel and cards stay clickable.
 
 ## Browser preview (no Electron)

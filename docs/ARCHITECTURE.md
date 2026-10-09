@@ -161,6 +161,10 @@ until the cursor travelled 3 DIP, so a click stays a click; `setBounds` keeps th
 fractional display scaling) and refuses click-through until `dragEnd()`, which settles the window
 fully onto the display it was dropped on and saves the position. A drag also ends when the window
 hides, minimizes or its renderer dies, and after 2 minutes at most. `window.lockPosition` disables it.
+Like a normal window, the avatar snaps to screen edges while it is dragged (`snapToEdges` in
+`electron/window-manager.js`): within 24 DIP of an edge of the work area it locks flush against it
+(two edges: a corner) and lets go once the cursor pulls it further away; `window.snapToEdges: false`
+turns this off.
 
 Renderer use of `onCursor`: the eyes follow the cursor anywhere on the desktop (`src/app/gaze.js`:
 inside the avatar stage exactly like pointer tracking, outside it the gaze keeps the direction but
@@ -285,6 +289,7 @@ command line — user text only ever travels over stdin; long prompts go in file
     position: null,              // {x,y} remembered
     showChat: true,
     lockPosition: false,         // true: pressing on the head does not move the window
+    snapToEdges: true,           // a dragged window locks flush against screen edges and corners
   },
   hotkeys: {                     // Linux/macOS defaults
     toggleListen: 'CommandOrControl+Alt+Space',

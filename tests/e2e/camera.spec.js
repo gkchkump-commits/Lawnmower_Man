@@ -3,7 +3,7 @@
 // really finding the face, and the pictures that go to Claude ("Let Claude see me", the composer
 // camera button). The fake-media flags are set for this file only (an extended launchOptions),
 // so the other specs are unchanged.
-/* global Image, localStorage */
+/* global Image, localStorage, getComputedStyle */
 
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
@@ -127,6 +127,11 @@ test.describe('camera (fake camera, mock bridge)', () => {
 
     // Settings › Camera: live status and the camera in the device picker
     await page.locator('#btn-settings').click();
+    // the drawer covers the light; its header shows that the camera runs
+    const headerLight = () => page.evaluate(() => getComputedStyle(document.querySelector('.drawer-head h2'), '::after').content);
+    expect(await headerLight()).toContain('camera');
+    await page.waitForTimeout(300); // the drawer slides in
+    await shot(page, testInfo, 'camera-drawer');
     const info = page.locator('[data-info="cameraInfo"]');
     await expect(info).toContainText('Face tracking: on this PC (worker');
     await expect(info).toContainText('You:');
@@ -207,6 +212,8 @@ test.describe('camera (fake camera, mock bridge)', () => {
       await expect(section.locator('.field-label', { hasText: label }).first()).toBeVisible();
     }
     await expect(section.locator('[data-path="camera.enabled"] .switch')).toHaveAttribute('aria-checked', 'false');
+    // no camera light in the header while the camera is off
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('.drawer-head h2'), '::after').content)).toBe('none');
     await expect(page.locator('#set-camera-deviceId')).toHaveValue('');
   });
 });

@@ -1248,6 +1248,18 @@ body[data-lock="1"] .drawer-head { cursor: default; }
   box-shadow: 0 0 6px rgba(255, 107, 94, 0.9);
 }
 body[data-camera="starting"] .cam-live-dot { animation: pulse 0.9s infinite; }
+/* the settings drawer covers the light while it is open: its header carries one instead */
+body[data-camera="on"] .drawer-head h2::after,
+body[data-camera="starting"] .drawer-head h2::after {
+  content: '● camera';
+  padding: 1px 7px;
+  border: 1px solid rgba(255, 138, 122, 0.4);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #ff9d8f;
+}
 /* a cyan ring once it actually sees you */
 body[data-face="present"] .cam-live-dot,
 body[data-face="looking"] .cam-live-dot { box-shadow: 0 0 6px rgba(255, 107, 94, 0.9), 0 0 0 2px rgba(127, 227, 255, 0.35); }

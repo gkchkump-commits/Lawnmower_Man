@@ -16,7 +16,8 @@ Any of these:
 
 The first time, a card explains what the camera is used for, and nothing is opened until you press
 **Turn on the camera**. While the camera runs, a small **● camera** light shows in the top-left
-corner of the avatar (also when the toolbar is hidden); click it to turn the camera off.
+corner of the avatar (also when the toolbar is hidden); click it to turn the camera off. While
+the settings are open, the same light sits in their header.
 
 The camera is released (its light goes off) whenever the window is hidden or minimized, and opened
 again when you bring the window back.

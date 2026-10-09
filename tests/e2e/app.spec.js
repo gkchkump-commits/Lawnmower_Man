@@ -1,3 +1,4 @@
+/* global PointerEvent, getComputedStyle */
 // End-to-end tests of the renderer app against `vite preview` with the mock bridge
 // (src/bridge/mock.js). Chromium renders WebGL with SwiftShader (software), so the avatar runs
 // at quality=low and viewports stay small. Screenshots go to $LM_SHOTS_DIR.
@@ -220,6 +221,19 @@ test.describe('app (mock bridge)', () => {
     expect(await drags()).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
   });
 
+  test('a cancelled press (a touch scroll) does not keep the window from turning click-through', async ({ page }) => {
+    await boot(page, { clickThrough: 1 });
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4); // over the head: interactive
+    await page.evaluate(() => {
+      window.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, pointerType: 'touch', isPrimary: true, button: 0 }));
+      window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 7, pointerType: 'touch', isPrimary: true }));
+    });
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5, { steps: 3 }); // transparent space
+    await expect.poll(async () => (await ignores()).at(-1)).toBe(true);
+  });
+
   test('Ctrl + mouse wheel over the head changes the size preset', async ({ page }) => {
     await boot(page);
     const sizes = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setSizePreset').map((c) => c[1]));
@@ -256,3 +270,24 @@ test.describe('voice (fake voice server)', () => {
   });
 });
 
+
+test.describe('touch (mock bridge)', () => {
+  test.use({ hasTouch: true });
+
+  test('a finger on the head drags the window until it lifts; the handles take no pan gesture', async ({ page }) => {
+    await boot(page);
+    const drags = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'dragStart' || c[0] === 'dragEnd').map((c) => c[0]));
+    expect(await page.evaluate(() => ['#avatar', '#status'].map((q) => getComputedStyle(document.querySelector(q)).touchAction))).toEqual(['none', 'none']);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('#transcript')).touchAction)).toBe('auto');
+    const box = await page.locator('#stage').boundingBox();
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height * 0.4;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let i = 1; i <= 10; i++) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + i * 6, y: y + i * 4 }] });
+    await page.waitForTimeout(150);
+    expect(await drags()).toEqual(['dragStart']); // not cut short by a pointercancel
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd']);
+  });
+});

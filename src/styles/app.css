@@ -129,6 +129,14 @@ body[data-chat="minimal"] #app {
 body[data-over-head="1"]:not([data-lock="1"]) .stage { cursor: grab; }
 body[data-dragging="1"],
 body[data-dragging="1"] * { cursor: grabbing !important; }
+/* A finger or pen on a drag handle moves the window: without this, Chromium starts a pan
+   gesture after a few pixels and cancels the pointer (the drag would stop). Only the handles:
+   the transcript, the cards and the settings body keep touch scrolling. The fallback orb lets
+   events through to the stage. */
+.avatar-canvas,
+.stage.no-webgl,
+.statusbar,
+.drawer-head { touch-action: none; }
 
 /* WebGL unavailable: a CSS orb so there is still a face. */
 .avatar-fallback {

@@ -656,7 +656,8 @@ async function boot() {
     gate.hold('pointer', true);
     player.unlock(); // browsers start audio suspended until a gesture
   }, true);
-  window.addEventListener('pointerup', () => gate.hold('pointer', false), true);
+  // a cancelled press (a touch that became a scroll) ends the hold too
+  for (const type of ['pointerup', 'pointercancel']) window.addEventListener(type, () => gate.hold('pointer', false), true);
   window.addEventListener('keydown', () => player.unlock(), { once: true, capture: true });
   $('input').addEventListener('focus', () => view.refreshPanel());
   $('input').addEventListener('blur', () => view.refreshPanel());

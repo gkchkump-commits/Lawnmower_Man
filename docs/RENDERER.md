@@ -210,8 +210,12 @@ nothing starts at full speed or stops dead, nothing steps between frames, and no
   time by at most 2 ms per frame, never runs backwards, stays within 12 ms ahead and re-syncs when
   30 ms off), which turns Windows' 10 ms AudioContext clock steps into smooth time; the player
   reads the output timestamp and a median of the output latency.
-* **Camera**: the face centre goes through a One Euro filter and eye contact alternates
-  log-normal contact phases with glances away ([CAMERA.md](CAMERA.md)).
+* **Camera and cursor**: the face centre goes through a One Euro filter and eye contact
+  alternates log-normal contact phases with glances away ([CAMERA.md](CAMERA.md)); targets that
+  arrive at 12 Hz (camera) or 30 Hz (cursor) are reconstructed between samples, so the eyes never
+  see a staircase. A cursor outside the window is looked at along its direction at full strength
+  (`src/app/gaze.js`), so a cursor coming in from across the screen never turns the eyes away
+  from it first.
 * **Eyes on the relief head**: the pack's landmark eye centres sit ~25 px off the painted irises
   (and their radii are ~20 % small), so the head locates the painted irises on the plate at load
   (the dark pupil inside the bright iris; `avatar.headInfo()` reports them), paints the plate over
@@ -234,8 +238,8 @@ clips, the system voice, the camera and cursor replays), before -> after:
 | blinks: shortest interval, amplitude spread, closed >= 90 %, doubles in 5 min | 0.3 s, 0, 83 ms, 12 | 0.8 s, 0.11, 33 ms, 0 |
 | thinking: side switches, interval CV, gaze autocorrelation at the switch period | 17 /min, 0.18, 0.63 | 5 /min, 0.46, <= 0.19 |
 | breathing autocorrelation at 4 s / 8 s | 0.99 / 0.97 | 0.86 / 0.61 |
-| cursor flick: overshoot of eye + head past the target | 34 % | 11 % |
-| cursor sweep: consecutive-frame speed ratio (1 = smooth), power at 25-30 Hz | 1.52, 0.045 | 1.08, 0.001 |
+| cursor flick: where eye + head land (world gaze vs the target) | 30 % past it | on it (within 1 %; the head takes 17 %) |
+| cursor sweep (30 Hz polls): consecutive-frame eye speed ratio (1 = smooth), power at 25-30 Hz | 1.52, 0.045 | 1.06, 0.001 |
 | camera, still face: frame-to-frame gaze jitter (outside glances) | 0.0029 | 0.0003 |
 | camera, slow sway: velocity power above 8 Hz (outside glances), kinks | 0.25-0.30, 0.66 /s | 0.002, 0.19 /s |
 | camera, the face jumps: eye t90, peak speed | 600 ms, 18 deg/s | 367 ms, 70 deg/s |

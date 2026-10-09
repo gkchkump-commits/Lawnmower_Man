@@ -145,11 +145,13 @@ the sound instead of ~40 ms after it.
 Rendering: the relief head opens the lips as a lens that spans the corners where they are now
 (narrow and round for O / U, wide for E): the commissures take only 40 % of the jaw drop and the
 lower lip's share tapers toward them, so the corners stay closed and the opening's edges are smooth
-curves; the parted lips' inner edges roll into the mouth (a soft shadow, a thin moist highlight) and
+curves that close into the seam without a kink over the last quarter of the way (no sharp dark tips
+beside an O); the parted lips' inner edges roll into the mouth (a soft shadow, a thin moist highlight) and
 the cavity darkens with depth. Its mouth region is refined to <= 6 px triangles at load (new
 vertices on the baked edges, so the rest render is unchanged), which keeps those curves smooth at a
 60 px jaw drop. It closes pressed lips over a slightly open jaw and thins them (the lip
-texture is compressed toward the seam and the rest gap skipped), brings a tucked lower lip up under
+texture is compressed toward the seam and the rest gap skipped; the shapes' parting fades with the
+square of the press, so a press that is only half released still holds the lips together), brings a tucked lower lip up under
 the incisors (which fill the small opening), raises the upper lip for teeth (the incisors follow),
 draws a dim tongue tip at the teeth, pulls the corners in for round and out for spread, and tilts
 them slightly with `mouthAsym`. The procedural head does the same in its vertex rig and cavity
@@ -179,31 +181,40 @@ nothing starts at full speed or stops dead, nothing steps between frames, and no
   several octaves of smooth noise at non-integer frequency ratios and random phases (it never
   repeats), Gaussian and log-normal draws.
 * **Mouth**: every mouth channel follows the lip-sync target through its own spring, faster
-  opening than closing (jaw ω 55 / 38 rad/s, press 110 / 55, round 33 / 24, ...); the jaw closes
-  into an m / b / p at ω 110, so a 50 ms closure still closes on screen at 30 fps.
+  opening than closing (jaw ω 55 / 38 rad/s, press 110 / 55, round 33 / 24, ...). The lips seal an
+  m / b / p on their own (the rigs bring the lower lip up over a jaw still open), so even a 50 ms
+  closure seals on screen at 30 fps, and the heavier jaw follows them (ω 50 into a closure) instead
+  of snapping shut within a frame. The chin (mentalis) follows the lips' target, in step with the
+  closure.
 * **Eyes** (`src/avatar/eyes.js`): saccades on the human main sequence (duration 21 + 2.2 ms per
   degree, a minimum-jerk profile with the peak speed mid-way: a 10 degree shift takes 43 ms),
   fixations that hold still between them (with 0.2-0.25 degree micro-saccades), smooth
   pursuit of a moving target (gain 0.9, up to 30 deg/s, ~100 ms behind) with catch-up saccades when
-  it gets away, and a ~170 ms reaction time for targets it follows (cursor, camera). The head takes
-  a share of large shifts (20-30 %, more for big ones), starting late and as a spring, and the
-  eyes counter-rotate as it arrives (vestibulo-ocular reflex), so eye + head land on the target
-  without overshoot. Gaze is composed in degrees (`GAZE_DEG`: 17 deg per gaze unit across, 12.8
+  it gets away, and a ~170 ms reaction time for targets it follows (cursor, camera). The head goes
+  along with a target it follows (the cursor, the user's face): 38 % of the look, a spring a few
+  hundred ms behind the eyes (t50 ~0.25 s, anticipating a moving target a little), never turning
+  against them; with the avatar's own looks (and a glance away from the user) it takes a share of
+  large shifts (20-30 %, more for big ones), starting late, and of small ones over seconds. The
+  eyes counter-rotate as the head arrives (vestibulo-ocular reflex), so eye + head land on the
+  target without overshoot. Gaze is composed in degrees (`GAZE_DEG`: 17 deg per gaze unit across, 12.8
   up and down; the relief iris slides 0.6 / 0.45 iris radii).
 * **Blinks**: log-normal intervals (median 2.8 s idle, 4 s listening, 2.4 s thinking, 2.3 s
   speaking; never closer than 0.8 s), a fast close (60-80 ms) and a slower open (150-220 ms) with
   a brief hold, 20 % of them partial, 4 % doubled, a blink with most gaze shifts over 15 degrees, and the
   upper lid follows a downward gaze part of the way. They wait while the voice sounds.
-* **Idle**: the head sways on 1/f noise (yaw, pitch, roll and a faint fast tremor), breathing has a
-  wandering period and depth with an occasional sigh, the eyes wander in saccades between
-  fixations, and the head follows the eyes only for large shifts.
+* **Idle**: the head sways on 1/f noise (`pinkNoise` has unit rms: 1 deg yaw, 0.45 pitch, 0.26
+  roll from 0.1 Hz up, ~0.8 deg rms yaw and ~0.5 deg/s over two minutes, plus a faint fast tremor),
+  breathing has a wandering period and depth with an occasional sigh, the eyes wander in saccades
+  between fixations, and the head follows the eyes only for large shifts.
 * **Thinking**: each episode picks a side and a look (up 85 % of the time) and holds it, switching
   after an exponential time (mean 11 s, at least 5-8 s), with small looks around it.
 * **States**: listening / thinking / speaking blend in through springs (head pitch t90 0.3-0.8 s)
-  with a saccade to the new gaze, instead of a slow glide.
+  with a saccade to the new gaze, instead of a slow glide; starting to speak, the first look goes
+  to the listener.
 * **Speech**: nods are minimum-jerk pulses (0.17 s up, 0.31 s back, each a little different in
-  size and speed, with a touch of yaw and roll; nods close together merge), phrase lifts and the
-  breath before speaking are envelopes, and the intonation is soft-clamped.
+  size and speed, with a touch of yaw and roll; nods close together merge into the larger one, a
+  running nod growing by a second pulse), phrase lifts and the breath before speaking are
+  envelopes, and the intonation is soft-clamped.
 * **Clocks**: the lip-sync runs inside the avatar's own frame (one loop: `avatar.setFrameHook`), so
   it never samples a different time than the face it drives. The playback time is smoothed by a
   phase-locked clock (`PlaybackClock` in `src/audio/lipsync.js`: it follows the player's reported
@@ -221,30 +232,40 @@ nothing starts at full speed or stops dead, nothing steps between frames, and no
   (the dark pupil inside the bright iris; `avatar.headInfo()` reports them), paints the plate over
   beneath them (the eye white beside the iris, its texture carried across) and moves each iris as a
   rigid disc inside the open eye: the lids, the lid lines and the eye's outline stay put and the
-  pupil stays round. A hidden part of a moving iris comes from its mirror image or the same radius
-  turned toward the horizontal. A pack whose plate cannot be read back keeps the old uv warp.
+  pupil stays round. The disc shows only where the plate shows the eye's inside; the lid margins'
+  glow lies over it (looking down, the pupil goes under the lower lid). A hidden part of a moving
+  iris comes from its mirror image near the horizontal axis, blended into the same radius turned
+  toward it farther out; the fill under the iris carries the eye white's and the lid glows'
+  texture on (the lid margins along their own curve). The layer fades in over the first few % of
+  travel, so at rest and just off it the plate itself shows (no pop as the gaze crosses zero). A
+  pack whose plate cannot be read back keeps the old uv warp.
 * Settled renders (`fixedTime`, tests) use the same closed-form rest poses as before.
 
 Measured on deterministic 60 Hz traces of the harness (idle 300 s, thinking 60 s, five Kokoro
-clips, the system voice, the camera and cursor replays), before -> after:
+clips, the system voice, the camera and cursor replays; closures over 52 m / b / p in 18 real
+Kokoro clips), before -> after:
 
 | | before | after |
 |---|---|---|
 | head pitch kinks while speaking (Kokoro) | 1.75 /s | 0 /s |
 | head pitch velocity power above 8 Hz (Kokoro) | 0.20 | 0.003 |
 | nod: one-frame velocity step at onset / of the peak speed | 26 deg/s / 118 % | 3.6 deg/s / 30 % |
-| idle saccades >= 1 deg: duration / peak speed (main sequence 28 ms / 98 deg/s) | 133 ms / 51 deg/s | 50 ms (3 frames) / 92 deg/s |
-| idle gaze path: fixation / drift / saccadic | 7 / 56 / 37 % | 15 / 12 / 73 % |
+| idle saccades >= 1 deg: duration / peak speed (main sequence 28 ms / 98 deg/s) | 133 ms / 51 deg/s | 50 ms (3 frames) / 91 deg/s |
+| idle gaze path (eye in head): fixation / drift / saccadic | 7 / 56 / 37 % | 31 / 17 / 53 % (the drift: counter-rotation against the head's sway; in the world the gaze holds still 96 % of the time) |
+| idle head sway: yaw rms / mean speed over 2 min (3 seeds) | 0.80 deg / 0.55-0.63 deg/s, with 58-70 acceleration ticks /min | 0.78-0.86 deg / 0.49-0.55 deg/s, no ticks |
 | blinks: shortest interval, amplitude spread, closed >= 90 %, doubles in 5 min | 0.3 s, 0, 83 ms, 12 | 0.8 s, 0.11, 33 ms, 0 |
 | thinking: side switches, interval CV, gaze autocorrelation at the switch period | 17 /min, 0.18, 0.63 | 5 /min, 0.46, <= 0.19 |
 | breathing autocorrelation at 4 s / 8 s | 0.99 / 0.97 | 0.86 / 0.61 |
-| cursor flick: where eye + head land (world gaze vs the target) | 30 % past it | on it (within 1 %; the head takes 17 %) |
-| cursor sweep (30 Hz polls): consecutive-frame eye speed ratio (1 = smooth), power at 25-30 Hz | 1.52, 0.045 | 1.06, 0.001 |
-| camera, still face: frame-to-frame gaze jitter (outside glances) | 0.0029 | 0.0003 |
+| cursor flick: where eye + head land (world gaze vs the target) | 30 % past it | on it (the head takes ~40 %: 7.2-8.8 deg of a 20 deg flick, 11 of 28) |
+| cursor follow (30 Hz sweep and circle, 5 seeds): head lag behind the cursor | 333 ms | 100-330 ms (median 200) |
+| cursor sweep (30 Hz polls): consecutive-frame eye speed ratio (1 = smooth), power at 25-30 Hz | 1.52, 0.045 | 1.06, 0.004 |
 | camera, slow sway: velocity power above 8 Hz (outside glances), kinks | 0.25-0.30, 0.66 /s | 0.002, 0.19 /s |
-| camera, the face jumps: eye t90, peak speed | 600 ms, 18 deg/s | 367 ms, 70 deg/s |
+| camera, the face jumps: eye t90, peak speed | 600 ms, 18 deg/s | 250 ms, 68 deg/s |
 | listening / thinking / speaking: head pitch t90 | 0.97 / 1.05 / 0.78 s | 0.32 / 0.80 / 0.45 s |
-| Windows clock (10 ms steps): jaw error rms, jaw kinks | 0.0107, 2 -> 6 | 0.0091, 3 -> 3 |
+| m / b / p closures sealed (lips < 1 plate px), sealed time median / p10 | 51 of 52, 67 / 33 ms | 52 of 52, 67 / 50 ms |
+| jaw one-frame velocity steps while speaking, jaw rms jerk | 43 /min, 5700 | 2 /min, 3000 |
+| chin with the pressed lips: correlation, lag | 0.83, 29 ms (pumping: range 0.89) | 0.83, 31 ms (range 0.58) |
+| Windows clock (10 ms steps): jaw error rms | 0.0107 | 0.0081 |
 
 The mouth's timing against the audio is unchanged (m / b / p closures 35 ms ahead of the sound).
 
@@ -297,13 +318,18 @@ permission card ("run", "tool"), a failure ("simulate error"), otherwise an echo
   getUserMedia), player (fake Web Audio), Markdown parser/renderer, mock bridge, voice client,
   Web Speech, permissions, UI logic.
 * `npx vitest run tests/unit/avatar` — the motion primitives and the eye controller
-  (`motion.test.js`: springs exact at any step, main-sequence saccades, pursuit, head share), the
-  director's motion (`director-motion.test.js`: continuous velocity, the same motion at 60 and
-  144 Hz, blink statistics, thinking episodes, nods, the settled poses unchanged), the relief head's
-  mouth-mesh refinement and iris layer (`relief-refine.test.js`, `relief-iris.test.js`) and the rigs.
+  (`motion.test.js`: springs exact at any step, main-sequence saccades, pursuit, head share,
+  pinkNoise's unit rms), the director's motion (`director-motion.test.js`: continuous velocity, the
+  same motion at 60 and 144 Hz, blink statistics, thinking episodes, nods and nods that grow, the
+  head going along with a cursor sweep and flick but not with a glance, the idle sway's size,
+  eye contact as speech starts, the settled poses unchanged), the relief head's mouth-mesh
+  refinement and iris layer (`relief-refine.test.js`, `relief-iris.test.js`: the open map, the
+  fill along an arched lid) and the rigs. `tests/unit/app/lipsync-real.test.js` keeps every
+  m / b / p of the real Kokoro fixture sealed on the relief rig for >= 50 ms, the chin with it.
 * `npx playwright test` — the built app in Chromium (SwiftShader) with the mock bridge: boot +
   hologram pixels, streaming states, safe Markdown + copy, permission cards, interrupt, error
   toasts, settings drawer + renderer switch, minimal mode, hotkeys, click-through, spoken replies
   with lip-sync (`voice=fake`), push-to-talk through Chromium's fake microphone, and the full loop
-  against the real Python voice server in `--fake` mode (skipped when Python/FastAPI are missing).
-  Screenshots go to `$LM_SHOTS_DIR` (default `test-results/screenshots`).
+  against the real Python voice server in `--fake` mode (skipped when Python/FastAPI are missing),
+  and the relief head's irises (located on the plate; no change at all as the gaze leaves zero,
+  `avatar-eyes.spec.js`). Screenshots go to `$LM_SHOTS_DIR` (default `test-results/screenshots`).

@@ -121,8 +121,9 @@ snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► 
   15 degrees aside (65 %) or down and aside, for 0.5 to 1.5 s. The cursor priority lives here too.
   The face centre is smoothed by a One Euro filter (0.5 Hz at rest, opening up with speed), so a
   still face holds the gaze still and a move is followed within a frame or two; the eyes pursue
-  a moving face smoothly and catch up with small saccades (see
-  [RENDERER.md](RENDERER.md#motion)).
+  a moving face smoothly and catch up with small saccades, and the head goes along with you a
+  little; a glance away is the eyes' look, with only a small turn of the head (the arbiter tells
+  `avatar.lookAt` what the target is: cursor, face or glance; see [RENDERER.md](RENDERER.md#motion)).
 * `src/vision/presence.js` (pure): away 2 min while idle → sleep; back → welcome; the greeting
   rule (the first sight after the camera starts, or back after ≥ 2 min; at most every 5 min).
 * `src/vision/index.js` (`CameraFeature`) ties it together and implements every setting;

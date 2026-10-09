@@ -345,7 +345,7 @@ avatar.setIntonation({ pitch, voiced }) // the local voice's pitch, semitones re
                                  // one (src/audio/prosody.js): the head and brows follow it a little
 avatar.setExpression({ smile, browUp }) // 0..1 (the camera: smile back, wake-up greeting)
 avatar.blink()
-avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); lookAt(null) releases
+avatar.lookAt(x, y, kind?)       // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); kind 'cursor' | 'face' | 'glance' (the head goes along with a cursor or a face); lookAt(null) releases
 avatar.setOptions(partial)       // quality/particles/bloom/colors/expressiveness (0..2) at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)

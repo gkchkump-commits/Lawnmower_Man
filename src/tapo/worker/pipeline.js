@@ -35,6 +35,8 @@ export const RATES = Object.freeze({
   overlayHz: 1,
 });
 export const STATS_MS = 2000;
+/** The longest PTZ move main watches (30 s) plus its settle time: see security-engine.js. */
+export const PTZ_MAX_SUPPRESS_MS = 35_000;
 /** The image counts as settled after this many consecutive frames with < 1 % change. */
 export const SETTLE_FRAMES = 2;
 export const SETTLE_FRACTION = 0.01;
@@ -127,7 +129,7 @@ export class SecurityPipeline {
     this._detectorKey = '';
     this._loadTimer = null;
     this.armed = { on: false, people: true, sensitivity: 'medium' };
-    this.ptz = { moving: false, settleUntil: 0 };
+    this.ptz = { moving: false, settleUntil: 0, since: 0 };
     this.boostUntil = 0;
     this.overlay = false;
     this.pageVisible = true;
@@ -217,7 +219,7 @@ export class SecurityPipeline {
         this._maybeLoadDetector();
         return undefined;
       case 'ptz':
-        this.ptz = { moving: !!msg.moving, settleUntil: Number(msg.settleUntil) || 0 };
+        this.ptz = { moving: !!msg.moving, settleUntil: Number(msg.settleUntil) || 0, since: msg.moving ? (this.ptz.moving ? this.ptz.since : this.wallNow()) : 0 };
         if (this.ptz.moving) this._needReseed = true;
         return undefined;
       case 'boost':
@@ -361,9 +363,14 @@ export class SecurityPipeline {
     return 0;
   }
 
-  /** The camera is turning or has just stopped: no detection, no motion. */
+  /**
+   * The camera is turning or has just stopped: no detection, no motion. A "moving" older than
+   * PTZ_MAX_SUPPRESS_MS no longer counts (main's engine has the same backstop): a move that never
+   * reported its end must not blind the detector for good.
+   */
   _suppressed() {
-    return this.ptz.moving || this.wallNow() < this.ptz.settleUntil;
+    const now = this.wallNow();
+    return (this.ptz.moving && now - this.ptz.since < PTZ_MAX_SUPPRESS_MS) || now < this.ptz.settleUntil;
   }
 
   // ------------------------------------------------------------------------------------------

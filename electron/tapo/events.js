@@ -4,8 +4,13 @@
 // Tapo quirks it is built around:
 //  * PullMessages' Timeout is not honoured: the camera drops the request after ~10 s, often with
 //    bytes after "Connection: close". That is a normal (empty) pull — keep the subscription.
-//  * subscriptions live ~10 minutes: Renew every 480 s; a refused Renew → Unsubscribe and
-//    subscribe again. Never more than one subscription (cameras cap them, ~3).
+//  * subscriptions live ~10 minutes: Renew every 480 s (sooner when the camera grants less: 80 % of
+//    TerminationTime − CurrentTime); a refused Renew → Unsubscribe and subscribe again. Never more
+//    than one subscription (cameras cap them, ~3): a camera that does not answer (off the network,
+//    a Wi-Fi blip) keeps its subscription, so the same one is pulled again after the backoff; only
+//    an answer that refuses it, or its expiry, drops it. One that could not be unsubscribed is
+//    remembered and unsubscribed as soon as the camera answers again, before a new Create, and on
+//    stop().
 //  * ~18 duplicate "true" messages a second while something is in view, single "false" blips in
 //    the middle, and some firmwares never send the falling edge: duplicates are dropped, a fall is
 //    held 2 s (a "true" inside cancels it), and a state with no refresh for 3 minutes falls.
@@ -20,6 +25,19 @@ export const FALL_HOLD_MS = 2000;
 export const STALE_MS = 180_000;
 export const BENIGN_RETRY_MS = 250;
 export const MAX_BACKOFF_MS = 60_000;
+export const MAX_ORPHANS = 8;
+
+const TRANSPORT_KINDS = new Set(['timeout', 'reset', 'refused', 'unreachable']);
+
+/**
+ * The camera did not answer at all (off the network, rebooting, a Wi-Fi drop): says nothing about
+ * the subscription, which may still exist on the camera. @param {unknown} err
+ */
+export function isTransportError(err) {
+  if (err instanceof OnvifError) return TRANSPORT_KINDS.has(err.kind);
+  const code = String(/** @type {any} */ (err)?.code || '');
+  return /^(ECONN|EHOST|ENET|ETIMEDOUT|EPIPE|EAI_AGAIN)/.test(code);
+}
 
 /** @typedef {'motion'|'person'|'tamper'} EventKind */
 /** @typedef {'off'|'subscribing'|'subscribed'|'failing'|'unsupported'} MonitorState */
@@ -55,8 +73,10 @@ export class PullPointMonitor extends EventEmitter {
     /** @type {MonitorState} */
     this._state = 'off';
     this._running = false;
-    /** @type {{ address: string, renewAt: number }|null} */
+    /** @type {{ address: string, renewAt: number, expiresAt: number }|null} */
     this._sub = null;
+    /** subscriptions that could not be unsubscribed (the camera did not answer) @type {string[]} */
+    this._orphans = [];
     /** @type {string[]|null} */
     this.topics = null;
     this._failures = 0;
@@ -135,17 +155,75 @@ export class PullPointMonitor extends EventEmitter {
     }
     const sub = this._sub;
     this._sub = null;
-    if (sub) await this._unsubscribe(sub.address);
+    // the current subscription and any left over from an outage, in parallel (≤ 3.1 s)
+    const addresses = [...new Set([...(sub ? [sub.address] : []), ...this._orphans])];
+    this._orphans = [];
+    if (addresses.length) await Promise.all(addresses.map((a) => this._unsubscribe(a, { remember: false })));
     if (wasRunning || this._state !== 'unsupported') this._setState('off');
   }
 
-  /** @param {string} address */
-  async _unsubscribe(address) {
+  /** Subscriptions left over (diagnostics/tests). */
+  get orphans() {
+    return [...this._orphans];
+  }
+
+  /**
+   * Unsubscribe, best effort (≤ 3.1 s). A camera that does not answer may still hold the
+   * subscription: it is remembered (`remember`) and unsubscribed later.
+   * @param {string} address @param {{ remember?: boolean }} [o] @returns {Promise<boolean>} it is gone
+   */
+  async _unsubscribe(address, o = {}) {
+    let gone = false;
+    /** @type {any} */
+    let timer = null;
     // the control lane: the pull lane may be busy with a pull for up to 15 s
     await Promise.race([
-      this.client.call('events', BODIES.unsubscribe(), { op: 'Unsubscribe', url: address, action: ACTIONS.unsubscribe, to: address, timeoutMs: 3000 }).catch((err) => this._log('debug', `[tapo] Unsubscribe: ${/** @type {Error} */ (err).message}`)),
-      new Promise((r) => this._setTimeout(r, 3100)),
+      this.client.call('events', BODIES.unsubscribe(), { op: 'Unsubscribe', url: address, action: ACTIONS.unsubscribe, to: address, timeoutMs: 3000 }).then(() => {
+        gone = true;
+      }, (err) => {
+        // a camera that answers (with a fault: "no such subscription") has let it go too
+        if (!isTransportError(err)) gone = true;
+        this._log('debug', `[tapo] Unsubscribe: ${/** @type {Error} */ (err).message}`);
+      }),
+      new Promise((r) => { timer = this._setTimeout(r, 3100); }),
     ]);
+    this._clearTimeout(timer);
+    if (!gone && o.remember !== false && !this._orphans.includes(address)) {
+      this._orphans = [...this._orphans, address].slice(-MAX_ORPHANS);
+      this._log('info', '[tapo] the camera did not answer the Unsubscribe; trying again when it is back');
+    }
+    return gone;
+  }
+
+  /** The camera answers again: unsubscribe what was left over. */
+  async _flushOrphans() {
+    const list = this._orphans;
+    this._orphans = [];
+    for (const a of list) {
+      if (!this._running) {
+        this._orphans.push(a); // stop() takes care of it
+        continue;
+      }
+      await this._unsubscribe(a);
+    }
+  }
+
+  /**
+   * When to renew, and when the camera forgets the subscription, from its answer (the camera's own
+   * clock: the difference TerminationTime − CurrentTime).
+   * @param {{ terminationTime?: string, currentTime?: string }} r
+   */
+  _lifetime(r) {
+    const now = this._now();
+    const term = Date.parse(r.terminationTime || '');
+    const cur = Date.parse(r.currentTime || '');
+    let life = Number.isFinite(term) && Number.isFinite(cur) && term > cur ? term - cur : null;
+    if (life === null && Number.isFinite(term)) {
+      const camNow = now + (this.client.clock?.offsetMs || 0);
+      if (term > camNow) life = term - camNow;
+    }
+    const renewIn = life ? Math.min(this._renewMs, Math.max(2000, 0.8 * life)) : this._renewMs;
+    return { renewAt: now + renewIn, expiresAt: life ? now + life : Infinity };
   }
 
   /** @param {number} ms */
@@ -200,12 +278,14 @@ export class PullPointMonitor extends EventEmitter {
         }
         if (!this._running) break;
         try {
+          // the camera's slots: what an outage left over goes first
+          if (this._orphans.length) await this._flushOrphans();
           const sub = await this.client.createPullPoint();
           if (!this._running) {
-            await this._unsubscribe(sub.address);
+            await this._unsubscribe(sub.address, { remember: false });
             break;
           }
-          this._sub = { address: sub.address, renewAt: this._now() + this._renewMs };
+          this._sub = { address: sub.address, ...this._lifetime(sub) };
           this._failures = 0;
           this._setState('subscribed');
           this._log('info', '[tapo] subscribed to the camera\'s events');
@@ -218,16 +298,29 @@ export class PullPointMonitor extends EventEmitter {
         firstAttempt();
       }
       if (!this._sub) continue;
+      if (this._now() >= this._sub.expiresAt) {
+        // not renewed in time (the camera was away): it has forgotten the subscription
+        this._log('info', '[tapo] the event subscription expired; subscribing again');
+        this._sub = null;
+        continue;
+      }
       if (this._now() >= this._sub.renewAt) {
         try {
-          await this.client.renew(this._sub.address);
-          this._sub.renewAt = this._now() + this._renewMs;
+          const r = await this.client.renew(this._sub.address);
+          if (!this._sub) continue;
+          Object.assign(this._sub, this._lifetime(r));
         } catch (err) {
+          if (!this._running) break;
           if (this._isAuth(err)) break;
+          if (isTransportError(err)) {
+            // no answer: the subscription may still be there; try again after the backoff
+            await this._failed(err, 'Renew');
+            continue;
+          }
           this._log('info', `[tapo] Renew refused (${/** @type {Error} */ (err).message}); subscribing again`);
           const old = this._sub;
           this._sub = null;
-          await this._unsubscribe(old.address);
+          if (old) await this._unsubscribe(old.address);
           continue;
         }
       }
@@ -237,6 +330,7 @@ export class PullPointMonitor extends EventEmitter {
         this._failures = 0;
         this._setState('subscribed');
         for (const m of msgs) this._onNotification(m);
+        if (this._orphans.length) await this._flushOrphans();
       } catch (err) {
         if (!this._running) break;
         if (isBenignPullError(err)) {
@@ -244,6 +338,12 @@ export class PullPointMonitor extends EventEmitter {
           continue;
         }
         if (this._isAuth(err)) break;
+        if (isTransportError(err)) {
+          // the camera is not answering: keep the subscription and pull it again after the backoff
+          await this._failed(err, 'PullMessages');
+          continue;
+        }
+        // the camera answered and refused the pull (a reboot forgot the subscription): a new one
         const old = this._sub;
         this._sub = null;
         if (old) await this._unsubscribe(old.address);

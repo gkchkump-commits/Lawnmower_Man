@@ -66,7 +66,7 @@ describe('OnvifClient.connect', () => {
     expect(times.map((x) => x.authed)).toEqual([false, true]);
   });
 
-  it('a wrong password fails once (after one clock resync) and is never retried on its own', async () => {
+  it('a wrong password fails once — one refused sign-in, the clock was just read — and is never retried on its own', async () => {
     const c = client({ getPassword: async () => 'wrong' });
     let failed = 0;
     c.on('auth-failed', () => failed++);
@@ -75,8 +75,10 @@ describe('OnvifClient.connect', () => {
     expect(err.kind).toBe('auth');
     expect(c.authFailed).toBe(true);
     expect(failed).toBe(1);
-    expect(cam.count('GetDeviceInformation')).toBe(2);
-    expect(cam.count('GetSystemDateAndTime')).toBe(2);
+    // connect() read the clock a moment before: a resync-and-retry would only be a second refused
+    // sign-in (cameras lock an address out after a few)
+    expect(cam.count('GetDeviceInformation')).toBe(1);
+    expect(cam.count('GetSystemDateAndTime')).toBe(1);
     const before = cam.calls.length;
     for (let i = 0; i < 5; i++) expect((await c.getPresets().catch((e) => e)).kind).toBe('auth');
     expect(cam.calls.length).toBe(before); // nothing reached the camera

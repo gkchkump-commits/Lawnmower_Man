@@ -183,7 +183,8 @@ describe('moves and the watchdog', () => {
     await make({}, { statusWorks: false });
     client.fail.Stop = new OnvifError('fault', 'nope', { status: 400 });
     await ptz.command({ op: 'stop' });
-    expect(ops()).toEqual(['Stop', 'StopMinimal']);
+    // without GetStatus nothing confirms a Stop: zero velocity follows even a Stop that worked
+    expect(ops()).toEqual(['Stop', 'StopMinimal', 'ZeroVelocity']);
     client.calls.length = 0;
     client.fail.StopMinimal = new OnvifError('fault', 'nope', { status: 400 });
     await ptz.command({ op: 'stop' });
@@ -219,7 +220,7 @@ describe('moves and the watchdog', () => {
     await ptz.command({ op: 'nudge', dir: 'right', amount: 'medium' });
     expect(client.calls[0]).toMatchObject({ op: 'ContinuousMove' });
     expect(client.calls[0].args[0]).toBe(0.5);
-    expect(client.calls[0].args[2]).toBeCloseTo(1.55);
+    expect(client.calls[0].args[2]).toBe(2); // whole seconds (PT2S); the watchdog stops it at 1050 ms
     await vi.advanceTimersByTimeAsync(1100);
     expect(client.calls.find((x) => x.op === 'Stop').t - t0).toBe(1050);
   });
@@ -298,10 +299,11 @@ describe('press-and-hold', () => {
     expect(ops()).toEqual([]);
     await ptz.command({ op: 'hold', dir: 'down' });
     await ptz.stopAll('blur');
-    expect(ops()).toEqual(['ContinuousMove', 'Stop']);
+    // no GetStatus to confirm the Stop: zero velocity after it
+    expect(ops()).toEqual(['ContinuousMove', 'Stop', 'ZeroVelocity']);
     expect(ptz.holding).toBe(false);
     await ptz.stopAll('quit', { force: true });
-    expect(ops()).toEqual(['ContinuousMove', 'Stop', 'Stop']);
+    expect(ops()).toEqual(['ContinuousMove', 'Stop', 'ZeroVelocity', 'Stop', 'ZeroVelocity']);
   });
 });
 

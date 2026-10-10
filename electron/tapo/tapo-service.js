@@ -296,7 +296,12 @@ export class TapoService extends EventEmitter {
     this._statusSoon();
   }
 
-  /** @param {string} state @param {string} detail */
+  /**
+   * Turned off, or the password forgotten. The camera is let go of at once, but its client stays
+   * open until the last Stop (a camera moving right now — switching it off is a natural panic
+   * action) and the Unsubscribe have gone out, ≤ 3.5 s.
+   * @param {string} state @param {string} detail @returns {Promise<void>} when the client is closed
+   */
   _disconnect(state, detail) {
     this._gen++;
     this._connKey = '';
@@ -304,14 +309,16 @@ export class TapoService extends EventEmitter {
     this._retryTimer = null;
     const ptz = this.ptzCtl;
     this.ptzCtl = null;
-    ptz?.dispose().catch(() => {});
-    this.monitor?.stop().catch(() => {});
+    const monitor = this.monitor;
     this.monitor = null;
-    this.relay.stop();
-    this.sidecar.stop().catch(() => {});
-    this.client?.close();
+    this._eventsState = 'off';
+    const client = this.client;
     this.client = null;
+    this.relay.stop();
+    this._stopVideo();
     this._setConn(state, detail);
+    const last = Promise.allSettled([ptz?.dispose(), monitor?.stop()]);
+    return Promise.race([last, new Promise((r) => setTimeout(r, 3500))]).then(() => client?.close());
   }
 
   /** (Re)connect from scratch. @param {string} why */
@@ -400,7 +407,7 @@ export class TapoService extends EventEmitter {
     this.monitor?.stop().catch(() => {});
     this.monitor = null;
     this.relay.stop();
-    this.sidecar.stop().catch(() => {});
+    this._stopVideo();
     this._setConn('auth-failed', HINTS.auth);
   }
 
@@ -408,8 +415,13 @@ export class TapoService extends EventEmitter {
     if (this._videoAuthFailed) return;
     this._videoAuthFailed = true;
     this.relay.stop();
-    this.sidecar.stop().catch(() => {});
+    this._stopVideo();
     this._setConn('auth-failed', `The camera refused the video sign-in. ${HINTS.auth}`);
+  }
+
+  /** go2rtc off (and with it the camera's RTSP session). */
+  _stopVideo() {
+    this.sidecar.stop().catch(() => {});
   }
 
   /** (Re)start go2rtc with the current settings — only after ONVIF accepted the sign-in. */
@@ -904,8 +916,10 @@ export class TapoService extends EventEmitter {
   }
 
   async clearCredentials() {
+    // the last Stop/Unsubscribe still need the password: let go of the camera first
+    await this._disconnect('not-configured', 'Enter the Camera Account password in the setup.');
     await this._cred.clear();
-    this._disconnect('not-configured', 'Enter the Camera Account password in the setup.');
+    this._statusSoon();
     return { ok: true };
   }
 

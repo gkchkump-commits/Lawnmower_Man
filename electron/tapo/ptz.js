@@ -4,6 +4,9 @@
 //  * every move is followed by a watchdog: poll MoveStatus (GetStatus) every 300 ms until IDLE,
 //    or — when GetStatus does not work, or the poll runs past the bound — send the Stop chain at
 //    min(8 s, 1.5 s + |t| × msPerUnit). Some firmwares turn a RelativeMove into a continuous one.
+//    A preset/home move that GetStatus shows still converging on its target gets more time (≤ 30 s).
+//  * a move whose request failed gets the timed Stop chain too: a lost or timed-out answer says
+//    nothing about the motor (only a clear refusal — a SOAP fault — ends it at once).
 //  * the Stop chain: Stop → (fault) minimal Stop → (still MOVING 600 ms later, or Stop errored)
 //    zero-velocity ContinuousMove (the ONVIF equivalent of Stop; some firmwares ignore Stop on pan).
 //  * press-and-hold re-sends ContinuousMove (Timeout PT1S, so the camera stops by itself too) every
@@ -24,6 +27,13 @@ export const POLL_MS = 300;
 export const SETTLE_MS = 1500;
 export const STOP_CHECK_MS = 600;
 export const MAX_WATCHDOG_MS = 8000;
+/** A preset/home move the camera reports progress on may take this long at most. */
+export const MAX_LONG_MOVE_MS = 30_000;
+/** While such a move runs past its estimate: re-checked this often, and it must have moved this far. */
+export const PROGRESS_CHECK_MS = 1000;
+export const PROGRESS_EPS = 0.01;
+/** A hold ends this close to the end of the travel (the absolute position space is −1..1). */
+export const HOLD_LIMIT_EPS = 0.01;
 export const PRIVACY_MS = 60_000;
 export const CENTER_DEADBAND = 0.04;
 
@@ -38,6 +48,7 @@ const DIRS = /** @type {const} */ ({ left: [-1, 0], right: [1, 0], up: [0, 1], d
  * @typedef {{ ok: boolean, moved?: boolean, error?: string, code?: 'unsupported'|'privacy'|'busy'|'offline'|'auth'|'not-configured'|'no-preset',
  *   position?: { x: number, y: number } | null, candidates?: string[], preset?: string }} PtzResult
  * @typedef {{ token: string, name: string, source: 'camera'|'local', home?: boolean }} Preset
+ * @typedef {{ units?: number, msPerUnit?: number, stopAfterMs?: number, blind?: boolean, long?: boolean, target?: { x: number, y: number }|null }} WatchOptions
  * @typedef {{ min: number, max: number }} Range
  * @typedef {{ available: boolean, mode: 'relative'|'continuous'|'none', canStatus: boolean, canAbsolute: boolean, canContinuous: boolean,
  *   canSetPreset: boolean|null, xRange: Range, yRange: Range, maxPresets: number|null, homeSupported: boolean }} PtzCaps
@@ -183,9 +194,11 @@ export class PtzController extends EventEmitter {
     this.position = null;
     this._privacyUntil = 0;
     this._disposed = false;
-    /** watchdog of the current move @type {{ seq: number, timers: Array<any>, deadline: number }|null} */
+    /** watchdog of the current move @type {{ seq: number, timers: Array<any>, deadline: number, checkPos: { x: number, y: number }|null, pollOk: boolean }|null} */
     this._watch = null;
     this._moveSeq = 0;
+    /** how the last move ended: MoveStatus IDLE or a Stop @type {{ seq: number, by: 'idle'|'stop' }|null} */
+    this._lastEnd = null;
     /** press-and-hold @type {{ dir: Dir, lastBeat: number, resend: any, beat: any, mode: 'continuous'|'relative' }|null} */
     this._hold = null;
     /** the "still MOVING 600 ms after Stop?" check @type {{ timer: any, resolve: () => void, done: Promise<void> }|null} */
@@ -438,13 +451,10 @@ export class PtzController extends EventEmitter {
       const ms = Math.max(150, Math.min(4000, units * s.msPerUnit));
       const vx = Math.sign(x) * s.holdSpeed;
       const vy = Math.sign(y) * s.holdSpeed;
-      this._beginMove();
-      await this.client.continuousMove(vx, vy, ms / 1000 + 0.5);
-      this._armWatchdog({ stopAfterMs: ms });
+      // whole seconds (xs:duration as Tapo's own traffic sends it); the watchdog stops it on time
+      await this._sendMove(() => this.client.continuousMove(vx, vy, Math.ceil(ms / 1000)), { stopAfterMs: ms });
     } else {
-      this._beginMove();
-      await this.client.relativeMove(x, y);
-      this._armWatchdog({ units, msPerUnit: s.msPerUnit });
+      await this._sendMove(() => this.client.relativeMove(x, y), { units, msPerUnit: s.msPerUnit });
     }
     return { ok: true, moved: true, position: this.position };
   }
@@ -455,15 +465,12 @@ export class PtzController extends EventEmitter {
     if (local) {
       const p = this._s().localPresets[Number(local[1])];
       if (!p || !this.caps.canAbsolute) return { ok: false, code: 'no-preset', error: 'That saved position no longer exists.' };
-      this._beginMove();
-      await this.client.absoluteMove(clampTo(p.x, UNIT), clampTo(p.y, UNIT));
-      this._armWatchdog({ units: this._distanceTo(p) });
+      const target = { x: clampTo(p.x, UNIT), y: clampTo(p.y, UNIT) };
+      await this._sendMove(() => this.client.absoluteMove(target.x, target.y), { units: this._distanceTo(p), long: true, target });
       return { ok: true, moved: true, preset: p.name, position: this.position };
     }
     const known = this._cameraPresets.find((p) => p.token === token);
-    this._beginMove();
-    await this.client.gotoPreset(token);
-    this._armWatchdog({ units: this._distanceTo(known?.position || null) });
+    await this._sendMove(() => this.client.gotoPreset(token), { units: this._distanceTo(known?.position || null), long: true, target: known?.position || null });
     return { ok: true, moved: true, preset: known?.name, position: this.position };
   }
 
@@ -477,9 +484,7 @@ export class PtzController extends EventEmitter {
   async _home(s) {
     if (s.homePreset) return this._gotoPresetToken(s.homePreset);
     if (this.caps.canAbsolute) {
-      this._beginMove();
-      await this.client.absoluteMove(0, 0);
-      this._armWatchdog({ units: this._distanceTo({ x: 0, y: 0 }) });
+      await this._sendMove(() => this.client.absoluteMove(0, 0), { units: this._distanceTo({ x: 0, y: 0 }), long: true, target: { x: 0, y: 0 } });
       return { ok: true, moved: true, position: this.position };
     }
     const named = (await this.presets({ refresh: false })).find((p) => normalizePresetName(p.name) === 'home');
@@ -489,24 +494,29 @@ export class PtzController extends EventEmitter {
 
   /**
    * A move used by calibration: raw ONVIF intent (no inversion, no minStep), then wait until it
-   * has settled (MoveStatus, else the time estimate). The watchdog still applies.
+   * has settled (MoveStatus, else the time estimate). The watchdog still applies. `measured`:
+   * the camera reported the end (MoveStatus IDLE), so `settledMs` is its travel time; otherwise it
+   * is only the app's own Stop estimate (msPerUnit) and must not be fed back into msPerUnit.
    * @param {number} x @param {number} y @param {{ maxWaitMs?: number }} [o]
-   * @returns {Promise<{ settledMs: number }>}
+   * @returns {Promise<{ settledMs: number, measured: boolean }>}
    */
   async rawMove(x, y, o = {}) {
     if (!this.caps.available) throw new Error('Pan and tilt are not available.');
     if (this.privacySuspected) throw new Error(PRIVACY_HINT);
     const s = this._s();
     const t0 = this._now();
+    let seq = -1;
     const r = await this._runExclusive(async () => {
-      this._beginMove();
-      await this.client.relativeMove(clampTo(x, this.caps.xRange), clampTo(y, this.caps.yRange));
-      this._armWatchdog({ units: Math.max(Math.abs(x), Math.abs(y)), msPerUnit: s.msPerUnit });
+      await this._sendMove(() => {
+        seq = this._moveSeq;
+        return this.client.relativeMove(clampTo(x, this.caps.xRange), clampTo(y, this.caps.yRange));
+      }, { units: Math.max(Math.abs(x), Math.abs(y)), msPerUnit: s.msPerUnit });
       return { ok: true, moved: true };
     });
     if (!r.ok) throw new Error(r.error || 'The camera could not move.');
     await this.waitIdle(o.maxWaitMs ?? 6000);
-    return { settledMs: this._now() - t0 };
+    const measured = !!this._lastEnd && this._lastEnd.seq === seq && this._lastEnd.by === 'idle';
+    return { settledMs: this._now() - t0, measured };
   }
 
   /**
@@ -553,9 +563,37 @@ export class PtzController extends EventEmitter {
     }
   }
 
-  /** @param {string} why */
-  _endMove(why) {
+  /**
+   * Send one move request and arm its watchdog — whatever the request's fate:
+   *  * no answer (timeout, reset, unreachable): the motor's state is unknown — the camera may have
+   *    acted on a request whose answer was lost, and a RelativeMove may run on as a continuous
+   *    one — so the timed Stop chain always comes, "blind" (no early end on an IDLE poll, which can
+   *    come before the motor starts);
+   *  * an odd answer (HTTP 5xx, malformed: privacy mode looks like this): the usual watchdog, so
+   *    MoveStatus IDLE ends it as soon as the camera reports it, or the timed Stop does;
+   *  * a clear refusal (a SOAP fault, a refused sign-in, a connection that never opened): the
+   *    camera did not move, the move ends at once.
+   * The error is passed on (the caller maps it to a result).
+   * @param {() => Promise<unknown>} send @param {WatchOptions} watch
+   */
+  async _sendMove(send, watch) {
+    this._beginMove();
+    try {
+      await send();
+    } catch (err) {
+      const kind = err instanceof OnvifError ? err.kind : 'unknown';
+      if (['fault', 'auth', 'refused'].includes(kind)) this._endMove(`move refused (${kind})`);
+      else if (['http', 'malformed'].includes(kind)) this._armWatchdog(watch);
+      else this._armWatchdog({ ...watch, blind: true });
+      throw err;
+    }
+    this._armWatchdog(watch);
+  }
+
+  /** @param {string} why @param {'idle'|'stop'} [by] how the end is known */
+  _endMove(why, by = 'stop') {
     this._cancelWatchdog();
+    this._lastEnd = { seq: this._moveSeq, by };
     this.settleUntil = this._now() + SETTLE_MS;
     if (this.moving) {
       this.moving = false;
@@ -565,35 +603,49 @@ export class PtzController extends EventEmitter {
   }
 
   /**
-   * After a move request returned: poll MoveStatus (when GetStatus works) until IDLE; otherwise —
-   * or when the poll runs past the bound — the Stop chain. `stopAfterMs` = a timed continuous
-   * nudge, which always ends with the Stop chain.
-   * @param {{ units?: number, msPerUnit?: number, stopAfterMs?: number }} o
+   * After a move request: poll MoveStatus (when GetStatus works) until IDLE; otherwise — or when
+   * the poll runs past the bound — the Stop chain. `stopAfterMs` = a timed continuous nudge, which
+   * always ends with the Stop chain; `blind` = the request failed, so the Stop always comes at the
+   * bound. A `long` move (preset, home) that the polls show still converging on its `target` (or
+   * still moving, when the target is unknown) is re-checked every second instead, up to 30 s.
+   * @param {WatchOptions} o
    */
   _armWatchdog(o) {
     this._cancelWatchdog();
     const seq = this._moveSeq;
     const bound = o.stopAfterMs !== undefined ? o.stopAfterMs : Math.min(MAX_WATCHDOG_MS, 1500 + (o.units ?? 2) * (o.msPerUnit ?? this._s().msPerUnit));
-    const watch = { seq, timers: /** @type {any[]} */ ([]), deadline: this._now() + bound };
+    const startedAt = this._now();
+    const watch = { seq, timers: /** @type {any[]} */ ([]), deadline: startedAt + bound, checkPos: this.position, pollOk: false };
     this._watch = watch;
-    watch.timers.push(this._setTimeout(() => {
+    const polling = o.stopAfterMs === undefined && !o.blind && this.caps.canStatus;
+    const extendable = polling && !!o.long;
+    const onBound = () => {
       if (this._watch !== watch) return;
-      this._log('debug', `[tapo] PTZ watchdog: Stop after ${Math.round(bound)} ms`);
+      if (extendable && this._now() - startedAt < MAX_LONG_MOVE_MS && this._progressing(watch, o.target || null)) {
+        watch.checkPos = this.position;
+        watch.deadline = this._now() + PROGRESS_CHECK_MS;
+        watch.timers.push(this._setTimeout(onBound, PROGRESS_CHECK_MS));
+        return;
+      }
+      this._log('debug', `[tapo] PTZ watchdog: Stop after ${Math.round(this._now() - startedAt)} ms${o.blind ? ' (the move request failed)' : ''}`);
       this._stopChain('watchdog').catch(() => {});
-    }, bound));
-    if (o.stopAfterMs === undefined && this.caps.canStatus) {
+    };
+    watch.timers.push(this._setTimeout(onBound, bound));
+    if (polling) {
       const poll = async () => {
         if (this._watch !== watch) return;
         try {
           const st = await this.client.getStatus();
           if (this._watch !== watch) return;
           if (st.position) this._setPosition(st.position);
+          watch.pollOk = !!st.position;
           if (st.moveStatus === 'IDLE') {
-            this._endMove('MoveStatus IDLE');
+            this._endMove('MoveStatus IDLE', 'idle');
             return;
           }
         } catch (err) {
           if (this._watch !== watch) return;
+          watch.pollOk = false;
           this._notePrivacy(err);
           // GetStatus stopped working: the timed Stop at the bound still comes
           return;
@@ -602,6 +654,20 @@ export class PtzController extends EventEmitter {
       };
       watch.timers.push(this._setTimeout(poll, POLL_MS));
     }
+  }
+
+  /**
+   * Did the camera move since the last check — and, with a target, get closer to it?
+   * @param {{ checkPos: { x: number, y: number }|null, pollOk: boolean }} watch @param {{ x: number, y: number }|null} target
+   */
+  _progressing(watch, target) {
+    const p = this.position;
+    const q = watch.checkPos;
+    if (!p || !q || !watch.pollOk) return false;
+    if (Math.max(Math.abs(p.x - q.x), Math.abs(p.y - q.y)) < PROGRESS_EPS) return false;
+    if (!target) return true;
+    const dist = (/** @type {{ x: number, y: number }} */ a) => Math.max(Math.abs(target.x - a.x), Math.abs(target.y - a.y));
+    return dist(p) < dist(q);
   }
 
   _cancelWatchdog() {
@@ -641,7 +707,9 @@ export class PtzController extends EventEmitter {
         this._log('info', `[tapo] Stop failed (${/** @type {Error} */ (err2).message}); sending zero velocity`);
       }
     }
-    if (errored) await this._zeroVelocity();
+    // Without GetStatus nothing can confirm that the Stop worked (some firmwares ignore Stop on
+    // pan): a zero-velocity ContinuousMove too, the ONVIF equivalent of Stop. Cheap and harmless.
+    if (errored || (!this.caps.canStatus && this.caps.canContinuous)) await this._zeroVelocity();
     if (this._moveSeq !== seq) return; // a new move started meanwhile: it has its own watchdog
     this._endMove(`stopped (${why})`);
     if (!errored && this.caps.canStatus) this._scheduleStopCheck(seq);
@@ -760,10 +828,8 @@ export class PtzController extends EventEmitter {
       const vx = (s.invertPan ? -sx : sx) * s.holdSpeed + 0;
       const vy = (s.invertTilt ? -sy : sy) * s.holdSpeed + 0;
       r = await this._runExclusive(async () => {
-        this._beginMove();
-        await this.client.continuousMove(vx, vy, 1);
         // the camera's own Timeout (PT1S) stops it too; this bound covers a lost hold
-        this._armWatchdog({ stopAfterMs: 1500 });
+        await this._sendMove(() => this.client.continuousMove(vx, vy, 1), { stopAfterMs: 1500 });
         return { ok: true, moved: true };
       });
     } else {
@@ -771,8 +837,31 @@ export class PtzController extends EventEmitter {
     }
     if (this._hold === hold && r.ok) {
       hold.resend = this._setTimeout(() => this._holdStep(hold).catch(() => {}), hold.mode === 'continuous' ? HOLD_RESEND_MS : HOLD_NUDGE_MS);
+      if (hold.mode === 'continuous') this._checkHoldLimit(hold);
     }
     return r;
+  }
+
+  /**
+   * While a hold drives the motor: read the position (when GetStatus works) and end the hold at
+   * the end of the travel in the held direction, instead of pushing against the end stop.
+   * @param {NonNullable<PtzController['_hold']>} hold
+   */
+  _checkHoldLimit(hold) {
+    if (!this.caps.canStatus) return;
+    const s = this._s();
+    const [sx, sy] = DIRS[hold.dir];
+    const vx = s.invertPan ? -sx : sx;
+    const vy = s.invertTilt ? -sy : sy;
+    this.client.getStatus().then((st) => {
+      if (this._hold !== hold || !st.position) return;
+      this._setPosition(st.position);
+      const at = (/** @type {number} */ v, /** @type {number} */ p) => (v > 0 ? p >= UNIT.max - HOLD_LIMIT_EPS : v < 0 ? p <= UNIT.min + HOLD_LIMIT_EPS : true);
+      if (at(vx, st.position.x) && at(vy, st.position.y)) {
+        this._log('info', '[tapo] PTZ hold: the end of the travel; stopping');
+        this._endHold('end of travel').catch(() => {});
+      }
+    }, (err) => this._notePrivacy(err));
   }
 
   _clearHold() {

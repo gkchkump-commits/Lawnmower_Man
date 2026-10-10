@@ -22,6 +22,8 @@ import { hostPort } from './host.js';
 
 export const RESYNC_MS = 10 * 60 * 1000;
 export const CLOCK_WARN_MS = 5000;
+/** A clock read this recently cannot explain a refused sign-in (no resync-and-retry then). */
+export const FRESH_CLOCK_MS = 60_000;
 
 const NS_MEDIA = 'http://www.onvif.org/ver10/media/wsdl';
 const NS_PTZ = 'http://www.onvif.org/ver20/ptz/wsdl';
@@ -333,10 +335,17 @@ export class OnvifClient extends EventEmitter {
       return await this._send(url, body, o, auth);
     } catch (err) {
       if (!(err instanceof OnvifError) || err.kind !== 'auth' || !auth) throw err;
-      // The clock may have jumped (a camera without NTP): resync once and retry once.
-      this._log('info', '[tapo] ONVIF sign-in fault: re-reading the camera clock and retrying once');
-      await this._resync(o.lane);
+      // The clock may have jumped (a camera without NTP): resync once and retry once — except for
+      // the sign-in check itself right after the clock was read (connect, the connection test):
+      // there a retry is only a second refused sign-in, and cameras lock an address out after a
+      // few. (Other operations keep the retry: a 401 can also be a busy camera.)
+      const fresh = o.op === 'GetDeviceInformation' && !!this.clock && this._now() - this.clock.syncedAt < FRESH_CLOCK_MS;
+      if (!fresh) {
+        this._log('info', '[tapo] ONVIF sign-in fault: re-reading the camera clock and retrying once');
+        await this._resync(o.lane);
+      }
       try {
+        if (fresh) throw err;
         return await this._send(url, body, o, auth);
       } catch (err2) {
         if (!(err2 instanceof OnvifError) || err2.kind !== 'auth') throw err2;
@@ -573,21 +582,24 @@ export class OnvifClient extends EventEmitter {
 
   // --- events (the pull lane) ---------------------------------------------------------------
 
+  // GetEventProperties and CreatePullPointSubscription go to the device's shared service address,
+  // so they take the control lane (one request at a time there: some firmwares refuse concurrent
+  // requests with a 401). Only the subscription's own address has a lane of its own.
   async getEventProperties() {
-    return parseTopicSet(await this.call('events', BODIES.getEventProperties(), { op: 'GetEventProperties', lane: 'pull' }));
+    return parseTopicSet(await this.call('events', BODIES.getEventProperties(), { op: 'GetEventProperties' }));
   }
 
   /**
    * CreatePullPointSubscription with InitialTerminationTime PT10M; a camera that refuses it
    * (ter:InvalidArgVal on the C500) gets the bare request, remembered for next time.
-   * @returns {Promise<{ address: string, terminationTime: string }>}
+   * @returns {Promise<{ address: string, terminationTime: string, currentTime: string }>}
    */
   async createPullPoint() {
     const attempt = async (/** @type {boolean} */ withTermination) => {
-      const r = await this.call('events', BODIES.createPullPointSubscription(withTermination), { op: 'CreatePullPointSubscription', lane: 'pull' });
+      const r = await this.call('events', BODIES.createPullPointSubscription(withTermination), { op: 'CreatePullPointSubscription' });
       const address = rewriteXaddr(textOf(r, 'SubscriptionReference/Address'), this.host, this.port);
       if (!address) throw new OnvifError('malformed', 'The camera sent no subscription address.');
-      return { address, terminationTime: textOf(r, 'TerminationTime') || '' };
+      return { address, terminationTime: textOf(r, 'TerminationTime') || '', currentTime: textOf(r, 'CurrentTime') || '' };
     };
     if (this._noInitialTermination) return attempt(false);
     try {
@@ -624,7 +636,7 @@ export class OnvifClient extends EventEmitter {
   /** @param {string} address */
   async renew(address) {
     const r = await this.call('events', BODIES.renew(), { op: 'Renew', lane: 'pull', url: address, action: ACTIONS.renew, to: address });
-    return { terminationTime: textOf(r, 'TerminationTime') || '' };
+    return { terminationTime: textOf(r, 'TerminationTime') || '', currentTime: textOf(r, 'CurrentTime') || '' };
   }
 
   /** @param {string} address @param {{ timeoutMs?: number }} [o] */

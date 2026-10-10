@@ -23,6 +23,12 @@ export const BOOST_MS = 10_000;
 export const LOCAL_STALE_MS = 5000;
 export const BEST_SNAPSHOT_EVERY_MS = 2000;
 export const EXTEND_EVERY_MS = 5000;
+/**
+ * A backstop: a PTZ "moving" state older than this no longer suppresses evidence (the longest
+ * watched move is 30 s, ptz.js MAX_LONG_MOVE_MS, plus its settle time). A stuck "moving" must
+ * never silence the alarm for good.
+ */
+export const PTZ_MAX_SUPPRESS_MS = 35_000;
 
 /**
  * @typedef {'person'|'motion'|'tamper'} Kind
@@ -98,7 +104,7 @@ export class SecurityEngine {
     this._watchingSince = 0;
     /** @type {Record<Kind, { active: boolean, since: number, ignored: boolean }>} */
     this._cam = { motion: { active: false, since: 0, ignored: false }, person: { active: false, since: 0, ignored: false }, tamper: { active: false, since: 0, ignored: false } };
-    this._ptz = { moving: false, settleUntil: 0 };
+    this._ptz = { moving: false, settleUntil: 0, since: 0 };
     this._streamLive = false;
     this._localSuppressUntil = 0;
     this._detector = 'off';
@@ -274,7 +280,8 @@ export class SecurityEngine {
   /** @param {{ moving: boolean, settleUntil?: number, at?: number }} p @returns {Action[]} */
   onPtz(p) {
     const at = p.at ?? this._now();
-    this._ptz = { moving: !!p.moving, settleUntil: p.settleUntil || 0 };
+    const since = p.moving ? (this._ptz.moving ? this._ptz.since : at) : 0;
+    this._ptz = { moving: !!p.moving, settleUntil: p.settleUntil || 0, since };
     if (p.moving) this._clearLocal();
     return this._evaluate(at);
   }
@@ -312,7 +319,7 @@ export class SecurityEngine {
 
   /** @param {number} at */
   _ptzSuppressed(at) {
-    return this._ptz.moving || at < this._ptz.settleUntil;
+    return (this._ptz.moving && at - this._ptz.since < PTZ_MAX_SUPPRESS_MS) || at < this._ptz.settleUntil;
   }
 
   /** @param {number} at */

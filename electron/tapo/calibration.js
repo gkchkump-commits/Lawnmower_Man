@@ -29,7 +29,9 @@ class Cancelled extends Error {}
 
 /**
  * @typedef {object} CalibrationOptions
- * @property {{ rawMove: (x: number, y: number) => Promise<{ settledMs: number }>, stopAll: (reason: string) => Promise<void> }} ptz
+ * @property {{ rawMove: (x: number, y: number) => Promise<{ settledMs: number, measured?: boolean }>, stopAll: (reason: string) => Promise<void> }} ptz
+ *   `measured: false`: the move ended with the app's timed Stop (no GetStatus), so `settledMs` is
+ *   the app's own estimate, not the camera's travel time
  * @property {{ ref: () => Promise<void>, measure: (o: { timeoutMs: number }) => Promise<Shift> }} vision
  * @property {() => string|null} canStart     null, or why it cannot start now
  * @property {() => CalibrationResult} current the settings in force (kept for what cannot be measured)
@@ -176,7 +178,10 @@ export class CalibrationWizard extends EventEmitter {
       this._set({ step: axis === 'x' ? 'pan' : 'tilt', progress });
       await this._ref(run, first && axis === 'x');
       first = false;
-      const { settledMs } = await this._move(run, axis === 'x' ? amount : 0, axis === 'y' ? amount : 0);
+      const mv = await this._move(run, axis === 'x' ? amount : 0, axis === 'y' ? amount : 0);
+      // only a travel time the camera reported (MoveStatus) says anything about its speed; a
+      // timed Stop's time is msPerUnit itself and would feed back into it on every calibration
+      const settledMs = mv.measured === false ? 0 : mv.settledMs;
       this._check(run);
       const m = await this._o.vision.measure({ timeoutMs: 6000 });
       this._check(run);
@@ -184,7 +189,7 @@ export class CalibrationWizard extends EventEmitter {
       const reliable = Number.isFinite(d) && m.score >= MIN_SCORE;
       if (reliable && Math.abs(d) >= MIN_SHIFT) {
         await this._move(run, axis === 'x' ? -amount : 0, axis === 'y' ? -amount : 0);
-        return { d, amount, settledMs: Math.max(settledMs, m.settledMs || 0) };
+        return { d, amount, settledMs: settledMs > 0 ? Math.max(settledMs, m.settledMs || 0) : 0 };
       }
       if (!reliable || amount === 0.4) {
         // the camera is still turned: the user can see where it went

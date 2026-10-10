@@ -195,7 +195,7 @@ describe('TapoService', () => {
     await until(() => r.service.status().connection === 'auth-failed');
     expect(r.service.status().detail).toMatch(/Camera Account/);
     expect(r.sidecar.starts).toHaveLength(0);
-    expect(r.cam.count('GetDeviceInformation')).toBe(2);
+    expect(r.cam.count('GetDeviceInformation')).toBe(1); // one refused sign-in, no retry
     const calls = r.cam.calls.length;
     await new Promise((res) => setTimeout(res, 2500));
     expect(r.cam.calls.length).toBe(calls);

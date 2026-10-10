@@ -132,6 +132,15 @@ describe('SecurityEngine', () => {
     expect(r.log.find((a) => a.type === 'event-start')?.event.kind).toBe('motion');
   });
 
+  it('a PTZ "moving" that never ends stops suppressing after 35 s (a stuck move must not silence the alarm)', () => {
+    const r = rig();
+    r.ptz(true); // no end ever reported
+    r.local(30, person);
+    expect(r.types()).not.toContain('event-start');
+    r.local(8, person);
+    expect(r.log.some((a) => (a.type === 'event-start' || a.type === 'event-update') && a.event.kind === 'person')).toBe(true);
+  });
+
   it('suppressed 10 s after the stream (re)starts and 3 s after a global change', () => {
     const r = rig();
     r.run(r.e.onStream('down', r.at()));

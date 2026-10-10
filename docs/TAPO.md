@@ -383,7 +383,10 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
   (also on Stop or failure) the camera goes back to the position it reported at the start. While
   it runs, every other camera move (the D-pad, the keys, click-to-center, Claude's `camera_look`)
   answers `busy`; Stop drops a pending picture request and turns the camera back at once
-  ("Turning the camera back…").
+  ("Turning the camera back…"), and so does quitting the app mid-calibration. The first reference
+  waits until the camera has been still for 3 s (a move just before the start may still be on its
+  way to the picture), and a first move cut short at an unexpected end stop is waited for in the
+  picture before it is undone.
   A wrong calibration turns the D-pad, the keys, click-to-center and Claude's `camera_look` the
   wrong way, so the wizard concludes nothing from a picture that is not provably current. Two
   things make a picture old. A stalled worker (synchronous readback under software GL, a busy PC)

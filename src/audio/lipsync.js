@@ -163,6 +163,16 @@ export function lipTimeline(tl, orig, shift = VISEME_LEAD - FUSED_LEAD.lips) {
   return out;
 }
 
+/**
+ * Compile what LipSync._refuse builds from a fusion (the segments, the lips' timeline, a sample),
+ * on the idle warm-up's result. @param {ReturnType<typeof fuseTimeline>} f
+ */
+export function warmUpSegments(f) {
+  const o = { amounts: (_s, i) => f.amounts[i], vary: 1, lipEdge: FUSED_LIP_EDGE };
+  const segs = segmentsFromVisemes(f.tl, o), segsLips = segmentsFromVisemes(lipTimeline(f.tl), o);
+  for (let t = 0; t < 0.6; t += 1 / 60) mouthFromVisemes(f.tl, t, { prevT: t - 1 / 60, segs, segsLips, lead: FUSED_LEAD.jaw, leadLips: FUSED_LEAD.lips });
+}
+
 /** How long (s) a clip's segments crossfade when they are rebuilt while it plays (LipSync._refuse). */
 export const XFADE = 0.08;
 
@@ -671,7 +681,7 @@ export class LipSync {
     this._offs = [];
     // compile the analysis while the app is idle, not on the first clip's frames (browser only)
     if (typeof globalThis.requestIdleCallback === 'function') {
-      globalThis.requestIdleCallback(() => { warmUpAnalysis(); warmUpFusion(visemeTarget); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
+      globalThis.requestIdleCallback(() => { warmUpAnalysis(); warmUpFusion(visemeTarget, warmUpSegments); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
     }
     const p = this.player;
     if (p && typeof p.on === 'function') {

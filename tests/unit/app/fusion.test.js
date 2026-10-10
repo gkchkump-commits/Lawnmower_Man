@@ -9,6 +9,7 @@ import {
   vowelAmounts, warmUpFusion, warpTime,
 } from '../../../src/audio/fusion.js';
 import { visemeTarget } from '../../../src/audio/articulation.js';
+import { warmUpSegments } from '../../../src/audio/lipsync.js';
 import { decodeWav } from '../../../src/audio/wav.js';
 
 const HOP = 0.005;
@@ -245,9 +246,13 @@ describe('on a real Kokoro clip', () => {
   });
 
   it('warmUpFusion runs once (it only compiles the code; the results are unchanged)', () => {
-    const first = warmUpFusion(visemeTarget);
-    expect(warmUpFusion(visemeTarget)).toBe(false);
+    const got = [];
+    const first = warmUpFusion(visemeTarget, (r) => { got.push(r); warmUpSegments(r); });
+    expect(warmUpFusion(visemeTarget, (r) => got.push(r))).toBe(false);
     expect(typeof first).toBe('boolean');
+    // the caller's follow-up (LipSync compiles its segments) gets the warm-up's fusion, once
+    expect(got.length).toBe(first ? 1 : 0);
+    if (first) expect(got[0].tl.filter((s) => s.viseme === 'PP').length).toBe(2);
     expect(fuseTimeline(meta.visemes, ac, null, 200, visemeTarget)).toEqual(f);
   });
 });

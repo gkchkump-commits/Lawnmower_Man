@@ -86,7 +86,7 @@ harness played them (ffmpeg).
 ## lipsync-align.mjs — lip-sync timing on real speech
 
 ```bash
-node tools/visual/lipsync-align.mjs out/clips [--latency 0.02] [--offset ms] [--json out.json]
+node tools/visual/lipsync-align.mjs out/clips [--latency 0.02] [--offset ms] [--json out.json] [--late]
 ```
 
 Plays every clip of a folder (`name.wav` + `name.json`) through the real LipSync (with its
@@ -99,3 +99,12 @@ the best jaw / level correlation (negative = the mouth leads). `--offset` applie
 Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`). Use it after changing the timeline, the
 leads, the fusion or the smoothing; the seal is the number to watch (the lips meet and part in a
 frame or two, so their "fullest" closure is a plateau and its time says little).
+
+It also scores **every** release of an m / b / p into a vowel (or r, w, y), not only the closures
+between vowels with a level dip: when the lips part vs the steepest rise of the 0.8-5 kHz band out
+of the closure (its own zero-phase band-pass and 10 ms Hann power, independent of the app's
+analysis), split by what precedes it — a vowel, a consonant ("and Pam", "it back") or a pause —
+with the share more than 20 ms late (`--late` lists them); and every vowel of 60 ms or more on
+the timeline (40 ms early to 10 ms late) is checked to open the rendered lips at least 5 px. A
+stop before an m ("made muffins") can read late: there the band's steepest rise is the stop's
+burst into the m's murmur.

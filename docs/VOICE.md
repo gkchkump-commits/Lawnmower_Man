@@ -261,24 +261,32 @@ closures (`PP`) and tucks (`FF`) stay crisp even when they are only 50 ms long, 
 **The sound decides the timing and the amounts.** The timeline says *which* shape (closed,
 tucked, spread, rounded, open); the clip's own audio says *when* and *how much*. When a clip
 arrives (the speech queue's `ready`, before it plays), a Web Worker (`src/audio/acoustics-worker.js`)
-analyses its WAV every 5 ms (`src/audio/acoustics.js`): loudness, a low band (< 400 Hz: the murmur
+analyses its WAV every 5 ms (`src/audio/acoustics.js`): loudness, a 0.8-5 kHz band (the vowels' upper formants: they go in any closure), a low band (< 400 Hz: the murmur
 of m n), a high band (> 3 kHz: frication), voicing, and the first three formants by LPC (order
 14, autocorrelation + Levinson-Durbin, the roots warm-started from the previous frame). The first
 0.8 s come back at once, the rest ~30 ms later for a 5 s clip; the main thread does nothing heavy.
 `src/audio/fusion.js` then:
 
-* warps the timeline monotonically onto the sound's landmarks: each phrase starts where its sound
-  starts, and an m / b / p or f / v between two vowels sits on its acoustic closure (the level dip
-  below half its depth; a dip that is not a local minimum inside the segment, e.g. the next
-  consonant of a cluster, is not used); boundaries move at most 90 ms;
+* warps the timeline monotonically onto the sound's landmarks. Each phrase starts where its sound
+  starts (a phrase-initial p at its burst, an m where its hum gives way to the vowel). Every
+  m / b / p before a vowel ends where the lips part, whatever comes before it ("and Pam", "it back"):
+  the steepest rise of the 0.8-5 kHz band out of the closure (the burst of a b / p, the end of an
+  m's murmur); between two vowels its start sits on the steepest fall into it, and before a
+  consonant only its start. An f / v between vowels sits on the low band's dip. A boundary moves at
+  most 90 ms; the two edges of one closure may stretch it (Kokoro gives an m 25 ms whose closure
+  lasts 70);
 * gives every vowel its own amounts: the jaw from its F1 (open vowels 2-3x a close one), normalised
   per voice (the formant range of the vowels heard so far in that voice, starting from a prior by
-  pitch), bounded by the viseme's category (`JAW_RANGE`: a U never opens like an aa); spread from
-  F2 for front vowels; stress from loudness and length (a stressed vowel opens ~1.6x a reduced
-  one; a reduced front vowel is neither spread nor toothy); stressed oo / o fully rounded;
-* samples the lips 40 ms ahead and the heavier jaw 60 ms ahead (`FUSED_LEAD`); the lips start
-  closing 28 ms sooner than they part (`LIP_CLOSE_EARLY`), so a closure is a ~60 ms approach that
-  meets at speed and a release that bursts.
+  pitch), bounded by the viseme's category (`JAW_RANGE`: a U never opens like an aa; an open vowel
+  whose "F1" reads as low as a close one's is a nasal pole, the ae of "Pam", and keeps its own
+  opening); spread from F2 for front vowels; stress from loudness and length (a stressed vowel opens
+  ~1.5x a reduced one; a reduced front vowel is neither spread nor toothy); stressed oo / o fully
+  rounded;
+* samples the lips 26 ms ahead and the heavier jaw 60 ms ahead (`FUSED_LEAD`). A closure edge that
+  is not a landmark keeps the timeline's timing, moved earlier by what Kokoro's lateness the warp
+  has not already taken out (up to the plain 58 ms lead). The lips start closing 16 ms sooner than
+  they part (`LIP_CLOSE_EARLY`; less before a short vowel between two closures, so "Maybe my"
+  parts the lips for its /i/), meet at speed, and the jaw waits behind them until they part.
 
 The loudness envelope still opens the jaw a moment ahead of each syllable, and the pitch drives
 nods, brows, phrase-final lowering and breaths (`src/audio/prosody.js`). A clip that starts before
@@ -286,13 +294,15 @@ its analysis is back plays its first moments from the timeline alone; the system
 and keeps the timeline-only path.
 
 **Timing.** Measured end to end with `tools/visual/lipsync-align.mjs` (LipSync + director +
-the relief head's rig at 60 Hz in Node) on real Kokoro clips (af_heart, am_michael, bf_emma; six
-sentences each at speeds 0.9 and 1.1, and the 12 clips of v0.3): the lips seal 22-35 ms before the
-acoustic closure starts and part 15-20 ms before it ends (all of them seal), the same at 144 Hz and
-with Windows' 10 ms audio clock. The display shows a frame one to two refreshes after it is
-rendered, so on screen the seal lands within ~15 ms of the sound. A mouth slightly early is also
-what people tolerate best (ITU-R BT.1359: sound ahead of the picture is noticed from ~45 ms, sound
-behind it only from ~125 ms).
+the relief head's rig at 60 Hz in Node) on 39 real Kokoro clips of the v0.4 review (af_heart,
+am_michael, bf_emma; five sentences at speeds 0.9 and 1.1 and three at 1.0, the Test lip-sync line
+among them) against the tool's own 0.8-5 kHz landmarks: the lips part 14-15 ms before the release
+(median; IQR [-19, -8] ms), after a vowel and after a consonant alike, and 4 % of the releases are
+more than 20 ms late (v0.3: 6 % after a vowel, 18 % after a consonant; before this review's
+fixes 17 % and 51 %); all of them seal. The display shows a frame one to two refreshes after it is
+rendered, so on screen the release lands within ~0-20 ms of the sound. A mouth slightly early is
+also what people tolerate best (ITU-R BT.1359: sound ahead of the picture is noticed from ~45 ms,
+sound behind it only from ~125 ms).
 
 **Lip-sync timing (offset).** *Settings → Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`,
 -200..+200 ms, default 0) moves the mouth later (+) or earlier (-) for devices whose delay the

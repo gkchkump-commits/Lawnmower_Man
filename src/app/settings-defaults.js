@@ -39,6 +39,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     bloom: 1.0,
     followCursor: true,
     expressiveness: 1.0,
+    liveliness: 1.0,
   },
   window: {
     sizePreset: 'medium',

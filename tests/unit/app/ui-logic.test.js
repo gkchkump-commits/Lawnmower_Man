@@ -113,8 +113,13 @@ describe('AvatarHost', () => {
     await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5 });
     expect(created).toHaveLength(2);
     expect(created[1].opts.expressiveness).toBe(0.5);
+    // so does avatar.liveliness (the spontaneous behaviour)
+    await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5, liveliness: 1.7 });
+    expect(created[1].options.at(-1)).toMatchObject({ liveliness: 1.7 });
+    await host.apply({ ...AV, liveliness: 0.3 });
+    expect(created[2].opts.liveliness).toBe(0.3);
     expect(created[0].disposed).toBe(true);
-    expect(host.avatar.renderer).toBe('procedural');
+    expect(host.avatar.renderer).toBe('relief');
   });
 
   it('coalesces rapid changes: only the latest renderer is built after the current one', async () => {

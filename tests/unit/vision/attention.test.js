@@ -61,6 +61,10 @@ describe('faceGeometry', () => {
   });
   it('recovers roll and works on non-square frames', () => {
     expect(deg(faceGeometry(obs({ rollDeg: 12 })).roll)).toBeCloseTo(12, 0);
+    // the tracker keeps it, smoothed (the selfie view's counter-clockwise: the image's clockwise)
+    const tr = new AttentionTracker();
+    feed(tr, () => obs({ rollDeg: 12 }), { n: 12 });
+    expect(deg(tr.state.roll)).toBeCloseTo(12, 0);
     const wide = faceGeometry(obs({ yawDeg: 18, width: 320, height: 180 }));
     expect(deg(wide.yaw)).toBeCloseTo(18, 0);
     expect(faceGeometry({ width: 1, height: 1, points: {}, blend: {} })).toBeNull();

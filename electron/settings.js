@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     bloom: 1.0, // 0..2
     followCursor: true,
     expressiveness: 1.0, // 0..2: how much speech moves the head, brows and face (1 = natural)
+    liveliness: 1.0, // 0..2: spontaneous behaviour (look-arounds, posture shifts, small gestures; 0 = none)
   },
   window: {
     sizePreset: 'medium', // 'small' | 'medium' | 'large'
@@ -264,6 +265,7 @@ const SCHEMA = {
     bloom: num(0, 2),
     followCursor: bool(),
     expressiveness: num(0, 2),
+    liveliness: num(0, 2),
   },
   window: {
     sizePreset: oneOf(['small', 'medium', 'large']),

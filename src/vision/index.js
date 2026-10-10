@@ -421,6 +421,7 @@ export class CameraFeature extends Emitter {
     this.attention.reset(this._now());
     this.presence.reset(this._now());
     this.d.gaze.setFace(null);
+    this.d.getAvatar?.()?.setUser?.({ present: null, looking: false, roll: 0 });
     this._mirror = 0;
     this._applyExpression();
     this._updateGate();
@@ -458,6 +459,9 @@ export class CameraFeature extends Emitter {
       if (!ctl.sleeping) ctl.noteActivity?.();
     }
     this.d.gaze.setFace(s.followFace && att.present ? faceGaze(att) : null);
+    // the avatar's own behaviour (src/avatar/behavior.js): engaged while you are there and look
+    // at it, mirroring your head tilt a little, a smile when you look back
+    this.d.getAvatar?.()?.setUser?.({ present: att.present, looking: att.present && att.looking, roll: att.present ? att.roll : 0 });
     this._mirror = s.mirrorExpressions && att.present && att.smiling ? MIRROR_SMILE : 0;
     this._applyExpression();
     this._updateGate();

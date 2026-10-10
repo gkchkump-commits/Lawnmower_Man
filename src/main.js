@@ -683,6 +683,8 @@ async function boot() {
   window.addEventListener('keydown', () => player.unlock(), { once: true, capture: true });
   $('input').addEventListener('focus', () => view.refreshPanel());
   $('input').addEventListener('blur', () => view.refreshPanel());
+  // typing: the avatar leans in and glances down at the chat now and then (src/avatar/behavior.js)
+  $('input').addEventListener('input', () => avatarHost.avatar.setUser?.({ typing: true }));
 
   // ---------------------------------------------------------------- frame loop (lip-sync)
   // The avatar's frame runs the tick (see setFrameHook above: lip-sync, then the director, then

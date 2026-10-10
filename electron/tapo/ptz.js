@@ -78,6 +78,8 @@ export function noCaps() {
 
 /** @param {number} v @param {Range} r */
 const clampTo = (v, r) => Math.max(r.min, Math.min(r.max, v));
+/** @param {number} v */
+const round4 = (v) => Math.round(v * 1e4) / 1e4 + 0;
 
 /** A non-zero axis is raised to at least `min` (firmwares ignore tiny translations). @param {number} t @param {number} min */
 export function roundUpToMin(t, min) {
@@ -552,16 +554,18 @@ export class PtzController extends EventEmitter {
    * the camera reported the end (MoveStatus IDLE), so `settledMs` is its travel time; otherwise it
    * is only the app's own Stop estimate (msPerUnit) and must not be fed back into msPerUnit.
    * `moved`: the reported position changed (only with GetStatus), so the picture will move too,
-   * however late the video shows it.
+   * however late the video shows it; `travel` is that change (the position before the move is
+   * read fresh: a timed nudge does not poll it), which differs from the command at an end stop or
+   * on a firmware whose RelativeMove runs on.
    * @param {number} x @param {number} y @param {{ maxWaitMs?: number }} [o]
-   * @returns {Promise<{ settledMs: number, measured: boolean, moved?: boolean }>}
+   * @returns {Promise<{ settledMs: number, measured: boolean, moved?: boolean, travel?: { x: number, y: number } }>}
    */
   async rawMove(x, y, o = {}) {
     if (!this.caps.available) throw new Error('Pan and tilt are not available.');
     if (this.privacySuspected) throw new Error(PRIVACY_HINT);
     const s = this._s();
+    const p0 = this.moving ? this.position : (await this.readPosition()) || this.position;
     const t0 = this._now();
-    const p0 = this.position;
     let seq = -1;
     const r = await this._runExclusive(async () => {
       await this._sendMove(() => {
@@ -574,8 +578,27 @@ export class PtzController extends EventEmitter {
     await this.waitIdle(o.maxWaitMs ?? 6000);
     const measured = !!this._lastEnd && this._lastEnd.seq === seq && this._lastEnd.by === 'idle';
     const p1 = this.position;
-    const moved = measured && p0 && p1 ? Math.max(Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y)) > MOVED_EPS : undefined;
-    return { settledMs: this._now() - t0, measured, ...(moved !== undefined ? { moved } : {}) };
+    const travel = measured && p0 && p1 ? { x: round4(p1.x - p0.x), y: round4(p1.y - p0.y) } : null;
+    const moved = travel ? Math.max(Math.abs(travel.x), Math.abs(travel.y)) > MOVED_EPS : undefined;
+    return { settledMs: this._now() - t0, measured, ...(travel ? { moved, travel } : {}) };
+  }
+
+  /**
+   * The camera's position, read fresh with GetStatus (null without it, during suspected privacy
+   * mode, or when the read fails). Never moves it. Calibration puts the camera back there.
+   * @returns {Promise<{ x: number, y: number }|null>}
+   */
+  async readPosition() {
+    if (!this.caps.canStatus || this._disposed || this.privacySuspected) return null;
+    try {
+      const st = await this.client.getStatus();
+      if (!st?.position) return null;
+      this._setPosition(st.position);
+      return { x: st.position.x, y: st.position.y };
+    } catch (err) {
+      this._notePrivacy(err);
+      return null;
+    }
   }
 
   /**

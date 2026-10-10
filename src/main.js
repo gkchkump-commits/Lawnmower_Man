@@ -13,6 +13,7 @@ import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
 import { voiceSetupDiagnostics } from './app/setup-help.js';
 import { Mic } from './audio/mic.js';
+import { LIPSYNC_TEST_LINE } from './audio/lipsync.js';
 import { AudioPlayer } from './audio/player.js';
 import { getBridge } from './bridge/index.js';
 import { VOICE_SETUP_HINT, createSpeechServices } from './speech/index.js';
@@ -272,6 +273,9 @@ async function boot() {
       view.toast('Restarting the voice server…', 'info');
     } else if (a === 'setupVoice') {
       setupVoice();
+    } else if (a === 'testLipSync') {
+      // a line full of closures (m b p) and a pause: easy to judge the mouth's timing by
+      if (!controller.say(LIPSYNC_TEST_LINE)) view.toast('Busy: try the lip-sync test once the avatar is quiet.', 'info');
     } else if (a === 'resetPosition') {
       if (typeof bridge.window.resetPosition === 'function') bridge.window.resetPosition();
       else view.toast('Restart Lawnmower Man to reset the position.', 'info');

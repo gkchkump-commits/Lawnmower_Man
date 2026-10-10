@@ -97,6 +97,8 @@ export const FUSED_LIP_EDGE = 0.6;
 
 /** The user's lip-sync offset (settings voice.lipSyncOffsetMs, s): + moves the mouth later. */
 export const OFFSET_MAX = 0.2;
+/** Settings > Voice > Test lip-sync: closures (m b p) to judge the timing by, and a pause. */
+export const LIPSYNC_TEST_LINE = 'Bob, pop by at five. Maybe my mom made muffins.';
 
 /**
  * Smooth maximum of two values (dB): exact where they are equal (a steady vowel), within `d`
@@ -635,6 +637,15 @@ export class LipSync {
       this._jobs.set(clip, job);
     }
     return job.promise;
+  }
+
+  /**
+   * How far a clip's acoustic analysis has got (diagnostics, tests): null when none was started.
+   * @param {any} clip @returns {{ final: boolean, failed: boolean, frames: number, of: number }|null}
+   */
+  analysis(clip) {
+    const j = this._jobs.get(clip);
+    return j ? { final: j.final, failed: j.failed, frames: j.track?.done ?? 0, of: j.track?.n ?? 0 } : null;
   }
 
   /**

@@ -6,8 +6,9 @@
 // `maxAhead` sentences beyond the one playing. Clips are handed to the player strictly in
 // order; a sentence whose synthesis failed is skipped. clear() aborts everything (barge-in).
 //
-// Events: 'playing' (item) when the player starts a clip of ours, 'idle' when everything queued
-// has been played (or cleared), 'error' (err, item) when a sentence could not be synthesized.
+// Events: 'ready' (item) when a sentence's clip has been synthesized (before it plays), 'playing'
+// (item) when the player starts a clip of ours, 'idle' when everything queued has been played (or
+// cleared), 'error' (err, item) when a sentence could not be synthesized.
 
 import { Emitter } from './emitter.js';
 import { isAbortError } from '../speech/voice-client.js';
@@ -154,6 +155,7 @@ export class SpeechQueue extends Emitter {
         if (gen !== this._gen) return;
         it.clip = clip;
         it.status = 'ready';
+        this.emit('ready', it);
         this._pump();
       }, (err) => {
         if (gen !== this._gen) return;

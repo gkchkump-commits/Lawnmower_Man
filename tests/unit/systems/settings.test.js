@@ -102,6 +102,20 @@ describe('applyPatch validation', () => {
     }
   });
 
+  it('voice.lipSyncOffsetMs: 0 by default, clamped to +-200 ms; the renderer copy agrees', () => {
+    expect(base.voice.lipSyncOffsetMs).toBe(0);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: 45 } }).settings.voice.lipSyncOffsetMs).toBe(45);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: -900 } }).settings.voice.lipSyncOffsetMs).toBe(-200);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: 900 } }).settings.voice.lipSyncOffsetMs).toBe(200);
+    for (const bad of ['40', Number.NaN, null, true]) {
+      const r = applyPatch(base, { voice: { lipSyncOffsetMs: bad } });
+      expect(r.settings.voice.lipSyncOffsetMs, String(bad)).toBe(0);
+      expect(r.warnings.length).toBe(1);
+    }
+    expect(sanitizeSettings({ voice: { ttsVoice: 'am_michael' } }).settings.voice.lipSyncOffsetMs).toBe(0);
+    expect(RENDERER_DEFAULTS.voice.lipSyncOffsetMs).toBe(base.voice.lipSyncOffsetMs);
+  });
+
   it('voice.character: one of the voice characters (default synth); voice.fxAmount clamped to 0..1', () => {
     expect(base.voice.character).toBe('synth');
     expect(base.voice.fxAmount).toBeCloseTo(0.6, 5);

@@ -27,6 +27,13 @@ import { clear, h, icon } from './dom.js';
  * @property {string} [variant]
  */
 
+/** How the lip-sync offset reads: "0 ms", "+40 ms (mouth later)", "-40 ms (mouth earlier)". @param {number} v */
+export function lipSyncLabel(v) {
+  const ms = Math.round(Number(v) || 0);
+  return ms === 0 ? '0 ms' : ms > 0 ? `+${ms} ms (mouth later)` : `\u2212${-ms} ms (mouth earlier)`;
+}
+const LIPSYNC_HINT = 'Mouth before the voice (e.g. Bluetooth headphones)? Move it right. Test lip-sync says a line with many m, b and p.';
+
 /** The voice character's hint: what it applies to, with the voice that is speaking now. */
 export const VOICE_FX_HINT = Object.freeze({
   server: 'Applies to the local voice',
@@ -62,6 +69,9 @@ export const SECTIONS = [
       // the local voice's character (src/audio/voicefx.js); the system voice cannot be processed
       { type: 'select', path: 'voice.character', label: 'Character', hint: VOICE_FX_HINT.server, options: [['synth', 'Synth — hologram AI'], ['vocoder', 'Vocoder — fully synthetic'], ['robot', 'Robot — monotone, metallic'], ['natural', 'Natural — unprocessed']] },
       { type: 'range', path: 'voice.fxAmount', label: 'Intensity', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      // the mouth's timing against the voice (src/audio/lipsync.js setOffset), both voices
+      { type: 'range', path: 'voice.lipSyncOffsetMs', label: 'Lip-sync timing', min: -200, max: 200, step: 5, format: lipSyncLabel, hint: LIPSYNC_HINT },
+      { type: 'button', label: 'Test lip-sync', action: 'testLipSync', variant: 'ghost' },
       { type: 'select', path: 'voice.device', label: 'Device', options: [['auto', 'Auto'], ['cuda', 'GPU (CUDA)'], ['cpu', 'CPU']] },
       { type: 'text', path: 'voice.sttModel', label: 'Speech model', suggestions: ['large-v3-turbo', 'distil-large-v3', 'medium.en', 'small.en', 'base.en'] },
       { type: 'button', label: 'Restart voice server', action: 'restartVoice', variant: 'ghost' },

@@ -121,3 +121,32 @@ test('local voice on a real Kokoro clip (avatar harness): mouth, face and head f
   expect(end.jaw).toBeLessThan(0.02);
   expect(end.state).toBe('idle');
 });
+
+// Settings › Voice › Lip-sync timing reaches the lip-sync, and Test lip-sync speaks its line, whose
+// sound the acoustic analysis worker (src/audio/acoustics-worker.js) analyses in the browser.
+test('lip-sync timing setting and test line; the clip\'s sound is analysed in the worker', async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page, { voice: 'fake', mockDelay: 20 }, { avatar: { quality: 'low', particles: 0, bloom: 0 } });
+  await page.locator('#btn-settings').click();
+  const drawer = page.locator('#drawer');
+  await expect(drawer.locator('[data-path="voice.lipSyncOffsetMs"] output')).toHaveText('0 ms');
+  const slider = drawer.locator('#set-voice-lipSyncOffsetMs');
+  await slider.fill('60');
+  await slider.dispatchEvent('change');
+  await expect.poll(() => page.evaluate(() => window.__app.settings().voice.lipSyncOffsetMs)).toBe(60);
+  await expect.poll(() => page.evaluate(() => window.__app.controller.lipsync.offset)).toBeCloseTo(0.06, 9);
+  await expect(drawer.locator('[data-path="voice.lipSyncOffsetMs"] output')).toHaveText('+60 ms (mouth later)');
+  await drawer.locator('[data-action="testLipSync"]').click();
+  await page.waitForFunction(() => window.__app.player.current?.kind === 'audio', null, { timeout: 30_000 });
+  const done = await page.waitForFunction(() => {
+    const lp = window.__app.controller.lipsync;
+    const a = lp.analysis(window.__app.player.current?.clip);
+    return a && a.final ? { ...a, failed: a.failed || lp.acoustics.failed } : null;
+  }, null, { timeout: 20_000 });
+  const a = await done.jsonValue();
+  expect(a.failed).toBe(false);
+  expect(a.frames).toBeGreaterThan(20);
+  expect(a.frames).toBe(a.of);
+  await expect(page.locator('#transcript')).toContainText('Bob, pop by at five');
+  await waitIdle(page);
+});

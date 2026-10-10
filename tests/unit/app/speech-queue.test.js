@@ -75,6 +75,22 @@ describe('SpeechQueue', () => {
     expect(idle).toBe(1);
   });
 
+  it('emits ready as soon as a clip is synthesized, before it plays (the lip-sync analyses it then)', async () => {
+    const tts = fakeTts({ delayMs: (t) => (t === 'one' ? 2 : 4) });
+    const player = fakePlayer({ clipMs: 30 });
+    const q = new SpeechQueue({ tts, player, maxParallel: 2, maxAhead: 2 });
+    const log = [];
+    q.on('ready', (item) => log.push(`ready ${item.text} ${item.clip ? 'clip' : '-'}`));
+    q.on('playing', (item) => log.push(`playing ${item.text}`));
+    q.push('one');
+    q.push('two');
+    await waitFor(() => !q.busy);
+    // the second sentence is ready while the first one plays
+    expect(log.indexOf('ready two clip')).toBeLessThan(log.indexOf('playing two'));
+    expect(log.indexOf('ready two clip')).toBeGreaterThan(log.indexOf('ready one clip'));
+    expect(log.filter((x) => x.startsWith('ready'))).toHaveLength(2);
+  });
+
   it('emits playing when the player starts one of its clips; ignores empty text', async () => {
     const tts = fakeTts();
     const player = fakePlayer({ clipMs: 2 });

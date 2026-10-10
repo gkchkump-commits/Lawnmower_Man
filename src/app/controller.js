@@ -169,6 +169,9 @@ export class Controller extends Emitter {
     const b = this.bridge;
     this._offs.push(b.claude.onEvent((ev) => this.handleClaudeEvent(ev)));
     this._offs.push(this.speech.on('playing', (item) => this._onSpeechPlaying(item)));
+    // a sentence's audio is analysed (formants, loudness: in a worker) as soon as it is synthesized,
+    // while the one before it plays
+    this._offs.push(this.speech.on('ready', (item) => this.lipsync.prepare?.(item?.clip)));
     this._offs.push(this.speech.on('idle', () => this._maybeIdle()));
     this._offs.push(this.speech.on('error', (err) => this._onSpeechError(err)));
     if (this.mic) {
@@ -247,6 +250,8 @@ export class Controller extends Emitter {
     this.settings = withDefaults(settings);
     // the local voice's character (ramped by the player's effect, also mid-sentence)
     this.player.setVoiceFx?.({ character: this.settings.voice.character, amount: this.settings.voice.fxAmount });
+    // the user's lip-sync timing (ms, + = the mouth later)
+    this.lipsync.setOffset?.((Number(this.settings.voice.lipSyncOffsetMs) || 0) / 1000);
     if (prev.voice.speakReplies && !this.settings.voice.speakReplies && this.speech.busy) this.stopSpeaking();
     this._syncHandsFree();
   }

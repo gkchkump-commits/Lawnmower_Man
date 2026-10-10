@@ -13,6 +13,7 @@ export const STEP_TEXT = Object.freeze({
   tilt: 'Tilting up and down…',
   'min-step': 'Trying the smallest steps…',
   ask: 'Your help is needed',
+  cancelling: 'Turning the camera back…',
   done: 'Done',
   failed: 'Calibration did not finish',
 });
@@ -52,7 +53,7 @@ export class CalibrationDialog {
       className: 'dlg-calib',
       body: [this.body, this.actions],
       onClose: () => {
-        if (this.started && !['done', 'failed', 'idle'].includes(this.state.step)) this.o.calibrate({ action: 'cancel' }).catch(() => {});
+        if (this.started && !['done', 'failed', 'idle', 'cancelling'].includes(this.state.step)) this.o.calibrate({ action: 'cancel' }).catch(() => {});
         this.dlg = null;
       },
     });
@@ -93,7 +94,10 @@ export class CalibrationDialog {
   update(s) {
     if (!s || typeof s !== 'object') return;
     if (!this.dlg) return;
-    if (!this.started && s.step !== 'idle') this.started = true;
+    // a run stopped before this dialog opened, still turning the camera back: the intro (with
+    // Start, which main runs once the camera is back) stays
+    if (!this.started && (s.step === 'idle' || s.step === 'cancelling')) return;
+    if (!this.started) this.started = true;
     this.render(s);
   }
 
@@ -141,7 +145,9 @@ export class CalibrationDialog {
       h('div', { class: 'calib-step' }, s.step === 'ask' ? tapoIcon('help', 'icon') : h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', null, STEP_TEXT[/** @type {keyof typeof STEP_TEXT} */ (s.step)] || s.step)),
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct }, h('div', { class: 'progress-bar', style: { width: `${pct}%` } })));
     if (s.step === 'ask') {
-      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the camera turn?'), h('p', { class: 'calib-small' }, 'The picture was too dark or too plain to measure. Watch the live view behind this window, then choose.'));
+      // main says why the picture could not tell (too plain, lagging behind, disagreeing with itself)
+      const why = typeof s.note === 'string' && s.note ? s.note : 'The picture was too dark or too plain to measure.';
+      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the camera turn?'), h('p', { class: 'calib-small' }, `${why} Watch the live view behind this window, then choose.`));
       // only the answers main asks for (the axis it just moved), about the camera, as the question is
       const answers = Array.isArray(s.answers) && s.answers.length ? s.answers : ['left', 'right', 'none'];
       const pad = h('div', { class: 'calib-pad', role: 'group', 'aria-label': 'The camera turned' });

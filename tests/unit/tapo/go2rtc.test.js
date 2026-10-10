@@ -210,6 +210,8 @@ describe.skipIf(!HAVE_BINARY)('go2rtc 1.9.14 + StreamRelay against an RTSP serve
     expect(init).toMatchObject({ codec: 'avc1.64001f', width: 160, height: 90, gen: 1 });
     expect(samples.length).toBeGreaterThanOrEqual(20);
     expect(samples[0].key).toBe(true);
+    // each sample carries main's monotonic receive time (the worker's arrival stamp for its frame)
+    expect(samples.every((s, i) => Number.isFinite(s.rx) && (i === 0 || s.rx >= samples[i - 1].rx))).toBe(true);
     expect(relay.state).toBe('live');
     expect(relay.stats().fps).toBeGreaterThan(8);
     expect(rtsp.log.sessions).toBe(1);

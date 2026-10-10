@@ -606,7 +606,8 @@ async function boot() {
     if (ev) openEvent(ev);
   });
   tapo.onCalibration?.((/** @type {any} */ s) => {
-    if (!calib.open && s && !['idle', 'done', 'failed'].includes(s.step)) calib.show();
+    // (not for 'cancelling': the dialog was closed to stop, and the camera is only being turned back)
+    if (!calib.open && s && !['idle', 'done', 'failed', 'cancelling'].includes(s.step)) calib.show();
     calib.update(s);
   });
   bridge.settings.onChange?.((/** @type {any} */ s) => applySettings(s));

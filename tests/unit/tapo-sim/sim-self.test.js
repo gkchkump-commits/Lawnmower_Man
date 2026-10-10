@@ -493,6 +493,19 @@ describe('RTSP server', () => {
     expect(sim.state.rtspSessions.live[0].segment).toBe('p1_t0_person');
   });
 
+  it('videoLagMs: the picture shows where the lens pointed that long ago (GetStatus is current)', async () => {
+    sim.set({ quirks: { videoLagMs: 700 } });
+    const c = await client();
+    await c.play('/stream1');
+    await sleep(300);
+    sim.camera.ptz.place(-0.1, 0); // mirrored: ONVIF −x looks right
+    expect(sim.state.ptz.x).toBeCloseTo(-0.1);
+    await sleep(400);
+    expect(sim.state.rtspSessions.live[0].segments.map((x) => x.id)).toEqual(['p0_t0']); // not yet
+    await sleep(600);
+    expect(sim.state.rtspSessions.live[0].segments.map((x) => x.id)).toEqual(['p0_t0', 'p1_t0']);
+  });
+
   it('while the camera turns the picture changes on every frame; at rest it holds the final cell', async () => {
     const c = await client();
     await c.play('/stream1');

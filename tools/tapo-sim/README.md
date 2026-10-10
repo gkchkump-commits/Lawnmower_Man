@@ -60,6 +60,7 @@ In tests: `const sim = await startSim()` from `tools/tapo-sim/index.mjs` (random
 | `subscriptionLifetimeSec` | 600 | without Renew the subscription expires |
 | `sessionTimeoutSec`, `maxRtspSessions` | 15, 2 | RTSP |
 | `rtspAdvertiseTimeout` | true | the SETUP answer says `Session: <id>;timeout=15`; go2rtc 1.9.14 then sends OPTIONS every 10 s. `false`: a camera that does not say it, and go2rtc's default keepalive is too slow: the session is dropped and re-established every ~15 s |
+| `videoLagMs` | 0 | the picture shows where the lens pointed this long ago (a video that lags the motor before it reaches the app: the camera's encoder, Wi-Fi, go2rtc on a busy PC); GetStatus stays current. Calibration must ask, never store a wrong result (`tapo-e2e --video-lag`) |
 | `clockToleranceSec`, `replayCheck`, `xaddrHost`, `rebootMs` | 10, true, null, 3000 | |
 
 `--quirks ideal` is a well-behaved ONVIF camera: standard axes, no thresholds, honest timeouts,

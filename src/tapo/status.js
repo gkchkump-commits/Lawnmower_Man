@@ -130,7 +130,7 @@ export function ptzMessage(r) {
     case 'offline': return 'The camera is offline.';
     case 'auth': return 'The camera did not accept the sign-in. Check the Camera Account in Settings.';
     case 'not-configured': return 'Set the camera up first (the gear).';
-    case 'busy': return 'The camera is busy; try again in a moment.';
+    case 'busy': return r.error || 'The camera is busy; try again in a moment.'; // (main says why: calibrating)
     case 'no-preset': return r.error || 'There is no saved position by that name.';
     default: return r.error || 'The camera did not move.';
   }

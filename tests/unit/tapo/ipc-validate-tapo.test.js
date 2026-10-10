@@ -122,6 +122,26 @@ describe('worker messages', () => {
     expect(validateWorkerMessage({ t: 'snap-err', id: 'r2', message: 'no frame' })).toEqual({ t: 'snap-err', id: 'r2', message: 'no frame' });
     expect(validateWorkerMessage({ t: 'shift', id: 'r3', dx: -0.2, dy: 0.1, score: 0.7, settledMs: 800 })).toEqual({ t: 'shift', id: 'r3', dx: -0.2, dy: 0.1, score: 0.7, settledMs: 800 });
     expect(validateWorkerMessage({ t: 'shift', id: 'r3', dx: 5, dy: 0, score: 0 })).toBeNull();
+    // the gated calibration answers keep their fields (main checks how current the picture is);
+    // an answer without the gate stays bare, malformed fields are dropped, never passed on
+    // (updated on purpose: `settled` is always there, false when missing or malformed, and the
+    // first-change stamps and the contrast are kept when well-formed)
+    expect(validateWorkerMessage({ t: 'shift', id: 'r4', dx: -0.2, dy: 0, score: 0.8, settledMs: 700, gated: true, at: 5012.5, refAt: 3001, frames: 6, moved: true, settled: true, firstAt: 4900, changedAt: 4950, contrast: 30 }))
+      .toEqual({ t: 'shift', id: 'r4', dx: -0.2, dy: 0, score: 0.8, settledMs: 700, gated: true, at: 5012.5, refAt: 3001, frames: 6, moved: true, settled: true, firstAt: 4900, changedAt: 4950, contrast: 30 });
+    expect(validateWorkerMessage({ t: 'shift', id: 'r4', dx: -0.2, dy: 0, score: 0.8, settledMs: 700, gated: true, at: 5012.5, refAt: 3001, frames: 6, moved: true }))
+      .toEqual({ t: 'shift', id: 'r4', dx: -0.2, dy: 0, score: 0.8, settledMs: 700, gated: true, at: 5012.5, refAt: 3001, frames: 6, moved: true, settled: false });
+    expect(validateWorkerMessage({ t: 'shift', id: 'r4', dx: 0, dy: 0, score: 0, gated: true, at: 'now', refAt: Infinity, frames: -1, moved: 'yes', settled: 'yes', firstAt: NaN, changedAt: '1', contrast: 999 }))
+      .toEqual({ t: 'shift', id: 'r4', dx: 0, dy: 0, score: 0, settledMs: 0, gated: true, frames: 0, moved: false, settled: false });
+    expect(validateWorkerMessage({ t: 'shift', id: 'r4', dx: 0, dy: 0, score: 0.9, at: 5000, refAt: 3000 })).toEqual({ t: 'shift', id: 'r4', dx: 0, dy: 0, score: 0.9, settledMs: 0 });
+    expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 'r5' })).toEqual({ t: 'shift-ref-ok', id: 'r5' });
+    expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: true, at: 4000, still: true })).toEqual({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: true, still: true, at: 4000 });
+    expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: 1, at: NaN })).toEqual({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: false, still: false });
+    expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: true, at: 4000, still: true, contrast: 12.5, vsLast: { at: 3500, dx: 0.01, dy: 0, score: 0.9, extra: 1 } }))
+      .toEqual({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: true, still: true, at: 4000, contrast: 12.5, vsLast: { at: 3500, dx: 0.01, dy: 0, score: 0.9 } });
+    for (const vsLast of [{ at: 3500, dx: 3, dy: 0, score: 0.9 }, { dx: 0, dy: 0, score: 1 }, 'same', null]) {
+      expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 'r5', gated: true, ok: true, at: 4000, still: true, vsLast }).vsLast).toBeUndefined();
+    }
+    expect(validateWorkerMessage({ t: 'shift-ref-ok', id: 7 })).toBeNull();
     expect(validateWorkerMessage({ t: 'stats', fps: 15, decodeQueue: 1, dropped: 0, decoder: 'prefer-hardware', detectorMs: 30, detectorHz: 2 })).toEqual({ t: 'stats', fps: 15, decodeQueue: 1, dropped: 0, decoder: 'prefer-hardware', configSupported: true, detectorMs: 30, detectorHz: 2 });
     expect(validateWorkerMessage({ t: 'stats', fps: 15, decoder: 'gpu-please' }).decoder).toBeNull();
     expect(validateWorkerMessage({ t: 'error', fatal: 1, message: 'boom' })).toEqual({ t: 'error', fatal: true, message: 'boom' });

@@ -146,7 +146,22 @@ describe('calibration without GetStatus', () => {
       await ptz.probe();
       let last = { x: 0, y: 0 };
       const wizardPtz = { rawMove: async (x, y) => { last = { x, y }; return ptz.rawMove(x, y); }, stopAll: (r) => ptz.stopAll(r) };
-      const vision = { ref: async () => {}, measure: async () => ({ dx: last.x / SIM_TRUTH.viewUnitsX, dy: last.y / SIM_TRUTH.viewUnitsY, score: 0.9, settledMs: 0 }) };
+      // a current picture: the reference and each measurement name frames from after the move
+      // (updated on purpose for the gated protocol: an unstamped answer is no longer trusted; and
+      // again: a reference says it was still and matches the frame the last measurement ended on,
+      // a measurement that the picture moved and settled)
+      let refAt = 0;
+      let lastAt = null;
+      const vision = {
+        ref: async ({ after }) => {
+          refAt = after + 1;
+          return { ok: true, at: refAt, still: true, ...(lastAt !== null ? { vsLast: { at: lastAt, dx: 0, dy: 0, score: 0.95 } } : {}) };
+        },
+        measure: async ({ after }) => {
+          lastAt = after + 1;
+          return { dx: last.x / SIM_TRUTH.viewUnitsX, dy: last.y / SIM_TRUTH.viewUnitsY, score: 0.9, settledMs: 0, at: lastAt, refAt, moved: true, settled: true, changedAt: lastAt, firstAt: lastAt };
+        },
+      };
       const w = new CalibrationWizard({ ptz: wizardPtz, vision, canStart: () => null, current: () => ({ ...settings }), save: (r) => Object.assign(settings, r), delay: async () => {} });
       w.start();
       await new Promise((resolve) => { const t = setInterval(() => { if (!w.running) { clearInterval(t); resolve(); } }, 100); });
@@ -168,17 +183,29 @@ describe('calibration without GetStatus', () => {
       const settings = { ...calibrated(), invertPan: false, invertTilt: false, viewUnitsX: 0.5, viewUnitsY: 1.4, minStep: 0.05 };
       const ptz = new PtzController({ client, getSettings: () => settings, log: () => {} });
       await ptz.probe();
+      expect(ptz.idleMs).toBe(Infinity); // no move since the connection
       const r = await ptz.rawMove(0.2, 0);
+      expect(ptz.idleMs).toBeLessThan(1000); // (calibration waits for a fresh move's picture)
       expect(r.measured).toBe(true);
       expect(r.moved).toBe(true); // the reported position changed: the picture will move too
+      expect(r.travel).toEqual({ x: 0.2, y: 0 }); // …by this much (the calibration's view units)
+      expect(await ptz.readPosition()).toEqual({ x: 0.2, y: 0 });
       await ptz.rawMove(-0.2, 0);
-      expect((await ptz.rawMove(0.01, 0)).moved).toBe(false); // below the firmware's minimum step
-      await ptz.rawMove(-0.01, 0);
+      const none = await ptz.rawMove(0.01, 0);
+      expect(none.moved).toBe(false); // below the firmware's minimum step
+      expect(none.travel).toEqual({ x: 0, y: 0 });
+      // an end stop cuts a move short: the travel says so
+      sim.camera.ptz.place(0.9, 0);
+      const cut = await ptz.rawMove(0.2, 0);
+      expect(cut.travel.x).toBeCloseTo(0.1);
+      sim.camera.ptz.place(0, 0);
       sim.set({ quirks: { getStatusFails: true } });
       await ptz.probe();
       const blind = await ptz.rawMove(0.2, 0);
       expect(blind.measured).toBe(false);
       expect(blind.moved).toBeUndefined(); // nothing to go by
+      expect(blind.travel).toBeUndefined();
+      expect(await ptz.readPosition()).toBe(null);
       await ptz.rawMove(-0.2, 0);
       await ptz.dispose();
       client.close();

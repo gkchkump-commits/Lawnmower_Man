@@ -630,10 +630,26 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   and in some tapo-e2e runs blocked the worker for ~16 s while the calibration dialog was open
   (measured with temporary instrumentation; the integrator's a71cdd1 shows the same failure).
   Main's chunk flow control keeps the backlog bounded, the worker confirms a still reference
-  picture before the camera moves, and main waits for a stalled worker's measurement (25 s), so
-  calibration now copes (tapo-e2e passed at load 7–9 after that); a longer stall still makes it
-  ask the user. Reading the Y plane with `VideoFrame.copyTo()` (asynchronous) would avoid the
-  stall itself.
+  picture before the camera moves, and main waits for a stalled worker's measurement (25 s). A
+  stalled worker decodes frames that left the camera before the last move, which once made
+  calibration store a mirrored pan the wrong way round; so main stamps every relayed sample with
+  its monotonic receive time, the calibration's `shift-ref` / `shift-measure` carry `after` (when
+  the last move ended) and the worker uses only frames that reached main later, naming the one it
+  used; main ignores answers without that gate, never measures without a reference picture, and
+  checks each axis on the way back (TAPO.md §10.1). A longer stall makes it ask the user, never
+  guess. A video that lags the motor before it reaches main (the camera, Wi-Fi, go2rtc on a busy
+  PC) passes that gate, so the worker also says whether the picture moved and settled, when it
+  first changed and how a new reference compares with the frame the last measurement ended on
+  (`vsLast`); the wizard uses a measurement only when the picture followed the move and settled,
+  takes the reference at the turned position only when it still shows that frame, waits out the
+  learnt lag, and otherwise asks and measures nothing more (simulated with the simulator's
+  `videoLagMs`: `tapo-e2e --video-lag`). The stall itself: one `getImageData` of the motion sample blocked the worker for 62.7 s
+  in tapo-e2e under load (5 of 6 calibration runs then had to ask). The worker now reads decoded
+  frames in a CPU format (I420, NV12, RGBA…) with `VideoFrame.copyTo()` (asynchronous, about a
+  millisecond for 640×360; `src/tapo/worker/frame-pixels.js`) and box-downscales them itself;
+  only other frames (GPU-only, the mock's ImageBitmaps) still go through the canvas, and a copy
+  that fails once switches back to it. With that, 6 of 6 loaded calibration runs measured
+  without asking.
 * **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
   Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
   `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the

@@ -61,6 +61,8 @@ export function fakeCameraWindow(o = {}) {
     received: /** @type {any[]} */ ([]),
     /** @type {Array<{ dx: number, dy: number, score: number }>} */
     shifts: [],
+    /** the arrival stamp of the last reference picture (gated protocol) @type {number|null} */
+    refAt: /** @type {number|null} */ (null),
     destroyed: false,
     isDestroyed: () => w.destroyed,
     /** @param {string} channel @param {any} _msg @param {FakePort[]} ports */
@@ -76,8 +78,16 @@ export function fakeCameraWindow(o = {}) {
           const ab = JPEG.buffer.slice(JPEG.byteOffset, JPEG.byteOffset + JPEG.byteLength);
           port.postMessage({ t: 'snap-ok', id: m.id, jpeg: ab, width: 160, height: 90, frameTs: 1 });
         }
-        if (m.t === 'shift-ref' && m.id) port.postMessage({ t: 'shift-ref-ok', id: m.id });
-        if (m.t === 'shift-measure') port.postMessage({ t: 'shift', id: m.id, ...(w.shifts.shift() || { dx: -0.2, dy: 0.15, score: 0.6 }), settledMs: 900 });
+        // the gated calibration protocol (`after` set): pictures from after the move, named by
+        // their arrival stamps, as the current worker answers
+        if (m.t === 'shift-ref' && m.id) {
+          w.refAt = typeof m.after === 'number' ? m.after + 1 : null;
+          port.postMessage(w.refAt === null ? { t: 'shift-ref-ok', id: m.id } : { t: 'shift-ref-ok', id: m.id, gated: true, ok: true, still: true, at: w.refAt });
+        }
+        if (m.t === 'shift-measure') {
+          const gate = typeof m.after === 'number' ? { gated: true, at: m.after + 1, refAt: w.refAt, frames: 4, moved: true } : {};
+          port.postMessage({ t: 'shift', id: m.id, ...(w.shifts.shift() || { dx: -0.2, dy: 0.15, score: 0.6 }), settledMs: 900, ...gate });
+        }
       });
     },
     /** @param {any} msg */

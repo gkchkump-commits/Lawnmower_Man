@@ -5,6 +5,10 @@
 // camera's RTSP session. Bytes go through the fMP4 parser; every sample fans out to the worker
 // port and the recorder ring. No bytes for 5 s → "stalled" → reconnect with backoff 1, 2, 4 … 30 s.
 // go2rtc answering "wrong user/pass" is a sign-in failure: no reconnect (camera lockouts).
+//
+// Every sample carries `rx`: main's own monotonic receive time (performance.now() by default).
+// The worker keeps it per decoded frame, so calibration can tell a picture that arrived after
+// the camera's last move from one that only came out of a stalled worker's backlog late.
 
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
@@ -20,8 +24,9 @@ export const MAX_BACKOFF_MS = 30000;
 export class StreamRelay extends EventEmitter {
   /**
    * @param {{ getEndpoint: () => ({ url: string, auth: string }|null), streamName?: string, log?: (level: string, msg: string) => void,
-   *   now?: () => number, request?: typeof http.get, idleMs?: number, redact?: (text: string) => string }} o
+   *   now?: () => number, mono?: () => number, request?: typeof http.get, idleMs?: number, redact?: (text: string) => string }} o
    *   redact: applied to go2rtc's error text before it is logged or shown (it can name the source URL)
+   *   mono: the monotonic clock of the samples' `rx` stamps (default performance.now())
    */
   constructor(o) {
     super();
@@ -29,6 +34,7 @@ export class StreamRelay extends EventEmitter {
     this._name = o.streamName || GO2RTC_STREAM;
     this._log = o.log || (() => {});
     this._now = o.now || (() => Date.now());
+    this._mono = o.mono || (() => performance.now());
     this._get = o.request || http.get;
     this._idleMs = o.idleMs ?? IDLE_MS;
     this._redact = o.redact || ((/** @type {string} */ t) => t);
@@ -237,7 +243,8 @@ export class StreamRelay extends EventEmitter {
       if (this._lastKeyDts !== null && this.init) this._keyIntervals = [...this._keyIntervals.slice(-2), (s.dts - this._lastKeyDts) / this.init.timescale];
       this._lastKeyDts = s.dts;
     }
-    this.emit('sample', { ...s, gen: this.gen });
+    // rx: when main received it (monotonic), the worker's arrival stamp for this frame
+    this.emit('sample', { ...s, gen: this.gen, rx: this._mono() });
   }
 
   _resetStats() {

@@ -20,7 +20,19 @@
 //      offline mid-session (shown as offline, the tray does not say plain "Armed") and coming back
 //   8. quit: Unsubscribe, the RTSP session ends, go2rtc is gone
 //
-//   npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file.json>] [--keep] [--verbose]
+//   npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file.json>] [--keep] [--verbose] [--allow-ask]
+//     [--calibration-only] [--video-lag <ms>] [--calibration-quirks <json>] [--calibration-start <x,y>]
+//   --allow-ask (or LAWNMOWER_E2E_ALLOW_ASK=1): on a heavily loaded PC calibration may ask the user
+//   rather than trust a lagging picture; answer as the user would (where the simulated lens
+//   turned). The stored result is checked all the same: never a wrong pan/tilt direction, view
+//   units within ±40 %, and the camera back where it started. The report lists the questions and
+//   the wizard's log lines (calibrationLog).
+//   Calibration under conditions the app must survive (they apply during calibration only):
+//   --video-lag <ms>: the simulator's picture lags the motor (quirk videoLagMs; implies
+//   --allow-ask); --calibration-quirks '{"getStatusFails":true}': other quirks; --calibration-start
+//   0.3,0: start elsewhere (the simulator's picture covers ±0.4 only: beyond, it stops changing,
+//   and calibration rightly asks). --calibration-only: setup, calibration, quit (the other steps
+//   assume a calibrated camera at rest at the centre).
 //   ELECTRON_PATH=…  LAWNMOWER_GO2RTC=<go2rtc binary>  (default: vendor/go2rtc/<platform>-<arch>/)
 //
 // Needs the Electron binary, the go2rtc binary (`npm run fetch:go2rtc`), a renderer build (dist/)
@@ -44,6 +56,18 @@ const shotsIdx = argv.indexOf('--shots');
 const shotsDir = shotsIdx >= 0 ? path.resolve(argv[shotsIdx + 1]) : '';
 const reportIdx = argv.indexOf('--report');
 const reportFile = reportIdx >= 0 ? path.resolve(argv[reportIdx + 1]) : '';
+// a heavily loaded PC: calibration may ask instead of trusting a lagging picture; answer like the
+// user would (the result must still be right). Without it, a question fails the run, as before.
+const argOf = (/** @type {string} */ name) => {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
+const videoLagMs = Number(argOf('--video-lag') || 0) || 0;
+/** @type {Record<string, any>} */
+const calibrationQuirks = argOf('--calibration-quirks') ? JSON.parse(/** @type {string} */ (argOf('--calibration-quirks'))) : {};
+const calibrationStart = argOf('--calibration-start') ? /** @type {string} */ (argOf('--calibration-start')).split(',').map(Number) : null;
+const calibrationOnly = argv.includes('--calibration-only');
+const allowAsk = argv.includes('--allow-ask') || process.env.LAWNMOWER_E2E_ALLOW_ASK === '1' || videoLagMs > 0;
 const PASSWORD = 'se&cret';
 
 /** @param {string} msg */
@@ -97,6 +121,7 @@ async function until(fn, ms, interval = 200) {
 }
 /** @param {string} label @param {() => Promise<void>} fn */
 async function step(label, fn) {
+  if (calibrationOnly && !['1 setup', '3 ptz', '8 quit'].includes(label)) return;
   const t0 = Date.now();
   try {
     await fn();
@@ -339,20 +364,55 @@ try {
     }
     const dlg = cam.locator('dialog#calibrate');
     await dlg.waitFor({ state: 'visible', timeout: 10000 });
+    // the conditions under test (calibration only): a lagging picture, other quirks, the start
+    const quirksBefore = { ...sim.quirks };
+    if (calibrationStart) sim.set({ ptz: { x: calibrationStart[0], y: calibrationStart[1] } });
+    if (videoLagMs || Object.keys(calibrationQuirks).length) sim.set({ quirks: { ...calibrationQuirks, ...(videoLagMs ? { videoLagMs } : {}) } });
+    if (calibrationStart || videoLagMs) await sleep(2000 + videoLagMs); // the picture shows the start
+    const truth = { invertPan: !!sim.quirks.mirrorPan, invertTilt: !!sim.quirks.invertTilt };
+    const pos0 = { x: sim.state.ptz.x, y: sim.state.ptz.y };
+    report.calibrationSetup = { videoLagMs, quirks: calibrationQuirks, start: pos0, allowAsk };
+    const t0Calib = Date.now();
     await dlg.getByRole('button', { name: 'Start', exact: true }).click();
-    const done = await until(async () => {
-      const s = await dlg.getAttribute('data-step');
-      return s === 'done' || s === 'failed' || s === 'ask' ? s : null;
-    }, 120000, 500);
+    let done = null;
+    /** @type {string[]} */
+    const asked = [];
+    for (;;) {
+      done = await until(async () => {
+        const s = await dlg.getAttribute('data-step');
+        return s === 'done' || s === 'failed' || s === 'ask' ? s : null;
+      }, 180000, 500);
+      if (done !== 'ask' || !allowAsk || asked.length >= 4) break;
+      // --allow-ask (a heavily loaded PC: the wizard may ask rather than trust a lagging picture):
+      // answer as the user watching this camera would: where the lens turned on the move just made
+      // (the simulator's mirrored pan turns it left for raw +x, the inverted tilt down for raw +y)
+      const last = sim.callsOf('RelativeMove', t0Calib).at(-1)?.args || { x: 0, y: 0 };
+      const pan = dlg.locator('[data-answer="left"]');
+      const answer = (await pan.count())
+        ? ((sim.quirks.mirrorPan ? -last.x : last.x) > 0 ? 'right' : 'left')
+        : ((sim.quirks.invertTilt ? -last.y : last.y) > 0 ? 'up' : 'down');
+      asked.push(`${answer}: ${(await dlg.locator('.calib-small').innerText().catch(() => '')).slice(0, 160)}`);
+      await dlg.locator(`[data-answer="${answer}"]`).click();
+      await sleep(1500);
+    }
+    await until(() => !sim.state.ptz.moving, 15000);
+    const pos1 = { x: sim.state.ptz.x, y: sim.state.ptz.y };
+    sim.set({ quirks: Object.fromEntries(Object.keys({ ...calibrationQuirks, ...(videoLagMs ? { videoLagMs } : {}) }).map((k) => [k, quirksBefore[k]])) });
     await shot(cam, '3-calibrated');
-    check('calibration finishes on its own (no question)', done === 'done', { step: done, text: await dlg.innerText().catch(() => '') });
+    if (allowAsk) check(`calibration finishes (${asked.length} question(s) answered as the user would; allowed with --allow-ask)`, done === 'done', { step: done, asked, text: await dlg.innerText().catch(() => '') });
+    else check('calibration finishes on its own (no question)', done === 'done', { step: done, text: await dlg.innerText().catch(() => '') });
     const t = (await settingsOf()).tapo;
-    check('calibration found the mirrored pan and the inverted tilt', t.invertPan === true && t.invertTilt === true, { invertPan: t.invertPan, invertTilt: t.invertTilt });
+    check(`calibration found the ${truth.invertPan ? 'mirrored' : 'standard'} pan and the ${truth.invertTilt ? 'inverted' : 'standard'} tilt`, t.invertPan === truth.invertPan && t.invertTilt === truth.invertTilt, { invertPan: t.invertPan, invertTilt: t.invertTilt, truth });
     const within = (/** @type {number} */ v, /** @type {number} */ truth) => v > truth * 0.6 && v < truth * 1.4;
-    report.calibration = { invertPan: t.invertPan, invertTilt: t.invertTilt, viewUnitsX: t.viewUnitsX, viewUnitsY: t.viewUnitsY, minStep: t.minStep, msPerUnit: t.msPerUnit, truth: SIM_TRUTH };
+    report.calibration = { invertPan: t.invertPan, invertTilt: t.invertTilt, viewUnitsX: t.viewUnitsX, viewUnitsY: t.viewUnitsY, minStep: t.minStep, msPerUnit: t.msPerUnit, truth: SIM_TRUTH, asked, positions: { start: pos0, end: pos1 } };
+    check('calibration puts the camera back where it started (±0.02)', Math.abs(pos1.x - pos0.x) <= 0.02 && Math.abs(pos1.y - pos0.y) <= 0.02, { start: pos0, end: pos1 });
+    // what the wizard measured (and why it asked), from main's log
+    const mainLog = path.join(userData, 'logs', 'main.log');
+    report.calibrationLog = fs.existsSync(mainLog) ? fs.readFileSync(mainLog, 'utf8').split('\n').filter((l) => /\[tapo\] calibration/.test(l)).map((l) => l.slice(0, 400)) : [];
     check(`view units within ±40 % of the truth (${SIM_TRUTH.viewUnitsX} / ${SIM_TRUTH.viewUnitsY.toFixed(1)})`, within(t.viewUnitsX, SIM_TRUTH.viewUnitsX) && within(t.viewUnitsY, SIM_TRUTH.viewUnitsY), report.calibration);
     check('calibratedAt is set', !!t.calibratedAt, t.calibratedAt);
     await dlg.getByRole('button', { name: 'Close', exact: true }).last().click().catch(() => {});
+    if (calibrationOnly) return;
     const idle = () => until(() => !sim.state.ptz.moving, 10000);
     await idle();
     await sleep(1600); // the settle time after a move

@@ -2,7 +2,7 @@
 // a manual clock: the messages main and the page get, the detection duty cycle, suppression
 // while the camera turns, snapshots, the calibration shift measurement and frame lifetimes.
 import { describe, expect, it } from 'vitest';
-import { RATES, SHIFT_MIN_WAIT_MS, SHIFT_REF_MAX_WAIT_MS, SecurityPipeline } from '../../../src/tapo/worker/pipeline.js';
+import { MAX_SHIFT_TIMEOUT_MS, RATES, SHIFT_MIN_WAIT_MS, SHIFT_REF_GIVE_UP_MS, SHIFT_REF_MAX_WAIT_MS, SecurityPipeline } from '../../../src/tapo/worker/pipeline.js';
 import { fakeGraphics, fakeImage, flush, manualClock, room } from './helpers.js';
 
 function setup(o = {}) {
@@ -26,12 +26,15 @@ function setup(o = {}) {
   p.onPage({ t: 'canvas', canvas });
   p.onPage({ t: 'resize', width: 640, height: 360, dpr: 1 });
   const images = [];
-  /** feed `n` frames at `fps` of the picture `paint` (a function of the frame index) */
-  const feed = async (n, paint, fps = 10) => {
+  /**
+   * feed `n` frames at `fps` of the picture `paint` (a function of the frame index); `rx(i)`: the
+   * frame's arrival stamp on main's clock (none: an unstamped frame)
+   */
+  const feed = async (n, paint, fps = 10, rx = null) => {
     for (let i = 0; i < n; i++) {
       const img = fakeImage(paint(i));
       images.push(img);
-      main({ t: 'bitmap', image: img, ts: clock.now() });
+      main({ t: 'bitmap', image: img, ts: clock.now(), ...(rx ? { rx: rx(i) } : {}) });
       await flush(3);
       clock.advance(1000 / fps);
     }
@@ -295,6 +298,169 @@ describe('SecurityPipeline: calibration shift', () => {
     s.main({ t: 'shift-measure', id: 3, timeoutMs: 6000 });
     await s.feed(20, () => room({ flat: true }));
     expect(s.of(s.toMain, 'shift')[0].score).toBeLessThan(0.15);
+  });
+});
+
+// main's clock (the frames' `rx` stamps and the requests' `after`) is not the worker's: a stalled
+// worker decodes frames long after they reached main
+describe('SecurityPipeline: calibration shift gated by arrival (after)', () => {
+  /** main's arrival stamps: frame i of a batch that reached main from `t0` on, 66 ms apart */
+  const arrived = (t0) => (i) => t0 + i * 66;
+
+  it('the reference skips a stalled worker\'s backlog (frames that reached main before `after`), and says which frame it took', async () => {
+    const s = setup();
+    await s.feed(2, () => room(), 10, arrived(100));
+    s.main({ t: 'shift-ref', id: 'g1', after: 5000 });
+    // the backlog: still frames of the view BEFORE the last move (they reached main before 5000)
+    await s.feed(12, () => room(), 10, arrived(4000));
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([]); // a still picture, but not a current one
+    // unstamped frames (an older main) never count for a gated request either
+    await s.feed(6, () => room({ offset: 0.1 }));
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([]);
+    // the current picture: the camera after the move
+    await s.feed(4, () => room({ offset: 0.1 }), 10, arrived(5200));
+    const [ok] = s.of(s.toMain, 'shift-ref-ok');
+    expect(ok).toMatchObject({ t: 'shift-ref-ok', id: 'g1', gated: true, ok: true, still: true });
+    expect(ok.at).toBeGreaterThan(5000);
+    // measured against that reference (the scene moves left by another 0.1)
+    s.main({ t: 'shift-measure', id: 'm1', timeoutMs: 6000, expectMove: true, after: 9000 });
+    await s.feed(6, () => room({ offset: 0.2 }), 10, arrived(9100));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ id: 'm1', gated: true, refAt: ok.at, moved: true });
+    expect(r.at).toBeGreaterThan(9000);
+    expect(r.dx).toBeLessThan(-0.07);
+    expect(r.dx).toBeGreaterThan(-0.13);
+  });
+
+  it('the measurement ignores frames that reached main before the move ended (the logged sign inversion)', async () => {
+    // the fault in the log: the old view, still, decoded after the move → "settled", wrong shift
+    const run = async (gated) => {
+      const s = setup();
+      s.main({ t: 'shift-ref', id: 'r', ...(gated ? { after: 100 } : {}) });
+      await s.feed(4, () => room(), 10, arrived(200));
+      expect(s.of(s.toMain, 'shift-ref-ok')).toHaveLength(1);
+      s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, ...(gated ? { after: 3000 } : {}) });
+      // the stalled worker's backlog: the picture from BEFORE the move, still (it has turned since)
+      await s.feed(Math.ceil(SHIFT_MIN_WAIT_MS / 100) + 6, () => room({ offset: -0.05 }), 10, arrived(1000));
+      const early = s.of(s.toMain, 'shift');
+      await s.feed(6, () => room({ offset: 0.12 }), 10, arrived(3100));
+      return { early, late: s.of(s.toMain, 'shift') };
+    };
+    // without the gate (an older main): the stale picture is taken as the result
+    const old = await run(false);
+    expect(old.early).toHaveLength(1);
+    expect(old.early[0].dx).toBeGreaterThan(0); // the wrong sign
+    // gated: nothing from the backlog; the current picture is measured
+    const g = await run(true);
+    expect(g.early).toEqual([]);
+    expect(g.late).toHaveLength(1);
+    expect(g.late[0]).toMatchObject({ gated: true, moved: true });
+    expect(g.late[0].dx).toBeLessThan(-0.08);
+    expect(g.late[0].at).toBeGreaterThan(3000);
+    expect(g.late[0].frames).toBeGreaterThanOrEqual(3);
+  });
+
+  it('no current frame: the reference says "none" (never a stale one), the measurement says so too', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'n1', after: 1000 });
+    await s.feed(5, () => room(), 10, arrived(500)); // only the backlog
+    s.clock.advance(SHIFT_REF_MAX_WAIT_MS + 1000);
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([]); // waits on: the worker may be working off its backlog
+    s.clock.advance(SHIFT_REF_GIVE_UP_MS);
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([{ t: 'shift-ref-ok', id: 'n1', gated: true, ok: false, still: false }]);
+    // a measurement with no current frame: score 0 and no frame named (after waiting up to the maximum)
+    s.main({ t: 'shift-measure', id: 'n2', timeoutMs: 2000, after: 1000 });
+    await s.feed(3, () => room(), 10, arrived(600));
+    s.clock.advance(2000);
+    expect(s.of(s.toMain, 'shift')).toEqual([]);
+    s.clock.advance(MAX_SHIFT_TIMEOUT_MS);
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ id: 'n2', score: 0, gated: true, frames: 0 });
+    expect(r.at).toBeUndefined();
+  });
+
+  it('a frame picked for one request is never used for the next one (a sample still in flight)', async () => {
+    for (const gated of [false, true]) {
+      const s = setup();
+      s.main({ t: 'shift-ref', id: 'a', ...(gated ? { after: 0 } : {}) });
+      await s.feed(4, () => room(), 10, arrived(100));
+      s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, ...(gated ? { after: 300 } : {}) });
+      // a frame of the measurement is being sampled when the next reference request arrives
+      s.main({ t: 'bitmap', image: fakeImage(room({ offset: 0.3 })), ts: s.clock.now(), rx: 400 });
+      expect(s.p.shift.busy).toBe(true);
+      s.main({ t: 'shift-ref', ...(gated ? { id: 'b', after: 500 } : {}) }); // (an older main: no id)
+      await flush();
+      expect(s.p.shift.ref).toBe(null); // that frame was not taken as the new reference
+      expect(s.p.shift.wantRef).toBe(true);
+    }
+  });
+
+  it('says whether the picture settled: a timeout\'s newest frame, still turning, did not', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 1000, expectMove: true, after: 400 });
+    // the picture keeps sliding until the timeout (a video still catching up with the camera)
+    await s.feed(12, (i) => room({ offset: 0.02 * (i + 1) }), 10, arrived(500));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ id: 'm', gated: true, moved: true, settled: false });
+    // settled: moved, then still
+    s.main({ t: 'shift-ref', id: 'r2', after: 1400 });
+    await s.feed(4, () => room({ offset: 0.12 }), 10, arrived(1500));
+    s.main({ t: 'shift-measure', id: 'm2', timeoutMs: 6000, expectMove: true, after: 1800 });
+    await s.feed(8, (i) => room({ offset: 0.12 + Math.min(i, 3) * 0.02 }), 10, arrived(1900));
+    expect(s.of(s.toMain, 'shift').at(-1)).toMatchObject({ id: 'm2', moved: true, settled: true });
+    expect(s.of(s.toMain, 'shift').at(-1).contrast).toBeGreaterThan(8);
+  });
+
+  it('names the first frame it looked at and the first one that showed the move (a video that lags the motor)', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, expectMove: true, after: 400 });
+    // frames that arrived after the move ended but still show the camera before it
+    await s.feed(10, () => room(), 10, arrived(500));
+    expect(s.of(s.toMain, 'shift')).toEqual([]); // the camera reported the move: waited for
+    await s.feed(6, () => room({ offset: 0.1 }), 10, arrived(1200));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ moved: true, settled: true, firstAt: 500, changedAt: 1200 });
+    expect(r.dx).toBeLessThan(-0.07);
+  });
+
+  it('a reference says how far it is from the frame the last measurement ended on (vsLast)', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    const [first] = s.of(s.toMain, 'shift-ref-ok');
+    expect(first.vsLast).toBeUndefined(); // nothing measured yet
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, expectMove: true, after: 400 });
+    await s.feed(6, () => room({ offset: 0.1 }), 10, arrived(500));
+    const [m] = s.of(s.toMain, 'shift');
+    // the same picture at the turned position: it matches
+    s.main({ t: 'shift-ref', id: 'r2', after: 1000 });
+    await s.feed(4, () => room({ offset: 0.1 }), 10, arrived(1100));
+    const same = s.of(s.toMain, 'shift-ref-ok').at(-1);
+    expect(same.vsLast.at).toBe(m.at);
+    expect(Math.abs(same.vsLast.dx)).toBeLessThan(0.01);
+    expect(same.vsLast.score).toBeGreaterThan(0.15);
+    // a picture that moved on after the measurement ended (it was still catching up): it does not
+    s.main({ t: 'shift-measure', id: 'm2', timeoutMs: 6000, expectMove: true, after: 1500 });
+    await s.feed(6, () => room({ offset: 0.15 }), 10, arrived(1600));
+    const [, m2] = s.of(s.toMain, 'shift');
+    s.main({ t: 'shift-ref', id: 'r3', after: 2200 });
+    await s.feed(4, () => room({ offset: 0.22 }), 10, arrived(2300));
+    const moved = s.of(s.toMain, 'shift-ref-ok').at(-1);
+    expect(moved.vsLast.at).toBe(m2.at);
+    expect(moved.vsLast.dx).toBeLessThan(-0.04);
+  });
+
+  it('a gated reference that never stands still (scene motion) is the newest current frame, marked not still', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'w', after: 0 });
+    await s.feed(Math.ceil(SHIFT_REF_MAX_WAIT_MS / 100) + 2, (i) => room({ offset: (i % 2) * 0.06 }), 10, arrived(50));
+    const [ok] = s.of(s.toMain, 'shift-ref-ok');
+    expect(ok).toMatchObject({ id: 'w', gated: true, ok: true, still: false });
+    expect(ok.at).toBeGreaterThan(0);
   });
 });
 

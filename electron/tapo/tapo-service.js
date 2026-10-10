@@ -51,7 +51,7 @@ const DET_PER_SEC = 10;
  * a Stop button meanwhile.
  */
 export const SHIFT_SLACK_MS = 25_000;
-/** How long main waits for the worker's still reference picture before moving anyway. */
+/** How long main waits for the worker's reference picture (none by then: the wizard measures nothing, it asks once more, then the user). */
 export const SHIFT_REF_TIMEOUT_MS = 30_000;
 /**
  * Video chunks the worker may be behind before main stops sending (≈ 1.6 s at 15 fps). A PC that
@@ -67,6 +67,9 @@ export const PROBE_AFTER_MS = 10_000;
 export const BLIND_GRACE_MS = 30_000;
 /** … and for this long: one notification and an avatar line. */
 export const BLIND_ALERT_MS = 60_000;
+
+/** What a camera move answers while the calibration runs (PtzResult code 'busy'). */
+export const CALIBRATING_HINT = 'The camera is calibrating. Wait until it has finished, or press Stop in the calibration.';
 
 /** @param {number} at */
 const iso = (at) => new Date(at).toISOString();
@@ -99,7 +102,9 @@ export class TapoService extends EventEmitter {
   /**
    * @param {{ settings: { get: () => any, update: (p: any) => any }, credentials: import('./credentials.js').CredentialStore,
    *   paths: { configDir: string, defaultClipsDir: string }, deps?: TapoDeps, log?: (level: string, msg: string) => void,
-   *   env?: Record<string, string|undefined>, appVersion?: string, now?: () => number }} o
+   *   env?: Record<string, string|undefined>, appVersion?: string, now?: () => number, mono?: () => number }} o
+   *   mono: main's monotonic clock (performance.now()): the video samples' arrival stamps and the
+   *   calibration's "only pictures that arrived after the last move" gate
    */
   constructor(o) {
     super();
@@ -110,6 +115,7 @@ export class TapoService extends EventEmitter {
     this._log = o.log || (() => {});
     this._env = o.env || process.env;
     this._now = o.now || (() => Date.now());
+    this._mono = o.mono || (() => performance.now());
     this._allowLoopback = this._env.LAWNMOWER_TAPO_ALLOW_LOOPBACK === '1';
     this._appVersion = o.appVersion || '0.0.0';
 
@@ -155,7 +161,7 @@ export class TapoService extends EventEmitter {
     this.sidecar.on('auth-failed', () => this._onVideoAuthFailed());
     this.sidecar.on('restarted', () => this.relay.kick());
     this.relay = (this._deps.createRelay || ((/** @type {any} */ x) => new StreamRelay(x)))({
-      getEndpoint: () => this.sidecar.endpoint(), log: this._log, now: this._now, redact: (/** @type {string} */ t) => redact(t, [this.rtspProxy.token]),
+      getEndpoint: () => this.sidecar.endpoint(), log: this._log, now: this._now, mono: this._mono, redact: (/** @type {string} */ t) => redact(t, [this.rtspProxy.token]),
     });
     this.relay.on('state', (/** @type {string} */ s) => this._onRelayState(s));
     this.relay.on('auth-failed', () => this._onVideoAuthFailed());
@@ -197,8 +203,14 @@ export class TapoService extends EventEmitter {
     // calibration
     this._calibrating = false;
     this.calibration = new CalibrationWizard({
-      ptz: { rawMove: (x, y) => this._ptzOrThrow().rawMove(x, y), stopAll: (r) => this.ptzCtl?.stopAll(r) || Promise.resolve() },
-      vision: { ref: () => this._shiftRef(), measure: (m) => this._shiftMeasure(m.timeoutMs, !!m.expectMove) },
+      ptz: {
+        rawMove: (x, y) => this._ptzOrThrow().rawMove(x, y),
+        stopAll: (r) => this.ptzCtl?.stopAll(r) || Promise.resolve(),
+        position: () => (this.ptzCtl ? this.ptzCtl.readPosition() : Promise.resolve(null)),
+        idleMs: () => (this.ptzCtl ? this.ptzCtl.idleMs : Infinity),
+      },
+      vision: { ref: (r) => this._shiftRef(r.after, r.signal), measure: (m) => this._shiftMeasure(m.timeoutMs, !!m.expectMove, m.after, m.signal) },
+      clock: () => this._mono(),
       canStart: () => this._calibrationBlocker(),
       current: () => {
         const t = this._tapo();
@@ -292,8 +304,10 @@ export class TapoService extends EventEmitter {
     if (this._statusTimer) clearTimeout(this._statusTimer);
     if (this._healthTimer) clearInterval(this._healthTimer);
     this._tick = this._retention = this._statusTimer = this._retryTimer = this._healthTimer = null;
+    // quitting mid-calibration: it puts the camera back where it started first (within the bound)
+    const calibration = this.calibration.running ? (this.calibration.cancel(), this.calibration.idle()) : Promise.resolve();
     const work = Promise.allSettled([
-      this.ptzCtl ? this.ptzCtl.stopAll('quit', { force: true }) : null,
+      this.ptzCtl ? calibration.then(() => this.ptzCtl?.stopAll('quit', { force: true })) : null,
       this.monitor ? this.monitor.stop() : null,
       this.recorder.close(),
       this._mcpHttp.stop(),
@@ -688,7 +702,10 @@ export class TapoService extends EventEmitter {
       }
     }
     const ts = this.relay.init?.timescale || 90000;
-    this._post({ t: 'chunk', seq: ++f.seq, gen: s.gen, key: s.key, ts: Math.round((s.pts * 1e6) / ts), dur: Math.round((s.duration * 1e6) / ts), data: toArrayBuffer(s.data) });
+    // rx: when main received the sample (monotonic; the relay stamps it): the worker keeps it per
+    // frame, so calibration uses only pictures that arrived after the camera's last move
+    const rx = typeof s.rx === 'number' && Number.isFinite(s.rx) ? s.rx : this._mono();
+    this._post({ t: 'chunk', seq: ++f.seq, gen: s.gen, key: s.key, ts: Math.round((s.pts * 1e6) / ts), dur: Math.round((s.duration * 1e6) / ts), rx, data: toArrayBuffer(s.data) });
   }
 
   /**
@@ -816,16 +833,35 @@ export class TapoService extends EventEmitter {
     }
   }
 
-  /** @param {object} msg @param {number} timeoutMs @returns {Promise<any>} */
-  _request(msg, timeoutMs) {
+  /**
+   * @param {object} msg @param {number} timeoutMs
+   * @param {AbortSignal} [signal] aborted: the request is dropped at once (a cancelled calibration
+   *   must not wait up to half a minute for a picture nobody needs any more)
+   * @returns {Promise<any>}
+   */
+  _request(msg, timeoutMs, signal) {
     if (!this._port) return Promise.reject(new Error('The camera window is not running, so there is no picture.'));
+    if (signal?.aborted) return Promise.reject(new Error('cancelled'));
     const id = `r${++this._reqSeq}`;
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const p = this._pending.get(id);
+        if (!p) return;
+        this._pending.delete(id);
+        clearTimeout(p.timer);
+        reject(new Error('cancelled'));
+      };
       const timer = setTimeout(() => {
         this._pending.delete(id);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error('The camera picture did not arrive in time.'));
       }, timeoutMs);
-      this._pending.set(id, { resolve, reject, timer });
+      const done = (/** @type {(v: any) => void} */ f) => (/** @type {any} */ v) => {
+        signal?.removeEventListener('abort', onAbort);
+        f(v);
+      };
+      this._pending.set(id, { resolve: done(resolve), reject: done(reject), timer });
+      signal?.addEventListener('abort', onAbort, { once: true });
       this._post({ ...msg, id });
     });
   }
@@ -879,29 +915,59 @@ export class TapoService extends EventEmitter {
     return null;
   }
 
-  async _shiftRef() {
+  /**
+   * The calibration's reference picture, from frames that reached main after `after` (main's
+   * monotonic clock: when the camera's last move ended). The worker answers once it has a still
+   * one, and the camera moves only then. Only a gated answer with a reference counts: a timeout,
+   * the worker's "none" or an older worker's bare answer (which says nothing about how current its
+   * picture is) are no reference, and the wizard does not measure against nothing. Passed on:
+   * whether it was still, its contrast and `vsLast` (the shift from the frame the last measurement
+   * ended on), which the wizard checks.
+   * @param {number} [after] @param {AbortSignal} [signal] a cancelled calibration
+   * @returns {Promise<{ ok: true, at: number, still: boolean, contrast?: number, vsLast?: { at: number, dx: number, dy: number, score: number } } | { ok: false, reason: string }>}
+   */
+  async _shiftRef(after, signal) {
     this._calibrating = true;
     this._updateStream();
     if (!(await this._waitLive(10000))) throw new Error('No live picture, so the camera cannot be calibrated.');
     await new Promise((r) => setTimeout(r, 300));
-    // the worker answers once it has a still reference picture; the camera moves only then
+    const gate = typeof after === 'number' && Number.isFinite(after) ? after : this._mono();
+    let r;
     try {
-      await this._request({ t: 'shift-ref' }, this._shiftRefTimeoutMs);
+      r = await this._request({ t: 'shift-ref', after: gate }, this._shiftRefTimeoutMs, signal);
     } catch (err) {
-      this._log('info', `[tapo] calibration: no reference picture yet (${/** @type {Error} */ (err).message})`);
+      return { ok: false, reason: /** @type {Error} */ (err).message };
     }
+    if (r.gated !== true) return { ok: false, reason: 'the camera window is out of date and cannot say how current its picture is; restart the app' };
+    if (r.ok !== true || typeof r.at !== 'number' || !(r.at > gate)) return { ok: false, reason: 'no picture arrived after the camera\'s last move' };
+    return { ok: true, at: r.at, still: r.still === true, ...(typeof r.contrast === 'number' ? { contrast: r.contrast } : {}), ...(r.vsLast ? { vsLast: r.vsLast } : {}) };
   }
 
   /**
-   * The worker's picture shift. A worker that answers too late (a busy PC: its frames queue up)
-   * is "not measurable", so the wizard asks the user instead of giving up.
-   * @param {number} timeoutMs @param {boolean} [expectMove]
+   * The worker's picture shift, measured on frames that reached main after `after` (the end of
+   * the move). A worker that answers too late (a busy PC: its frames queue up) is "not
+   * measurable", and so is an answer without the gate (an older worker or page: its picture may be
+   * from before the move): score 0, so the wizard asks the user instead of trusting it. The gated
+   * answer's `settled`, `firstAt`, `changedAt` and `contrast` are passed on (an answer from a
+   * camera window that does not send `settled` reads as not settled: not used either).
+   * @param {number} timeoutMs @param {boolean} [expectMove] @param {number} [after] @param {AbortSignal} [signal]
+   * @returns {Promise<{ dx: number, dy: number, score: number, settledMs: number, at?: number, refAt?: number, moved?: boolean, settled?: boolean,
+   *   frames?: number, firstAt?: number, changedAt?: number, contrast?: number }>}
    */
-  async _shiftMeasure(timeoutMs, expectMove = false) {
+  async _shiftMeasure(timeoutMs, expectMove = false, after = undefined, signal = undefined) {
     if (!this._port) throw new Error('The camera window is not running, so there is no picture.');
+    const gate = typeof after === 'number' && Number.isFinite(after) ? after : this._mono();
     try {
-      const r = await this._request({ t: 'shift-measure', timeoutMs, expectMove }, timeoutMs + this._shiftSlackMs);
-      return { dx: r.dx, dy: r.dy, score: r.score, settledMs: r.settledMs };
+      const r = await this._request({ t: 'shift-measure', timeoutMs, expectMove, after: gate }, timeoutMs + this._shiftSlackMs, signal);
+      if (r.gated !== true) {
+        this._log('warn', '[tapo] calibration: the camera window\'s measurement does not say how current its picture is (an older version): not used');
+        return { dx: r.dx, dy: r.dy, score: 0, settledMs: r.settledMs };
+      }
+      const opt = (/** @type {string} */ k) => (typeof r[k] === 'number' ? { [k]: r[k] } : {});
+      return {
+        dx: r.dx, dy: r.dy, score: r.score, settledMs: r.settledMs, moved: r.moved, settled: r.settled === true, frames: r.frames,
+        ...opt('at'), ...opt('refAt'), ...opt('firstAt'), ...opt('changedAt'), ...opt('contrast'),
+      };
     } catch (err) {
       this._log('info', `[tapo] calibration: no picture measurement (${/** @type {Error} */ (err).message})`);
       return { dx: 0, dy: 0, score: 0, settledMs: 0 };
@@ -1177,6 +1243,10 @@ export class TapoService extends EventEmitter {
     if (!this._tapo().enabled) return { ok: false, code: 'not-configured', error: 'The home camera is turned off.' };
     if (this._authFailed) return { ok: false, code: 'auth', error: HINTS.auth };
     if (!this.ptzCtl) return { ok: false, code: this.configured() ? 'offline' : 'not-configured', error: this.configured() ? 'The camera is not connected.' : 'Set up the camera first.' };
+    // calibration turns the camera and measures the picture between its own moves: another move
+    // in between (the D-pad, the keys, click-to-center, Claude's camera_look) would be measured
+    // as its own and not be undone. (A heartbeat or release only ends a hold, and none can start.)
+    if (this.calibration.running && cmd?.op !== 'heartbeat' && cmd?.op !== 'release') return { ok: false, code: 'busy', error: CALIBRATING_HINT };
     return this.ptzCtl.command(cmd);
   }
 

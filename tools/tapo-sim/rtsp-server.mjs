@@ -53,7 +53,8 @@ export function digestResponse(d) {
  *   createdAt: number, lastRequestAt: number, ssrc: number, audioSsrc: number, seq: number, audioSeq: number,
  *   ts0: number, frameNo: number, startAt: number, seg: import('./fixtures.mjs').Segment|null, segFrame: number,
  *   segments: Array<{ at: number, id: string }>, framesSent: number, framesDropped: number, bytesSent: number,
- *   dropUntilKey: boolean, frameTimer: NodeJS.Timeout|null, audioTimer: NodeJS.Timeout|null, endedAt?: number, endReason?: string }} Session
+ *   dropUntilKey: boolean, frameTimer: NodeJS.Timeout|null, audioTimer: NodeJS.Timeout|null, endedAt?: number, endReason?: string,
+ *   viewHistory?: Array<{ t: number, pos: { x: number, y: number }, axes: { x: boolean, y: boolean } }>|null }} Session
  * @typedef {{ socket: net.Socket, buf: Buffer, nonce: string, sessions: Set<Session>, peer: string, authed: boolean }} Conn
  */
 
@@ -365,7 +366,8 @@ export async function startRtspServer(o) {
     if (cam.scenario.privacy && cam.quirks.privacyKillsStream) return;
     // while a motor runs the picture changes every frame (the two cells around the position
     // alternate on that axis); at rest it is the nearest cell
-    const want = selectSegment(s.stream, cam.ptz.position, cam.quirks, cam.scenario, { ...cam.ptz.movingAxes, frameNo: s.frameNo });
+    const { pos, axes } = viewOf(s);
+    const want = selectSegment(s.stream, pos, cam.quirks, cam.scenario, { ...axes, frameNo: s.frameNo });
     if (!s.seg || s.segFrame >= s.seg.frames.length || want.id !== s.seg.id) {
       if (!s.seg || want.id !== s.seg.id) {
         s.segments.push({ at: cam.now(), id: want.id });
@@ -394,6 +396,27 @@ export async function startRtspServer(o) {
       });
     });
     s.framesSent++;
+  }
+
+  /**
+   * Where the picture shows the lens pointing: now, or `videoLagMs` ago (each session keeps the
+   * positions its frames saw, so the lag also covers the motion in between).
+   * @param {Session} s @returns {{ pos: { x: number, y: number }, axes: { x: boolean, y: boolean } }}
+   */
+  function viewOf(s) {
+    const pos = cam.ptz.position;
+    const axes = cam.ptz.movingAxes;
+    const lag = Number(cam.quirks.videoLagMs) || 0;
+    if (lag <= 0) {
+      s.viewHistory = null;
+      return { pos, axes };
+    }
+    const t = cam.now();
+    const h = (s.viewHistory ||= []);
+    h.push({ t, pos, axes });
+    while (h.length > 1 && h[1].t <= t - lag) h.shift();
+    // the oldest entry is the newest one at least `lag` old (or the first one this session saw)
+    return { pos: h[0].pos, axes: h[0].axes };
   }
 
   /** @param {Session} s @param {number} channel @param {Buffer} pkt */

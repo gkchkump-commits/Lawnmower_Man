@@ -84,6 +84,12 @@ view height **1.2 units** (`viewUnitsY`); the smallest move the camera makes is 
 (GetStatus still reports the real position). With the Tapo quirks a correct calibration finds
 `invertPan: true`, `invertTilt: true`.
 
+While a motor turns, odd and even frames show the two cells on either side of the position on
+that axis (`gridCellMoving`), so the picture changes on every frame as real video does while the
+camera turns. Without this the picture would rest on one cell for 4–5 frames between grid steps,
+and a "has the picture settled?" check (the calibration's measurement) would stop mid-move and
+measure half the real shift (seen: `viewUnitsX` 1.6 instead of 0.8).
+
 ## Fixtures
 
 `tests/fixtures/tapo/` (committed, about 2.4 MB) is made by `tools/tapo-sim/make-fixtures.sh`

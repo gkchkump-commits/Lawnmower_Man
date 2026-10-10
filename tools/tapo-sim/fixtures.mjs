@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gridCell, segmentId } from './geometry.mjs';
+import { gridCell, gridCellMoving, segmentId } from './geometry.mjs';
 import { accessUnits, isKeyFrame, parameterSets, profileLevelId, splitAnnexB, spropParameterSets } from './h264.mjs';
 
 export const DEFAULT_FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../tests/fixtures/tapo/sim');
@@ -56,19 +56,23 @@ export function loadFixtures(dir = DEFAULT_FIXTURES) {
 /**
  * The segment for the current view: the grid cell nearest to the lens direction (ONVIF position
  * through the mirrorPan / invertTilt quirks), its person variant while someone is in the room,
- * or the privacy placeholder.
+ * or the privacy placeholder. While a motor runs (`motion` given), the two cells around the
+ * position alternate frame by frame on that axis (geometry.gridCellMoving).
  * @param {StreamFixtures} stream
  * @param {{ x: number, y: number }} pos
  * @param {{ mirrorPan?: boolean, invertTilt?: boolean }} quirks
  * @param {{ person?: boolean, privacy?: boolean }} scenario
+ * @param {{ x: boolean, y: boolean, frameNo: number }|null} [motion] which ONVIF axes are turning
  * @returns {Segment}
  */
-export function selectSegment(stream, pos, quirks, scenario) {
+export function selectSegment(stream, pos, quirks, scenario, motion = null) {
   if (scenario.privacy) {
     const p = stream.segments.get('privacy');
     if (p) return p;
   }
-  const { i, j } = gridCell(quirks.mirrorPan ? -pos.x : pos.x, quirks.invertTilt ? -pos.y : pos.y);
+  const pan = quirks.mirrorPan ? -pos.x : pos.x;
+  const tilt = quirks.invertTilt ? -pos.y : pos.y;
+  const { i, j } = motion && (motion.x || motion.y) ? gridCellMoving(pan, tilt, motion, motion.frameNo) : gridCell(pan, tilt);
   if (scenario.person) {
     const s = stream.segments.get(segmentId(i, j, true));
     if (s) return s;

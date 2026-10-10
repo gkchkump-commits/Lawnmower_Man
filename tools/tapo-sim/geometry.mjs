@@ -61,6 +61,25 @@ export function gridCell(pan, tilt) {
   return { i: i || 0, j: j || 0 }; // no -0 in file names
 }
 
+/**
+ * Grid cell while a motor runs. Real video changes on every frame while the camera turns (the
+ * scene slides and blurs); the grid would instead rest on one cell for several frames between
+ * steps, and a "has the picture settled?" check (calibration) would then measure mid-move. So
+ * for each axis that is turning, odd and even frames show the two cells on either side of the
+ * position (floor / ceil); an axis at rest shows its nearest cell. On a cell exactly, or past the
+ * end of the grid, both sides are the same cell and the picture holds still.
+ * @param {number} pan @param {number} tilt physical direction, as gridCell
+ * @param {{ x: boolean, y: boolean }} moving which axes are turning @param {number} frameNo
+ * @returns {{ i: number, j: number }}
+ */
+export function gridCellMoving(pan, tilt, moving, frameNo) {
+  const near = gridCell(pan, tilt);
+  const side = (/** @type {number} */ u) => (frameNo % 2 ? Math.ceil(u - 1e-9) : Math.floor(u + 1e-9));
+  const i = moving.x ? clamp(side(pan / PAN_STEP_UNITS), -PAN_STEPS, PAN_STEPS) : near.i;
+  const j = moving.y ? clamp(side(tilt / TILT_STEP_UNITS), -TILT_STEPS, TILT_STEPS) : near.j;
+  return { i: i || 0, j: j || 0 };
+}
+
 /** Segment id of a grid cell: 'p-1_t0', 'p0_t0_person'. @param {number} i @param {number} j @param {boolean} [person] */
 export function segmentId(i, j, person = false) {
   return `p${i}_t${j}${person ? '_person' : ''}`;

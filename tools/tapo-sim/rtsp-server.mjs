@@ -7,7 +7,9 @@
 // Video: the pre-encoded 1-second GOPs of fixtures.mjs, 15 fps, 90 kHz timestamps, one RTP
 // packet per NAL unit (FU-A above 1400 bytes), marker on the last packet of a frame. The segment
 // follows the virtual pan/tilt position: when the view changes the next frame starts the new
-// segment at its IDR (a scene-cut keyframe), so the picture moves with the camera within a frame.
+// segment at its IDR (a scene-cut keyframe), so the picture moves with the camera within a frame;
+// while the motor runs it alternates between the two cells around the position, so the picture
+// never looks settled mid-move.
 // Audio (track2, PCMA/8000) sends A-law silence, only when SETUP'd.
 
 import crypto from 'node:crypto';
@@ -361,7 +363,9 @@ export async function startRtspServer(o) {
     const ts = s.ts0 + s.frameNo * (90000 / FPS);
     s.frameNo++;
     if (cam.scenario.privacy && cam.quirks.privacyKillsStream) return;
-    const want = selectSegment(s.stream, cam.ptz.position, cam.quirks, cam.scenario);
+    // while a motor runs the picture changes every frame (the two cells around the position
+    // alternate on that axis); at rest it is the nearest cell
+    const want = selectSegment(s.stream, cam.ptz.position, cam.quirks, cam.scenario, { ...cam.ptz.movingAxes, frameNo: s.frameNo });
     if (!s.seg || s.segFrame >= s.seg.frames.length || want.id !== s.seg.id) {
       if (!s.seg || want.id !== s.seg.id) {
         s.segments.push({ at: cam.now(), id: want.id });

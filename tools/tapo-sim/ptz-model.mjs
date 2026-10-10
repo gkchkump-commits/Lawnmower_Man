@@ -95,6 +95,12 @@ export class PtzModel {
     return this.x.mode !== 'idle' || this.y.mode !== 'idle';
   }
 
+  /** Which axes are turning right now. @returns {{ x: boolean, y: boolean }} */
+  get movingAxes() {
+    this.advance();
+    return { x: this.x.mode !== 'idle', y: this.y.mode !== 'idle' };
+  }
+
   /** @param {string} kind */
   _count(kind) {
     this.counts[kind] = (this.counts[kind] || 0) + 1;

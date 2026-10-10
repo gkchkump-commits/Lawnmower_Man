@@ -9,7 +9,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { startSim, SIM_TRUTH } from '../../../tools/tapo-sim/index.mjs';
 import { DEFAULT_FIXTURES, loadFixtures, selectSegment } from '../../../tools/tapo-sim/fixtures.mjs';
-import { gridCell, roundHalfAway, segmentId, cropOrigin, PANO, VIEW } from '../../../tools/tapo-sim/geometry.mjs';
+import { gridCell, gridCellMoving, roundHalfAway, segmentId, cropOrigin, PANO, VIEW } from '../../../tools/tapo-sim/geometry.mjs';
 import { accessUnits, depacketize, nalType, rtpPayloads, splitAnnexB } from '../../../tools/tapo-sim/h264.mjs';
 import { checkWsse, parseDuration } from '../../../tools/tapo-sim/soap.mjs';
 import { digestResponse } from '../../../tools/tapo-sim/rtsp-server.mjs';
@@ -86,6 +86,27 @@ describe('geometry and segment choice', () => {
     expect(selectSegment(fx, { x: 0.1, y: 0 }, {}, { person: true }).id).toBe('p1_t0_person');
     expect(selectSegment(fx, { x: 0.3, y: 0 }, {}, { person: true }).id).toBe('p3_t0'); // the person is not in view there
     expect(selectSegment(fx, { x: 0, y: 0 }, {}, { privacy: true, person: true }).id).toBe('privacy');
+  });
+
+  it('while an axis turns, odd and even frames show the cells on either side of the position', () => {
+    // pan turning between cells 1 and 2 (0.13 units), tilt at rest at 0.1 (nearest: cell 1)
+    expect(gridCellMoving(0.13, 0.1, { x: true, y: false }, 0)).toEqual({ i: 1, j: 1 });
+    expect(gridCellMoving(0.13, 0.1, { x: true, y: false }, 1)).toEqual({ i: 2, j: 1 });
+    expect(gridCellMoving(-0.13, 0, { x: true, y: false }, 0)).toEqual({ i: -2, j: 0 });
+    expect(gridCellMoving(-0.13, 0, { x: true, y: false }, 1)).toEqual({ i: -1, j: 0 });
+    // tilt turning between −1 and 0
+    expect(gridCellMoving(0, -0.05, { x: false, y: true }, 0)).toEqual({ i: 0, j: -1 });
+    expect(gridCellMoving(0, -0.05, { x: false, y: true }, 1)).toEqual({ i: 0, j: 0 });
+    // exactly on a cell (float noise included), or past the end of the grid: the picture holds
+    expect(gridCellMoving(0.1 + 0.2, 0, { x: true, y: false }, 0)).toEqual({ i: 3, j: 0 });
+    expect(gridCellMoving(0.1 + 0.2, 0, { x: true, y: false }, 1)).toEqual({ i: 3, j: 0 });
+    expect(gridCellMoving(0.9, 0, { x: true, y: false }, 1)).toEqual({ i: 4, j: 0 });
+    expect(gridCellMoving(0.9, 0, { x: true, y: false }, 0)).toEqual({ i: 4, j: 0 });
+    // through selectSegment: no axis moving is the nearest cell
+    const fx = loadFixtures().stream1;
+    expect(selectSegment(fx, { x: 0.13, y: 0 }, {}, {}, { x: false, y: false, frameNo: 1 }).id).toBe('p1_t0');
+    expect(selectSegment(fx, { x: 0.13, y: 0 }, {}, {}, { x: true, y: false, frameNo: 1 }).id).toBe('p2_t0');
+    expect(selectSegment(fx, { x: 0.13, y: 0 }, { mirrorPan: true }, {}, { x: true, y: false, frameNo: 1 }).id).toBe('p-1_t0');
   });
 
   it('RTP payloads round-trip, FU-A above 1400 bytes', () => {
@@ -470,6 +491,22 @@ describe('RTSP server', () => {
     sim.set({ person: true });
     await sleep(200);
     expect(sim.state.rtspSessions.live[0].segment).toBe('p1_t0_person');
+  });
+
+  it('while the camera turns the picture changes on every frame; at rest it holds the final cell', async () => {
+    const c = await client();
+    await c.play('/stream1');
+    await sleep(200);
+    sim.camera.ptz.relative(-0.2, 0); // mirrored: two cells to the right, 0.2 / 0.35 ≈ 570 ms
+    await until(() => !sim.camera.ptz.moving, { timeout: 3000, what: 'the motor to stop' });
+    const turning = sim.state.rtspSessions.live[0].segments.map((x) => x.id);
+    await sleep(400);
+    const after = sim.state.rtspSessions.live[0].segments.map((x) => x.id);
+    // p0 → (p0 | p1 alternating) → (p1 | p2 alternating) → p2, one change per frame (≈ 8 frames)
+    expect(turning.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(turning)).toEqual(new Set(['p0_t0', 'p1_t0', 'p2_t0']));
+    expect(after.at(-1)).toBe('p2_t0');
+    expect(after.length - turning.length).toBeLessThanOrEqual(1); // still once the motor stopped
   });
 
   it('allows two sessions (the camera budget, Tapo app viewers included); the next gets 453', async () => {

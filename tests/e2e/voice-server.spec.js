@@ -83,6 +83,17 @@ test.afterAll(() => {
 test.describe('real voice server (--fake engines)', () => {
   test('push-to-talk → /stt, reply → /tts with visemes → lip-sync', async ({ page }) => {
     test.skip(!!skipReason, skipReason);
+    // the jaw of every rendered frame while speaking (software WebGL draws only a few frames a
+    // second, so a second of polling can land on consonants only)
+    await page.addInitScript(() => {
+      window.__jaw = [];
+      const tick = () => {
+        const a = window.__app?.avatar?.animState?.();
+        if (a && document.body.dataset.state === 'speaking') window.__jaw.push(a.jawOpen);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     await boot(page, { voice: url, voiceToken: TOKEN, mockDelay: 25 });
     await expect(page.locator('.status-voice')).toHaveText(/^Voice · (GPU|CPU)$/);
     await expect(page.locator('#mic')).toHaveAttribute('aria-disabled', 'false');
@@ -102,13 +113,11 @@ test.describe('real voice server (--fake engines)', () => {
     });
     expect(clip.visemes).toBeGreaterThan(3);
     expect(clip.first).toMatchObject({ start: 0 });
-    let maxJaw = 0;
-    for (let i = 0; i < 20; i++) {
-      maxJaw = Math.max(maxJaw, await page.evaluate(() => window.__app.avatar.animState().jawOpen));
-      await page.waitForTimeout(40);
-    }
-    expect(maxJaw).toBeGreaterThan(0.1);
     await waitIdle(page, 60_000);
+    // over the whole reply, the mouth opened
+    const jaw = await page.evaluate(() => window.__jaw);
+    expect(jaw.length).toBeGreaterThan(3);
+    expect(Math.max(...jaw)).toBeGreaterThan(0.1);
     // typed text is spoken too
     await send(page, 'hi');
     await page.waitForFunction(() => document.body.dataset.state === 'speaking', null, { timeout: 30_000 });

@@ -13,6 +13,17 @@
  * @property {string} [voiceSetup]       'idle'|'running'|'done'|'failed'|'manual'
  * @property {string} [claudeProblem]    'cli-missing'|'auth'|''
  * @property {{ name: string, accelerator: string, reason: string }[]} [hotkeyConflicts]
+ * @property {TapoTrayState} [tapo]       the home camera (electron/tapo); absent = no Home camera menu
+ */
+
+/**
+ * @typedef {object} TapoTrayState
+ * @property {boolean} enabled
+ * @property {boolean} configured            host, Camera Account and password are set
+ * @property {string} connection             TapoStatus.connection
+ * @property {boolean} armed
+ * @property {boolean} arming
+ * @property {string} name
  */
 
 /**
@@ -33,6 +44,9 @@
  * @property {() => void} openWorkdir
  * @property {() => void} openLogs
  * @property {() => void} quit
+ * @property {() => void} [tapoShow]          show the camera window (turns the feature on when it is off)
+ * @property {(on: boolean) => void} [tapoArm]
+ * @property {() => void} [tapoOpenClips]
  */
 
 const MODE_LABELS = { chat: 'Chat (no tools)', assistant: 'Assistant (read files + web)', agent: 'Agent (all tools, asks first)' };
@@ -46,7 +60,36 @@ const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
  * @param {TrayState} st
  */
 export function trayTooltip(st) {
-  return `Lawnmower Man — Claude: ${claudeLabel(st)} · Voice: ${st.voiceStatus || 'unknown'}`;
+  const cam = st.tapo && st.tapo.enabled ? ` · Home camera: ${tapoLabel(st.tapo).toLowerCase()}` : '';
+  return `Lawnmower Man — Claude: ${claudeLabel(st)} · Voice: ${st.voiceStatus || 'unknown'}${cam}`;
+}
+
+/** "armed" | "arming" | "online" | "offline" … for the tooltip and the menu. @param {TapoTrayState} t */
+function tapoLabel(t) {
+  if (!t.enabled) return 'Off';
+  if (!t.configured) return 'Not set up';
+  if (t.armed) return t.arming ? 'Arming' : 'Armed';
+  if (t.connection === 'online') return 'Online';
+  if (t.connection === 'connecting') return 'Connecting';
+  if (t.connection === 'auth-failed') return 'Sign-in failed';
+  return 'Offline';
+}
+
+/**
+ * The "Home camera" submenu (after "Camera").
+ * @param {TapoTrayState} t @param {TrayActions} a
+ */
+function tapoItem(t, a) {
+  const status = !t.enabled ? 'Home camera is off' : !t.configured ? 'Not set up yet' : `${tapoLabel(t)}${t.armed ? '' : ' · Disarmed'}`;
+  return {
+    label: 'Home camera',
+    submenu: [
+      { label: status, enabled: false },
+      { label: t.enabled && t.configured ? 'Show camera window' : 'Set up the home camera…', click: () => a.tapoShow?.() },
+      { label: 'Armed', type: 'checkbox', checked: !!t.armed, enabled: !!(t.enabled && t.configured), click: (/** @type {any} */ item) => a.tapoArm?.(!!item?.checked) },
+      { label: 'Open clips folder', enabled: !!t.enabled, click: () => a.tapoOpenClips?.() },
+    ],
+  };
 }
 
 /** @param {TrayState} st */
@@ -107,6 +150,8 @@ export function buildTrayTemplate(st, a) {
     { label: 'Reset position', click: () => a.resetPosition?.() },
     // the avatar can see you (docs/CAMERA.md); the first time, the window explains it before it starts
     { label: 'Camera', type: 'checkbox', checked: !!s.camera?.enabled, click: (/** @type {any} */ item) => a.setCamera?.(!!item?.checked) },
+    // the Tapo home camera (docs/TAPO.md)
+    ...(st.tapo ? [tapoItem(st.tapo, a)] : []),
     { type: 'separator' },
     { label: 'Restart voice', click: () => a.restartVoice() },
     st.voiceSetup === 'running'

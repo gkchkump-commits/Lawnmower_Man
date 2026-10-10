@@ -73,7 +73,9 @@ describe('TapoService', () => {
     expect(st.clock).toMatchObject({ warn: false });
     expect(JSON.stringify(st)).not.toMatch(/se&cret|cret/);
     expect(r.sidecar.starts).toHaveLength(1);
-    expect(r.sidecar.starts[0]).toMatchObject({ host: '127.0.0.1', rtspPort: 554, stream: 'stream1', camUser: 'camacct', camPass: 'se&cret' });
+    // go2rtc's source is main's RTSP auth proxy: it never gets the Camera Account
+    expect(r.sidecar.starts[0]).toEqual({ sourcePort: r.service.rtspProxy.port, sourceToken: expect.stringMatching(/^[0-9a-f]{32}$/), stream: 'stream1' });
+    expect(JSON.stringify(r.sidecar.starts[0])).not.toMatch(/cret|camacct/);
     // not needed yet: no stream
     expect(r.relay.needed).toBe(false);
     expect(st.stream.state).toBe('off');

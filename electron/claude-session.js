@@ -719,7 +719,13 @@ export class ClaudeSession extends EventEmitter {
     } catch (err) {
       this._log('error', `[claude] getPersonaContext failed: ${/** @type {Error} */ (err).message}`);
     }
-    const http = this._mcpTransport === 'http' && servers.every((sv) => typeof sv.startHttp === 'function');
+    // Never the loopback HTTP route in agent mode: Claude has Bash there, and the endpoint's
+    // bearer token sits in the CLI's environment, so one approved command could call the camera
+    // tools directly and skip their approval cards. Agent mode keeps the in-process route (and
+    // has no camera tools with a CLI that ignores it).
+    const agent = this._safeSettings().mode === 'agent';
+    if (this._mcpTransport === 'http' && agent && servers.length) this._warnOnce('mcp-http-agent', '[claude] agent mode: the camera tools are not served over loopback HTTP (Bash could reach them without the approval cards)');
+    const http = this._mcpTransport === 'http' && !agent && servers.every((sv) => typeof sv.startHttp === 'function');
     return { servers, names, allow: pick(perms.allow), deny: pick(perms.deny), context, transport: !servers.length ? 'none' : http ? 'http' : 'sdk' };
   }
 

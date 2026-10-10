@@ -20,7 +20,8 @@ export const MAX_BACKOFF_MS = 30000;
 export class StreamRelay extends EventEmitter {
   /**
    * @param {{ getEndpoint: () => ({ url: string, auth: string }|null), streamName?: string, log?: (level: string, msg: string) => void,
-   *   now?: () => number, request?: typeof http.get, idleMs?: number }} o
+   *   now?: () => number, request?: typeof http.get, idleMs?: number, redact?: (text: string) => string }} o
+   *   redact: applied to go2rtc's error text before it is logged or shown (it can name the source URL)
    */
   constructor(o) {
     super();
@@ -30,6 +31,7 @@ export class StreamRelay extends EventEmitter {
     this._now = o.now || (() => Date.now());
     this._get = o.request || http.get;
     this._idleMs = o.idleMs ?? IDLE_MS;
+    this._redact = o.redact || ((/** @type {string} */ t) => t);
     this._needed = false;
     /** @type {RelayState} */
     this._state = 'off';
@@ -174,9 +176,11 @@ export class StreamRelay extends EventEmitter {
     this._statsTimer.unref?.();
   }
 
-  /** @param {any} req @param {number} status @param {string} body */
-  _onHttpError(req, status, body) {
+  /** @param {any} req @param {number} status @param {string} rawBody */
+  _onHttpError(req, status, rawBody) {
     if (this._req !== req) return;
+    // go2rtc's text may name its source (the RTSP proxy URL with its token): never logged as is
+    const body = this._redact(String(rawBody)).replace(/\brtsp:\/\/\S+/gi, 'rtsp://…');
     if (AUTH_LINE.test(body)) {
       this._authFailed = true;
       this._close();

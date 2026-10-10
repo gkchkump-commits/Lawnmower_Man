@@ -196,7 +196,9 @@ export function parsePresets(resp) {
     const pt = path(p, 'PTZPosition/PanTilt');
     const x = toNumber(pt?.attrs.x);
     const y = toNumber(pt?.attrs.y);
-    return { token: p.attrs.token || '', name: textOf(p, 'Name') || '', position: x !== null && y !== null ? { x, y } : null };
+    // a camera-supplied name: one short line (it is shown, matched and read to Claude)
+    const name = String(textOf(p, 'Name') || '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim().slice(0, 40);
+    return { token: p.attrs.token || '', name, position: x !== null && y !== null ? { x, y } : null };
   }).filter((p) => p.token);
 }
 

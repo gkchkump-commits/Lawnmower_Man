@@ -90,19 +90,23 @@ describe('WS-Discovery', () => {
     expect(parseProbeMatches('<not xml')).toEqual([]);
   });
 
-  it('collects LAN cameras from replies, deduplicated (a loopback responder stands in for the multicast group)', async () => {
+  it('collects the cameras that answered, deduplicated; a reply naming another device is dropped (a loopback responder stands in for the multicast group)', async () => {
     const responder = dgram.createSocket('udp4');
     await new Promise((r) => responder.bind(0, '127.0.0.1', r));
     responder.on('message', (msg, rinfo) => {
       expect(String(msg)).toContain('NetworkVideoTransmitter');
-      for (const x of ['http://192.168.1.50:2020/onvif/device_service', 'http://192.168.1.50:2020/onvif/device_service', 'http://8.8.8.8:2020/onvif/device_service']) {
+      // its own address twice; a LAN address that is not the sender's (a spoofed reply could
+      // point the sign-in at any device); a public one
+      for (const x of ['http://127.0.0.1:2020/onvif/device_service', 'http://127.0.0.1:2020/onvif/device_service', 'http://192.168.1.50:2020/onvif/device_service', 'http://8.8.8.8:2020/onvif/device_service']) {
         responder.send(Buffer.from(MATCH(x)), rinfo.port, rinfo.address);
       }
     });
     try {
-      const found = await discover({ timeoutMs: 400, target: { address: '127.0.0.1', port: /** @type {any} */ (responder.address()).port } });
-      // 8.8.8.8 is not on the LAN, and the reply came from loopback (not allowed): dropped
-      expect(found).toEqual([{ host: '192.168.1.50', xaddr: 'http://192.168.1.50:2020/onvif/device_service', name: 'TP-IPC', hardware: 'C211', model: 'C211' }]);
+      const port = /** @type {any} */ (responder.address()).port;
+      const found = await discover({ timeoutMs: 400, allowLoopback: true, target: { address: '127.0.0.1', port } });
+      expect(found).toEqual([{ host: '127.0.0.1', xaddr: 'http://127.0.0.1:2020/onvif/device_service', name: 'TP-IPC', hardware: 'C211', model: 'C211' }]);
+      // without the simulator's loopback permission nothing on loopback counts
+      expect(await discover({ timeoutMs: 300, target: { address: '127.0.0.1', port } })).toEqual([]);
     } finally {
       responder.close();
     }

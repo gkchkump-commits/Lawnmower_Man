@@ -13,6 +13,37 @@ import crypto from 'node:crypto';
 
 export const CLIP_URL_BASE = 'app://lawnmower/__clips/';
 export const BASE_RE = /^(\d{4}-\d{2}-\d{2})\/(\d{6})-(person|motion|tamper)-([a-z0-9]{4})$/;
+/** The only files an event may name (the same rule as retention and the clip mount). */
+export const FILE_RE = /^\d{4}-\d{2}-\d{2}\/\d{6}-(person|motion|tamper)-([a-z0-9]{4})\.(mp4|mp4\.part|jpg|json)$/;
+const ID_RE = /^\d{8}-\d{6}-([a-z0-9]{4})$/;
+
+/**
+ * A file path from an event record, only if it is one of that event's own files in the clips
+ * folder (`day/HHMMSS-kind-id4.ext`, the same id4): a record on disk is data anyone who can write
+ * to the folder (often a synced Videos folder) may have edited, and deleting an event deletes the
+ * files it names.
+ * @param {unknown} rel @param {string} id @param {string} ext '.mp4' | '.jpg'
+ * @returns {string|null}
+ */
+export function ownFile(rel, id, ext) {
+  if (typeof rel !== 'string' || !rel.endsWith(ext)) return null;
+  const m = FILE_RE.exec(rel);
+  const own = ID_RE.exec(id);
+  return m && own && m[2] === own[1] ? rel : null;
+}
+
+/** Keep only the record's own clip/clips/snapshot paths. @param {any} r */
+function sanitizeFiles(r) {
+  const clip = ownFile(r.clip, r.id, '.mp4');
+  const clips = (Array.isArray(r.clips) ? r.clips : []).map((x) => ownFile(x, r.id, '.mp4')).filter(Boolean);
+  const snapshot = ownFile(r.snapshot, r.id, '.jpg');
+  if (clip) r.clip = clip;
+  else delete r.clip;
+  if (Array.isArray(r.clips) || clips.length) r.clips = clips;
+  if (snapshot) r.snapshot = snapshot;
+  else delete r.snapshot;
+  return r;
+}
 
 /** @param {number} n @param {number} [w] */
 const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -92,8 +123,10 @@ export function toSummary(r) {
   if (typeof r.maxScore === 'number') s.maxScore = Math.round(r.maxScore * 100) / 100;
   if (r.preset) s.preset = r.preset;
   if (r.ptz !== undefined) s.ptz = r.ptz;
-  if (r.clip) s.clipUrl = clipUrl(r.clip);
-  if (r.snapshot) s.snapshotUrl = clipUrl(r.snapshot);
+  const clip = ownFile(r.clip, r.id, '.mp4');
+  const snapshot = ownFile(r.snapshot, r.id, '.jpg');
+  if (clip) s.clipUrl = clipUrl(clip);
+  if (snapshot) s.snapshotUrl = clipUrl(snapshot);
   if (typeof r.durationSec === 'number') s.durationSec = r.durationSec;
   if (typeof r.bytes === 'number') s.bytes = r.bytes;
   if (r.described) s.described = r.described;
@@ -171,9 +204,9 @@ export class EventStore extends EventEmitter {
         if (!/^\d{6}-(person|motion|tamper)-[a-z0-9]{4}\.json$/.test(f)) continue;
         try {
           const r = JSON.parse(await this._fs.readFile(path.join(dir, day, f), 'utf8'));
-          if (r && r.v === 1 && typeof r.id === 'string') {
+          if (r && r.v === 1 && typeof r.id === 'string' && ID_RE.test(r.id) && ['person', 'motion', 'tamper'].includes(r.kind)) {
             r.base = `${day}/${f.slice(0, -5)}`;
-            into.set(r.id, r);
+            into.set(r.id, sanitizeFiles(r));
           }
         } catch (err) {
           this._log('debug', `[tapo] skipping ${day}/${f}: ${/** @type {Error} */ (err).message}`);
@@ -268,18 +301,34 @@ export class EventStore extends EventEmitter {
     return file;
   }
 
-  /** Absolute path of a relative clip path. @param {string} rel */
+  /** Absolute path of a relative clip path (only paths inside the clips folder). @param {string} rel */
   abs(rel) {
-    return path.join(this.dir, ...rel.split('/'));
+    const dir = path.resolve(this.dir);
+    const file = path.resolve(dir, ...rel.split('/'));
+    if (file !== dir && !file.startsWith(dir + path.sep)) throw new Error(`not in the clips folder: ${rel}`);
+    return file;
   }
 
-  /** Delete the event's files (record, clips, snapshot). @param {string} id */
+  /**
+   * Delete the event's files (record, clips, snapshot) — only its own files, whatever its record
+   * says (see ownFile). @param {string} id
+   */
   async remove(id) {
     await this._ensureScanned();
     const rec = this._index.get(id);
     if (!rec) return false;
-    const rels = new Set([`${rec.base}.json`, `${rec.base}.jpg`, `${rec.base}.mp4`, ...(rec.clips || []), ...(rec.clip ? [rec.clip] : []), ...(rec.snapshot ? [rec.snapshot] : [])]);
-    for (const rel of rels) await this._fs.rm(this.abs(rel), { force: true }).catch(() => {});
+    const own = [`${rec.base}.json`, `${rec.base}.jpg`, `${rec.base}.mp4`, `${rec.base}.mp4.part`].filter((x) => FILE_RE.test(x));
+    const named = [...(rec.clips || []), rec.clip].map((x) => ownFile(x, id, '.mp4')).concat(ownFile(rec.snapshot, id, '.jpg')).filter((x) => typeof x === 'string');
+    const rels = new Set([...own, ...named]);
+    for (const rel of rels) {
+      let file;
+      try {
+        file = this.abs(rel);
+      } catch {
+        continue;
+      }
+      await this._fs.rm(file, { force: true }).catch(() => {});
+    }
     this._index.delete(id);
     this._touch(id);
     this.emit('remove', id);

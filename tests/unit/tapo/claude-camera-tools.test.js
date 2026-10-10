@@ -79,7 +79,7 @@ async function setup(o = {}) {
   const logs = /** @type {string[]} */ ([]);
   const argvLog = path.join(dir, 'argv.jsonl');
   const mcpLog = path.join(dir, 'mcp.jsonl');
-  const claudeSettings = { cliPath: '', model: '', effort: '', mode: 'chat', workdir: path.join(dir, 'work'), persona: '', resumeLastSession: true, lastSessionId: '' };
+  const claudeSettings = { cliPath: '', model: '', effort: '', mode: o.mode || 'chat', workdir: path.join(dir, 'work'), persona: '', resumeLastSession: true, lastSessionId: '' };
   const session = new ClaudeSession({
     getSettings: () => claudeSettings,
     personaDir: path.join(dir, 'persona'),
@@ -181,6 +181,15 @@ describe('the home camera\'s tools in a Claude session (lane A server × lane C 
     // stopping the session stops the endpoint
     await h.session.stop();
     await expect(post(url, { Authorization: `Bearer ${token}` }, ping)).rejects.toThrow(/ECONNREFUSED/);
+  });
+
+  it('G2 is never used in agent mode (Bash could read the bearer token and skip the approval cards)', async () => {
+    const h = await setup({ env: { FAKE_CLAUDE_IGNORE_SDK_MCP: '1' }, mode: 'agent' });
+    await h.ask('hello');
+    await h.ask('hello again');
+    for (const r of h.runs()) expect(r.argv.filter((a) => /lawnmower-camera\.json$/.test(a))).toEqual([]);
+    expect(h.mcp().filter((x) => x.via === 'http')).toEqual([]);
+    expect(h.logs.some((l) => /agent mode: the camera tools are not served over loopback HTTP/.test(l))).toBe(true);
   });
 
   it('no camera tools while the camera is turned off', async () => {

@@ -17,6 +17,36 @@ const AMOUNTS = ['small', 'medium', 'large'];
 /** @param {string} tool */
 export const qualifiedToolName = (tool) => `mcp__${SERVER_NAME}__${tool}`;
 
+/** What Claude hears about the connection: fixed sentences, never the status detail (it names the address). */
+export const CONNECTION_TEXT = Object.freeze({
+  online: 'online',
+  off: 'turned off in the app',
+  connecting: 'connecting',
+  'not-configured': 'not set up yet',
+  unreachable: 'not reachable (it may be switched off or off the network)',
+  'auth-failed': 'not connected: the camera refused the sign-in (the Camera Account in the setup)',
+  error: 'not connected (the camera window says why)',
+});
+
+/** A camera-supplied name for Claude: one short line. @param {unknown} v */
+export const cleanName = (v) => String(v ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim().slice(0, 40);
+
+/**
+ * No addresses in anything Claude reads (contract §8.12): the configured host, IP literals and
+ * host:port. @param {string} text @param {string} [host]
+ */
+export function scrubAddresses(text, host = '') {
+  let t = String(text);
+  const h = String(host || '').trim();
+  if (h) t = t.split(h).join('the camera');
+  return t
+    .replace(/\[[0-9a-f:.]+\](?::\d+)?/gi, 'the camera')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, 'the camera')
+    // IPv6 literals: compressed (with "::"; times like 14:03:12 never have it) or all 8 groups
+    .replace(/(?:\b[0-9a-f]{1,4})?(?::[0-9a-f]{0,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?(?:%\w+)?/gi, (m) => (/[0-9a-f]/i.test(m) && m.length > 3 ? 'the camera' : m))
+    .replace(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){7}\b/gi, 'the camera');
+}
+
 const META = Object.freeze({ 'anthropic/alwaysLoad': true });
 
 /** The tool list (flat input schemas, no extra properties). */
@@ -48,10 +78,10 @@ export function toolDefinitions() {
     },
     {
       name: 'camera_snapshot',
-      description: 'A picture from the home camera right now (JPEG, at most 640 px). Optionally go to a saved position first. Only use it when the user asks you to look or check; describe what you see briefly and never guess who a person is.',
+      description: 'A picture from the home camera right now (JPEG, at most 640 px). Only use it when the user asks you to look or check; describe what you see briefly and never guess who a person is. To look somewhere else, turn the camera with camera_look first (the user may have to approve that).',
       inputSchema: {
         type: 'object',
-        properties: { preset: { type: 'string', maxLength: 64, description: 'A saved position to look at first.' } },
+        properties: { preset: { type: 'string', maxLength: 64, description: 'A saved position to look at first (only when the user lets Claude move the camera without asking, and it is not armed).' } },
         additionalProperties: false,
       },
       annotations: ann(true, 'Look through the camera'),
@@ -147,10 +177,11 @@ export function createCameraMcp(o) {
   const byName = new Map(tools.map((t) => [t.name, t]));
   const name = () => cap(o.getSettings().tapo?.name || 'camera');
 
-  /** @param {string} text */
-  const text = (text) => ({ content: [{ type: 'text', text }] });
+  const host = () => String(o.getSettings().tapo?.host || '');
+  /** @param {string} t */
+  const text = (t) => ({ content: [{ type: 'text', text: scrubAddresses(t, host()) }] });
   /** @param {string} message */
-  const fail = (message) => ({ content: [{ type: 'text', text: message }], isError: true });
+  const fail = (message) => ({ content: [{ type: 'text', text: scrubAddresses(String(message).slice(0, 300), host()) }], isError: true });
 
   /** @type {Record<string, (args: any) => Promise<any>>} */
   const impl = {
@@ -158,7 +189,8 @@ export function createCameraMcp(o) {
       const st = o.service.status();
       const parts = [];
       const online = st.connection === 'online';
-      parts.push(`${name()}: ${online ? 'online' : st.connection === 'off' ? 'turned off in the app' : `not connected (${st.detail || st.connection})`}.`);
+      parts.push(`${name()}: ${/** @type {Record<string, string>} */ (CONNECTION_TEXT)[st.connection] || 'not connected'}.`);
+      if (online && st.stream?.state && !['live', 'off', 'starting'].includes(st.stream.state)) parts.push('Its video is not coming through right now.');
       const sec = st.security || {};
       parts.push(sec.armed ? (sec.arming ? `Arming (armed in ${Math.max(0, Math.round(((sec.armingEndsAt || now()) - now()) / 1000))} s).` : 'Armed.') : 'Disarmed.');
       if (st.ptz?.privacySuspected) parts.push('The camera seems to be in privacy mode.');
@@ -166,7 +198,7 @@ export function createCameraMcp(o) {
         const p = st.ptz.position;
         parts.push(`Pan/tilt works${p ? ` (position pan ${p.x.toFixed(2)}, tilt ${p.y.toFixed(2)})` : ''}.`);
         const presets = await o.service.presets({ refresh: false }).catch(() => []);
-        parts.push(presets.length ? `Saved positions: ${presets.map((x) => x.name).join(', ')}.` : 'No saved positions.');
+        parts.push(presets.length ? `Saved positions: ${presets.slice(0, 16).map((x) => cleanName(x.name)).join(', ')}.` : 'No saved positions.');
       } else {
         parts.push('Pan/tilt is not available.');
       }
@@ -194,7 +226,7 @@ export function createCameraMcp(o) {
       const r = await o.service.ptz(cmd);
       if (!r.ok) return fail(r.error || 'The camera could not move.');
       await o.service.waitPtzIdle(10_000);
-      if (args.preset) done = `Moved to ${r.preset || args.preset}.`;
+      if (args.preset) done = `Moved to ${cleanName(r.preset || args.preset)}.`;
       return text(r.moved === false && args.direction ? 'The camera is already turning; try again in a moment.' : /** @type {string} */ (done));
     },
 
@@ -203,6 +235,13 @@ export function createCameraMcp(o) {
       if (s.security?.claudeSee === 'never') return fail('The user has not allowed Claude to see the camera (Settings › Home camera).');
       if (args.preset) {
         if (s.security?.claudeMove === 'never') return fail('The user has not allowed Claude to move the camera. Ask for a picture without a position.');
+        // A pre-approved snapshot must not turn the camera on its own: turning needs the user's
+        // approval (camera_look shows the card) unless they let Claude move it without asking —
+        // and never without a card while the camera is armed (it must keep watching its view).
+        const armed = !!o.service.status()?.security?.armed;
+        if (s.security?.claudeMove !== 'always' || armed) {
+          return fail('Turning the camera needs the user\'s approval: turn it with camera_look first (preset), then ask for the picture without a position.');
+        }
         const r = await o.service.ptz({ op: 'preset-name', name: args.preset });
         if (!r.ok) return fail(r.error || 'The camera could not move there.');
         await o.service.waitPtzIdle(10_000);

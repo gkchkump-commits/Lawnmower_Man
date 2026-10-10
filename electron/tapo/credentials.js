@@ -15,12 +15,16 @@ import path from 'node:path';
 
 export const CREDENTIALS_FILE = 'credentials.json';
 
+/** Shorter passwords are refused: Tapo's own minimum is 6, and logs redact secrets of ≥ 3 characters. */
+export const MIN_PASSWORD_LENGTH = 4;
+
 /**
- * 1..128 characters, no NUL/CR/LF (Tapo itself wants 6–32; that is only a hint, not enforced).
+ * 4..128 characters, no NUL/CR/LF (Tapo itself wants 6–32; above 4 that is only a hint).
  * @param {unknown} pw @returns {string}
  */
 export function validatePassword(pw) {
   if (typeof pw !== 'string' || pw.length === 0) throw new Error('Enter the Camera Account password.');
+  if (pw.length < MIN_PASSWORD_LENGTH) throw new Error('That password is too short: Camera Account passwords have at least 6 characters.');
   if (pw.length > 128) throw new Error('That password is too long (at most 128 characters).');
   if (/[\0\r\n]/.test(pw)) throw new Error('The password cannot contain line breaks.');
   return pw;

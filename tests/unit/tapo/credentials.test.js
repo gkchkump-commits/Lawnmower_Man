@@ -107,10 +107,13 @@ describe('CredentialStore', () => {
   });
 
   it('validates passwords', () => {
-    expect(validatePassword('x')).toBe('x');
+    expect(validatePassword('abcd')).toBe('abcd');
+    // shorter than Tapo allows (6), and too short to redact in logs safely
+    expect(() => validatePassword('x')).toThrow(/too short/);
+    expect(() => validatePassword('abc')).toThrow(/too short/);
     expect(() => validatePassword('')).toThrow(/Enter/);
-    expect(() => validatePassword('a\nb')).toThrow(/line breaks/);
-    expect(() => validatePassword('a\0b')).toThrow();
+    expect(() => validatePassword('abc\ndef')).toThrow(/line breaks/);
+    expect(() => validatePassword('abc\0def')).toThrow();
     expect(() => validatePassword('x'.repeat(129))).toThrow(/too long/);
     expect(() => validatePassword(42)).toThrow();
     expect(passwordHint('short')).toMatch(/6 to 32/);

@@ -92,6 +92,8 @@ export function resolveSafePath(root, pathname, P = path) {
  */
 export function parseRange(header, size) {
   if (!header) return null;
+  // several ranges (bytes=0-1,5-6): a server may ignore Range and send the whole file (RFC 9110)
+  if (header.includes(',')) return null;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!m || (m[1] === '' && m[2] === '')) return header.trim().startsWith('bytes=') ? 'unsatisfiable' : null;
   let start;
@@ -150,6 +152,12 @@ export function createAppProtocolHandler(o) {
     try {
       st = await fs.lstat(file);
       if (!st.isFile()) return plain(404, 'Not found');
+      // a symlinked folder on the way (lstat only sees the last part) must not lead outside
+      const [realRoot, realFile] = await Promise.all([fs.realpath(path.resolve(root)), fs.realpath(file)]);
+      if (!realFile.startsWith(realRoot + path.sep)) {
+        log('warn', `[app://] blocked ${m.prefix}${encodedRel.slice(0, 200)} (outside the folder)`);
+        return plain(403, 'Forbidden');
+      }
     } catch {
       return plain(404, 'Not found');
     }

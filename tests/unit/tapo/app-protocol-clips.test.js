@@ -19,6 +19,10 @@ describe('app:// clip mount with Range', () => {
     fs.writeFileSync(path.join(clips, 'notes.mp4'), 'x');
     fs.writeFileSync(path.join(os.tmpdir(), 'lm-outside.mp4'), 'outside');
     fs.symlinkSync(path.join(os.tmpdir(), 'lm-outside.mp4'), path.join(clips, '2026-10-10', '140313-person-c3d4.mp4'));
+    // a day folder that is a link to a folder elsewhere
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-elsewhere-'));
+    fs.writeFileSync(path.join(elsewhere, '120000-person-zz99.mp4'), 'VIA-DIR-LINK');
+    fs.symlinkSync(elsewhere, path.join(clips, '2026-10-11'));
     const handler = createAppProtocolHandler({ root: dist, host: 'lawnmower', csp: 'x', mounts: [{ prefix: '/__clips/', getRoot: () => clips, pattern: PATTERN, range: true }] });
     return { handler, data };
   }
@@ -40,6 +44,9 @@ describe('app:// clip mount with Range', () => {
     expect(tail.headers.get('content-range')).toBe('bytes 990-999/1000');
     const open = await get(handler, '/__clips/2026-10-10/140312-person-a1b2.mp4', { Range: 'bytes=900-' });
     expect((await open.arrayBuffer()).byteLength).toBe(100);
+    const multi = await get(handler, '/__clips/2026-10-10/140312-person-a1b2.mp4', { Range: 'bytes=0-1,5-6' });
+    expect(multi.status).toBe(200);
+    expect((await multi.arrayBuffer()).byteLength).toBe(1000);
     const bad = await get(handler, '/__clips/2026-10-10/140312-person-a1b2.mp4', { Range: 'bytes=5000-6000' });
     expect(bad.status).toBe(416);
     expect(bad.headers.get('content-range')).toBe('bytes */1000');
@@ -62,6 +69,7 @@ describe('app:// clip mount with Range', () => {
       expect(r.status, p).toBe(403);
     }
     expect((await get(handler, '/__clips/2026-10-10/140313-person-c3d4.mp4')).status).toBe(404); // a symlink
+    expect((await get(handler, '/__clips/2026-10-11/120000-person-zz99.mp4')).status).toBe(403); // through a linked folder
     expect((await get(handler, '/__clips/2026-10-10/140314-person-zzzz.mp4')).status).toBe(404);
     expect((await get(handler, '/__clips/2026-10-10/140312-person-a1b2.mp4', {}, 'POST')).status).toBe(405);
     expect((await get(handler, '/index.html')).status).toBe(200); // the app itself still works
@@ -73,7 +81,7 @@ describe('app:// clip mount with Range', () => {
     expect(parseRange('bytes=5-100', 10)).toEqual([5, 9]);
     expect(parseRange('bytes=-3', 10)).toEqual([7, 9]);
     expect(parseRange('bytes=10-', 10)).toBe('unsatisfiable');
-    expect(parseRange('bytes=0-1,4-5', 10)).toBe('unsatisfiable');
+    expect(parseRange('bytes=0-1,4-5', 10)).toBeNull(); // several ranges: the whole file (RFC 9110 lets a server ignore Range)
     expect(parseRange('items=0-1', 10)).toBeNull();
     expect(mimeTypeFor('a/efficientdet_lite0_int8.tflite')).toBe('application/octet-stream');
     expect(buildCsp()).toContain("img-src 'self' data: blob:;");

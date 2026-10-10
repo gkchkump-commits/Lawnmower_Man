@@ -21,6 +21,7 @@ import { PtzController, noCaps, PRIVACY_HINT } from './ptz.js';
 import { CalibrationWizard } from './calibration.js';
 import { PullPointMonitor } from './events.js';
 import { Go2rtcSidecar } from './go2rtc.js';
+import { RtspAuthProxy } from './rtsp-auth-proxy.js';
 import { StreamRelay } from './stream-relay.js';
 import { ClipRecorder } from './recorder.js';
 import { EventStore, newEventId, eventBase, toSummary } from './event-store.js';
@@ -31,7 +32,7 @@ import { createCameraMcp, qualifiedToolName, SERVER_NAME } from './camera-mcp.js
 import { createMcpHttpServer } from './mcp-http.js';
 import { connectionTest, HINTS, tcpCheck } from './connection-test.js';
 import { discover } from './discovery.js';
-import { validatePassword } from './credentials.js';
+import { redact, validatePassword } from './credentials.js';
 import { validateWorkerMessage } from './validate.js';
 
 export { HINTS, tcpCheck };
@@ -52,6 +53,7 @@ const iso = (at) => new Date(at).toISOString();
  * @property {string} [go2rtcBinary]
  * @property {(o: any) => any} [createSidecar]
  * @property {(o: any) => any} [createRelay]
+ * @property {(o: any) => any} [createRtspProxy]
  * @property {typeof import('./rtsp-probe.js').rtspDescribe} [rtspDescribe]
  * @property {typeof discover} [discover]
  * @property {any} [MessageChannelMain]
@@ -115,14 +117,21 @@ export class TapoService extends EventEmitter {
     this._warnings = [];
     this._storage = { bytes: 0, clips: 0 };
 
-    // video
+    // video: go2rtc pulls the camera's RTSP through main's auth proxy (it never has the password)
+    /** @type {Promise<void>} */
+    this._videoChain = Promise.resolve();
+    this.rtspProxy = (this._deps.createRtspProxy || ((/** @type {any} */ x) => new RtspAuthProxy(x)))({ log: this._log });
+    this.rtspProxy.on('auth-failed', () => this._onVideoAuthFailed());
+    this.rtspProxy.on('insecure', () => this._onVideoInsecure());
     this.sidecar = (this._deps.createSidecar || ((/** @type {any} */ x) => new Go2rtcSidecar(x)))({
       binary: this._deps.go2rtcBinary || '', configDir: this._paths.configDir, log: this._log, env: this._env,
     });
     this.sidecar.on('status', () => this._statusSoon());
     this.sidecar.on('auth-failed', () => this._onVideoAuthFailed());
     this.sidecar.on('restarted', () => this.relay.kick());
-    this.relay = (this._deps.createRelay || ((/** @type {any} */ x) => new StreamRelay(x)))({ getEndpoint: () => this.sidecar.endpoint(), log: this._log, now: this._now });
+    this.relay = (this._deps.createRelay || ((/** @type {any} */ x) => new StreamRelay(x)))({
+      getEndpoint: () => this.sidecar.endpoint(), log: this._log, now: this._now, redact: (/** @type {string} */ t) => redact(t, [this.rtspProxy.token]),
+    });
     this.relay.on('state', (/** @type {string} */ s) => this._onRelayState(s));
     this.relay.on('auth-failed', () => this._onVideoAuthFailed());
     this.relay.on('init', (/** @type {any} */ init) => {
@@ -248,7 +257,7 @@ export class TapoService extends EventEmitter {
       this._mcpHttp.stop(),
     ]).then(() => {
       this.relay.stop();
-      return this.sidecar.stop();
+      return this._stopVideo();
     });
     await Promise.race([work, new Promise((r) => setTimeout(r, 4000))]);
     this.client?.close();
@@ -419,9 +428,35 @@ export class TapoService extends EventEmitter {
     this._setConn('auth-failed', `The camera refused the video sign-in. ${HINTS.auth}`);
   }
 
-  /** go2rtc off (and with it the camera's RTSP session). */
+  /**
+   * go2rtc off, and with it the camera's RTSP session: the proxy ends whatever session is still
+   * open with TEARDOWN (≤ 800 ms) before go2rtc is stopped.
+   * @returns {Promise<void>}
+   */
   _stopVideo() {
-    this.sidecar.stop().catch(() => {});
+    return this._videoStep(async () => {
+      await this.rtspProxy.stop().catch(() => {});
+      await this.sidecar.stop().catch(() => {});
+    });
+  }
+
+  /**
+   * Starting and stopping the video take turns (a stop that is still sending its TEARDOWN must
+   * not end the video started after it). @template T @param {() => Promise<T>} fn @returns {Promise<T>}
+   */
+  _videoStep(fn) {
+    const run = this._videoChain.then(fn, fn);
+    this._videoChain = run.then(() => {}, () => {});
+    return run;
+  }
+
+  /** The camera's RTSP server asked for an unencrypted sign-in: no video until Retry. */
+  _onVideoInsecure() {
+    if (this._videoAuthFailed) return;
+    this._videoAuthFailed = true;
+    this.relay.stop();
+    this._stopVideo();
+    this._setConn('error', 'The camera asked for an unencrypted video sign-in, so the password was not sent. Check that the address belongs to your camera (something on the network may be answering in its place), then press Retry.');
   }
 
   /** (Re)start go2rtc with the current settings — only after ONVIF accepted the sign-in. */
@@ -430,8 +465,12 @@ export class TapoService extends EventEmitter {
     const t = this._tapo();
     const password = await this._cred.getPassword({ host: t.host });
     if (!password) return;
+    const ip = this._ip;
     try {
-      await this.sidecar.start({ host: this._ip, rtspPort: t.rtspPort, stream: t.stream, camUser: t.username, camPass: password });
+      await this._videoStep(async () => {
+        const src = await this.rtspProxy.start({ ip, port: t.rtspPort, username: t.username, password });
+        await this.sidecar.start({ sourcePort: src.port, sourceToken: src.token, stream: t.stream });
+      });
     } catch (err) {
       this._log('warn', `[tapo] video component: ${/** @type {Error} */ (err).message}`);
       this._statusSoon();
@@ -1060,7 +1099,8 @@ export class TapoService extends EventEmitter {
     const deny = [];
     if (s.claudeSee === 'always') allow.push(qualifiedToolName('camera_snapshot'));
     if (s.claudeSee === 'never') deny.push(qualifiedToolName('camera_snapshot'));
-    if (s.claudeMove === 'always') allow.push(qualifiedToolName('camera_look'));
+    // turning an ARMED camera away from its view always shows a card (it would stop watching it)
+    if (s.claudeMove === 'always' && !this.engine.state.armed) allow.push(qualifiedToolName('camera_look'));
     if (s.claudeMove === 'never') deny.push(qualifiedToolName('camera_look'));
     return { allow, deny };
   }

@@ -11,8 +11,9 @@ import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
 import { ROOT, appModules, sleep, until } from './helpers.js';
 
-const lane = await appModules(['electron/tapo/go2rtc.js', 'electron/tapo/stream-relay.js']);
+const lane = await appModules(['electron/tapo/go2rtc.js', 'electron/tapo/rtsp-auth-proxy.js', 'electron/tapo/stream-relay.js']);
 const g2r = lane.mods['electron/tapo/go2rtc.js'];
+const proxyMod = lane.mods['electron/tapo/rtsp-auth-proxy.js'];
 const relayMod = lane.mods['electron/tapo/stream-relay.js'];
 const binary = g2r.go2rtcBinaryPath({ isPackaged: false, resourcesPath: '', appRoot: ROOT, platform: process.platform, arch: process.arch, env: process.env });
 const haveBinary = !!binary && fs.existsSync(binary);
@@ -23,6 +24,8 @@ describe.skipIf(!haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, 
   let sim;
   /** @type {any} */
   let sidecar;
+  /** @type {any} */
+  let proxy;
   /** @type {any} */
   let relay;
   /** @type {string} */
@@ -35,7 +38,10 @@ describe.skipIf(!haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, 
     sim = await startSim();
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-relay-sim-'));
     sidecar = new g2r.Go2rtcSidecar({ binary, configDir: dir, log: () => {} });
-    const ep = await sidecar.start({ host: '127.0.0.1', rtspPort: sim.rtspPort, stream: 'stream1', camUser: 'camacct', camPass: 'se&cret' });
+    // go2rtc reaches the camera through main's RTSP auth proxy (it never has the password)
+    proxy = new proxyMod.RtspAuthProxy({ log: () => {} });
+    const src = await proxy.start({ ip: '127.0.0.1', port: sim.rtspPort, username: 'camacct', password: 'se&cret' });
+    const ep = await sidecar.start({ sourcePort: src.port, sourceToken: src.token, stream: 'stream1' });
     expect(ep.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     relay = new relayMod.StreamRelay({ getEndpoint: () => sidecar.endpoint?.() ?? ep, log: () => {} });
     relay.on('init', (/** @type {any} */ i) => inits.push(i));
@@ -44,6 +50,7 @@ describe.skipIf(!haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, 
   afterAll(async () => {
     relay?.setNeeded(false, 'test end');
     relay?.stop?.();
+    await proxy?.stop();
     await sidecar?.stop();
     await sim?.close();
     if (dir) fs.rmSync(dir, { recursive: true, force: true });

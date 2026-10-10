@@ -8,6 +8,7 @@
 
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
+import net from 'node:net';
 
 import { isLanIp } from './host.js';
 import { findAll, parseXml, textOf } from './xml.js';
@@ -58,6 +59,9 @@ export function parseProbeMatches(text) {
   }).filter((m) => m.xaddrs.length > 0);
 }
 
+/** At most this many cameras are listed. */
+export const MAX_FOUND = 16;
+
 /**
  * @param {{ timeoutMs?: number, createSocket?: typeof dgram.createSocket, target?: { address: string, port: number }, allowLoopback?: boolean,
  *   log?: (level: string, msg: string) => void }} [o]
@@ -97,9 +101,11 @@ export function discover(o = {}) {
             continue;
           }
           const host = u.hostname.replace(/^\[|\]$/g, '');
-          // the reported address, else the one the reply came from; LAN only
-          const ip = isLanIp(host, { allowLoopback: o.allowLoopback }) ? host : rinfo.address;
-          if (!isLanIp(ip, { allowLoopback: o.allowLoopback }) || found.has(ip)) continue;
+          // Only the device that answered: a reply naming another address (any LAN host can
+          // send one, or spoof it) would point the sign-in at a device that is not the camera.
+          // A name in the XAddr (not an IP) stands for the sender.
+          const ip = net.isIP(host) ? host : rinfo.address;
+          if (ip !== rinfo.address || !isLanIp(ip, { allowLoopback: o.allowLoopback }) || found.has(ip) || found.size >= MAX_FOUND) continue;
           found.set(ip, { host: ip, xaddr: x.slice(0, 200), ...(m.name ? { name: m.name } : {}), ...(m.hardware ? { hardware: m.hardware, model: m.hardware } : {}) });
         }
       }

@@ -5,9 +5,11 @@
 //  * modules api, mp4, rtsp only (no exec/echo/expr/ffmpeg/webrtc/…); its RTSP server is off;
 //  * the API listens on 127.0.0.1:<random> with random Basic credentials and local_auth (loopback
 //    requests must authenticate too); allow_paths limits it to /api/streams and /api/stream.mp4;
-//  * no secrets in the config file: go2rtc expands ${LM_*} from its environment; the camera
-//    user/password are percent-encoded (RTSP userinfo, and JSON-safe). go2rtc masks substituted
-//    values in its API output; its log lines go through redact() anyway.
+//  * go2rtc never gets the Camera Account: its source is main's RTSP auth proxy on loopback
+//    (rtsp-auth-proxy.js), which signs in to the camera itself (Digest only, never Basic). The
+//    proxy's secret path token comes from the environment (${LM_SRC_TOKEN}), so the config file
+//    holds no secret; go2rtc masks substituted values in its API output and its log lines go
+//    through redact() anyway.
 // The RTSP session to the camera only exists while main reads /api/stream.mp4 (stream-relay.js):
 // go2rtc tears it down when the last consumer leaves, freeing one of the camera's two streams.
 
@@ -47,12 +49,13 @@ export function go2rtcBinaryPath(o) {
 
 /**
  * go2rtc's config: JSON (valid YAML, so nothing needs YAML escaping). No secrets: ${LM_*} come
- * from the environment. `host` is the already validated, resolved camera IP.
- * @param {{ host: string, rtspPort: number, stream: 'stream1'|'stream2' }} o
+ * from the environment. The source is main's RTSP auth proxy on loopback (`sourcePort`).
+ * @param {{ sourcePort: number, stream: 'stream1'|'stream2' }} o
  */
 export function buildGo2rtcConfig(o) {
   const stream = o.stream === 'stream2' ? 'stream2' : 'stream1';
-  const port = Math.max(1, Math.min(65535, Math.round(Number(o.rtspPort) || 554)));
+  const port = Math.max(1, Math.min(65535, Math.round(Number(o.sourcePort) || 0)));
+  if (!port) throw new Error('go2rtc needs the RTSP proxy port');
   const config = {
     app: { modules: ['api', 'mp4', 'rtsp'] },
     api: {
@@ -64,23 +67,23 @@ export function buildGo2rtcConfig(o) {
     },
     rtsp: { listen: '' },
     log: { format: 'text', level: 'info', output: 'stdout' },
-    streams: { [GO2RTC_STREAM]: `rtsp://\${LM_CAM_USER}:\${LM_CAM_PASS}@${hostPort(o.host, port)}/${stream}` },
+    streams: { [GO2RTC_STREAM]: `rtsp://${hostPort('127.0.0.1', port)}/\${LM_SRC_TOKEN}/${stream}` },
   };
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
 /**
- * The child's extra environment.
- * @param {{ port: number, apiUser: string, apiPass: string, camUser: string, camPass: string }} o
+ * The child's extra environment (no camera credentials: go2rtc never has them).
+ * @param {{ port: number, apiUser: string, apiPass: string, sourceToken: string }} o
  * @returns {Record<string, string>}
  */
 export function go2rtcEnv(o) {
+  if (!/^[A-Za-z0-9]{8,64}$/.test(String(o.sourceToken || ''))) throw new Error('go2rtc needs the RTSP proxy token');
   return {
     LM_G2R_PORT: String(o.port),
     LM_G2R_USER: o.apiUser,
     LM_G2R_PASS: o.apiPass,
-    LM_CAM_USER: encodeURIComponent(o.camUser),
-    LM_CAM_PASS: encodeURIComponent(o.camPass),
+    LM_SRC_TOKEN: o.sourceToken,
   };
 }
 
@@ -105,7 +108,7 @@ export function loopbackGet(url, auth, timeoutMs = 2000) {
 
 /**
  * @typedef {{ state: 'stopped'|'starting'|'ready'|'error'|'missing', detail?: string, url?: string, port?: number }} Go2rtcInfo
- * @typedef {{ host: string, rtspPort: number, stream: 'stream1'|'stream2', camUser: string, camPass: string }} Go2rtcParams
+ * @typedef {{ sourcePort: number, sourceToken: string, stream: 'stream1'|'stream2' }} Go2rtcParams  the RTSP proxy (rtsp-auth-proxy.js)
  */
 
 export class Go2rtcSidecar extends EventEmitter {
@@ -186,7 +189,7 @@ export class Go2rtcSidecar extends EventEmitter {
     this._stopped = false;
     this._authFailed = false;
     this._params = { ...params };
-    this._secrets = [params.camPass, encodeURIComponent(params.camPass)];
+    this._secrets = [params.sourceToken];
     await this._kill();
     return this._launch();
   }
@@ -206,11 +209,11 @@ export class Go2rtcSidecar extends EventEmitter {
     const port = await findFreePort();
     const apiUser = randomBytes(6).toString('hex');
     const apiPass = randomBytes(12).toString('hex');
-    this._secrets = [p.camPass, encodeURIComponent(p.camPass), apiPass];
+    this._secrets = [p.sourceToken, apiPass];
     const configFile = path.join(this._configDir, 'go2rtc.yaml');
     this._fs.mkdirSync(this._configDir, { recursive: true });
     this._fs.writeFileSync(configFile, buildGo2rtcConfig(p), { mode: 0o600 });
-    const env = cleanChildEnv(this._env, go2rtcEnv({ port, apiUser, apiPass, camUser: p.camUser, camPass: p.camPass }));
+    const env = cleanChildEnv(this._env, go2rtcEnv({ port, apiUser, apiPass, sourceToken: p.sourceToken }));
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {

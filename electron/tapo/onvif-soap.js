@@ -257,7 +257,8 @@ export function parseSoapResponse(res) {
   if (fault) {
     const { codes, text } = parseFault(fault);
     const auth = res.status === 401 || codes.some((c) => AUTH_RE.test(c)) || AUTH_RE.test(text);
-    const what = text || codes[codes.length - 1] || 'fault';
+    // the camera's own words, bounded: they can reach Claude (camera_look errors) and the UI
+    const what = String(text || codes[codes.length - 1] || 'fault').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim().slice(0, 120);
     throw new OnvifError(auth ? 'auth' : 'fault', auth ? `The camera refused the sign-in (${what}).` : `The camera reported an error: ${what}`, { status: res.status, codes, text });
   }
   if (res.status === 401) throw new OnvifError('auth', 'The camera refused the sign-in.', { status: 401 });

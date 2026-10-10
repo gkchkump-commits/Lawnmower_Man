@@ -87,6 +87,35 @@ describe('EventStore', () => {
     expect(s.get('20261010-160000-cccc')).toMatchObject({ kind: 'tamper', bytes: 10, base: '2026-10-10/160000-tamper-cccc' });
   });
 
+  it('remove() deletes only the event\'s own files, whatever its record names (a crafted .json)', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-es-trav-'));
+    const clips = path.join(base, 'clips');
+    const victim = path.join(base, 'victim.txt');
+    fs.writeFileSync(victim, 'keep me');
+    fs.mkdirSync(path.join(clips, '2026-10-10'), { recursive: true });
+    const other = path.join(clips, '2026-10-10', '090000-person-zzzz.mp4'); // another event's clip
+    fs.writeFileSync(other, 'other');
+    const own = path.join(clips, '2026-10-10', '140320-person-a1b2.mp4'); // its own follow-up clip
+    fs.writeFileSync(own, 'mine');
+    const rec = { v: 1, id: '20261010-140312-a1b2', kind: 'person', startedAt: '2026-10-10T14:03:12.000Z', sources: [],
+      clip: '../victim.txt', clips: ['../victim.txt', '..\\victim.txt', '2026-10-10/090000-person-zzzz.mp4', '2026-10-10/140320-person-a1b2.mp4'], snapshot: '../../victim.txt' };
+    fs.writeFileSync(path.join(clips, '2026-10-10', '140312-person-a1b2.json'), JSON.stringify(rec));
+    const store = new EventStore({ getDir: () => clips });
+    await store.scan();
+    // the scan drops what is not the event's own
+    expect(store.get(rec.id)).toMatchObject({ clips: ['2026-10-10/140320-person-a1b2.mp4'] });
+    expect(store.get(rec.id).clip).toBeUndefined();
+    expect(store.get(rec.id).snapshot).toBeUndefined();
+    // even a record changed in memory cannot point remove() outside
+    Object.assign(store.get(rec.id), { clip: '../victim.txt', snapshot: '../victim.txt', clips: ['../victim.txt'] });
+    expect(toSummary(store.get(rec.id)).clipUrl).toBeUndefined();
+    expect(await store.remove(rec.id)).toBe(true);
+    expect(fs.existsSync(victim)).toBe(true);
+    expect(fs.existsSync(other)).toBe(true);
+    expect(fs.existsSync(path.join(clips, '2026-10-10', '140312-person-a1b2.json'))).toBe(false);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
   it('toSummary has no paths, only app:// URLs', () => {
     const sum = toSummary({ v: 1, id: '20261010-140000-aaaa', camera: 'c', kind: 'tamper', startedAt: '2026-10-10T12:00:00.000Z', sources: ['camera-tamper'], unconfirmed: true, notified: false, announced: false, described: '', acknowledged: false, base: '2026-10-10/140000-tamper-aaaa', clip: '2026-10-10/140000-tamper-aaaa.mp4', maxScore: 0.8312 });
     expect(sum).toEqual({ id: '20261010-140000-aaaa', kind: 'tamper', startedAt: Date.parse('2026-10-10T12:00:00.000Z'), sources: ['camera-tamper'], notified: false, announced: false, acknowledged: false, unconfirmed: true, maxScore: 0.83, clipUrl: 'app://lawnmower/__clips/2026-10-10/140000-tamper-aaaa.mp4' });

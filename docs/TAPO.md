@@ -390,6 +390,8 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
   picture the other way by 0.5×–2× as much); if not, the axis is measured once more, then the user
   is asked, while the camera is turned, with the reason (too plain, lagging, disagreeing). The
   min-step probe takes a step only when it went the way the pan did and its way back confirms it.
+  (The worker reads decoded frames in a CPU format with `VideoFrame.copyTo()`, not a canvas
+  readback, which under software GL once blocked it for a minute: `frame-pixels.js`.)
 * **Video:** the bundled **go2rtc 1.9.14** (`scripts/fetch-go2rtc.mjs`, SHA-256 pinned) pulls one
   RTSP session only while the stream is needed (window visible, armed, calibrating, recording or
   a snapshot) and serves fragmented MP4 on loopback behind random Basic credentials; modules

@@ -51,7 +51,7 @@ const DET_PER_SEC = 10;
  * a Stop button meanwhile.
  */
 export const SHIFT_SLACK_MS = 25_000;
-/** How long main waits for the worker's still reference picture before moving anyway. */
+/** How long main waits for the worker's reference picture (none by then: the wizard measures nothing, it asks once more, then the user). */
 export const SHIFT_REF_TIMEOUT_MS = 30_000;
 /**
  * Video chunks the worker may be behind before main stops sending (≈ 1.6 s at 15 fps). A PC that

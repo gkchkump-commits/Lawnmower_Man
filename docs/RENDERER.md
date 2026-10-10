@@ -105,6 +105,10 @@ vowels 1.39x → 1.72x; stressed vs unstressed 1.45x → 1.61x. Before, the roun
 most (ɔ / o 58-61 px, ahead of the open vowels' 50 px); now ɑ 52, æ 45, ɔ / o 40, ɪ / i 24-26,
 ʊ / u 21-24 px.
 
+![The relief head's lip opening over "Before we move on, could you open the blue folder on the left?" (Kokoro af_heart, speed 1.1), v0.3 vs v0.4, under the clip's loudness and phonemes: the close vowels (w-i, could you, blue) no longer open like the open ones, and the closures (shaded) are approached instead of snapped](screenshots/lipsync_opening.png)
+
+![The same clip on the relief head, v0.3 (top) vs v0.4 (bottom): m, oo, o, oo, f, e](screenshots/lipsync_shapes.jpg)
+
 **Prosody from the voice itself (local voice).** For a clip with audio, `src/audio/prosody.js`
 measures the loudness envelope (all at once, under a millisecond) and the pitch: YIN on a 1 kHz
 low-passed copy decimated to ~6 kHz, octave slips folded back, ~25 µs per 10 ms frame, at most 20

@@ -11,7 +11,7 @@
 
 import { clamp, clamp01, fbm1, lerp, mulberry32, noise1 } from './noise.js';
 import { EyeController, GAZE_DEG } from './eyes.js';
-import { Spring, envelope, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
+import { Spring, envelope, gauss, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
 
 /** @typedef {'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'} AvatarState */
 
@@ -171,6 +171,9 @@ const BLINK_MEDIAN = { idle: 2.8, listening: 4.0, thinking: 2.4, speaking: 2.3, 
  * 0.5 deg/s mean yaw speed), and a faint fast tremor (0.07 deg). */
 const SWAY = { yaw: 1.0 / DEG, pitch: 0.45 / DEG, roll: 0.26 / DEG, fast: 0.07 / DEG };
 
+/** An accent this strong (a phrase's nuclear accent) always gets a nod; weaker ones vary. */
+export const ACCENT_ALWAYS_NODS = 0.95;
+
 /** Probabilistic OR of 0..1 values (smooth where max() would kink). */
 const softOr = (a, b) => 1 - (1 - a) * (1 - b);
 
@@ -326,11 +329,25 @@ export class Director {
     const vary = () => 0.8 + 0.4 * this.rng2();
     this._lastCue = t;
     switch (cue.type) {
-      case 'accent':
-        if (t - this._lastAccent < 0.2) return;           // one nod per syllable at most
+      case 'accent': {
+        if (t - this._lastAccent < 0.2) return;           // one gesture per syllable at most
         this._lastAccent = t;
-        this._nod(t, (0.5 + 0.5 * s) * vary());
+        // A speaker does not nod on every stressed syllable, nor the same way: a strong (nuclear)
+        // accent gets a nod; a weaker one a nod, a small turn or tilt of the head (a beat), a
+        // flick of the brows, or nothing visible. Sizes vary widely (log-normal).
+        const r = this.rng2;
+        const size = (0.5 + 0.5 * s) * clamp(Math.exp(0.32 * gauss(r)), 0.55, 1.7);
+        const u = s >= ACCENT_ALWAYS_NODS ? 0 : r();
+        const pNod = 0.25 + 0.5 * s;
+        if (u < pNod) this._nod(t, size);
+        else if (u < pNod + 0.55 * (1 - pNod)) {
+          // turn and tilt together, mostly one of them; the side alternates more often than not
+          this._beatSide = r() < 0.7 ? -(this._beatSide || 1) : (this._beatSide || 1);
+          const turn = r();
+          this._kick({ at: t, kind: 'beat', amp: size, k: 0.85 + 0.35 * r(), yaw: this._beatSide * turn, roll: this._beatSide * (1 - turn) * (r() < 0.5 ? -1 : 1) });
+        } else if (u < pNod + 0.8 * (1 - pNod)) this._kick({ at: t, kind: 'brow', amp: 0.22 * size });
         break;
+      }
       case 'emphasis':
         this._kick({ at: t, kind: 'brow', amp: 0.6 * s });
         this._nod(t, 0.8 * s * vary());
@@ -526,6 +543,7 @@ export class Director {
 
     // ---- speech prosody: nods, phrase lifts, question tilts, brows, micro-smiles, breaths --------
     let nod = 0, nodYaw = 0, nodRoll = 0, lift = 0, tilt = 0, browK = 0, smileK = 0, lower = 0, inhale = 0, inhaleHead = 0;
+    let beatYaw = 0, beatRoll = 0;
     if (this._kicks.length) {
       this._kicks = this._kicks.filter((q) => time - q.at < 3);
       for (const q of this._kicks) {
@@ -535,6 +553,10 @@ export class Director {
           // down in ~170 ms, back in ~310 ms (each nod 0.88-1.18 x as long)
           const v = q.amp * pulse(x, 0.17 * k, 0.31 * k);
           nod += v; nodYaw += v * (q.yaw ?? 0); nodRoll += v * (q.roll ?? 0);
+        } else if (q.kind === 'beat') {
+          // a small turn / tilt of the head on a stressed syllable, out in ~0.2 s and back
+          const v = q.amp * pulse(x, 0.2 * k, 0.38 * k);
+          beatYaw += v * (q.yaw ?? 0); beatRoll += v * (q.roll ?? 0);
         } else if (q.kind === 'lift') lift += q.amp * pulse(x, 0.2 * k, 0.36 * k);
         else if (q.kind === 'tilt') tilt += q.amp * (q.dir || 1) * envelope(x, 0.25, 0.45, 0.6);
         else if (q.kind === 'brow') browK = softOr(browK, q.amp * envelope(x, 0.12, 0.3, 0.45));
@@ -643,10 +665,10 @@ export class Director {
     const since = time - this._errorKick;
     const shake = since >= 0 && since < 0.8 ? 0.012 * Math.sin(since * 28) * envelope(since, 0.06, 0.1, 0.6) : 0;
     const eyes = this.eyes;
-    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * 0.006 * nodYaw;
+    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * (0.006 * nodYaw + 0.014 * beatYaw);
     let pitch = pitchSway + pP + pitchPosture + eyes.hy.x / DEG
       + ex * (-0.024 * nod + 0.012 * lift + 0.012 * Math.abs(tilt) + 0.0036 * softClamp(pitchSt, -6, 8) - 0.016 * lower + 0.008 * inhaleHead);
-    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * 0.005 * nodRoll;
+    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * (0.005 * nodRoll + 0.012 * beatRoll);
     yaw = clamp(yaw, -0.35, 0.35);
     pitch = clamp(pitch, -0.25, 0.25);
     roll = clamp(roll, -0.2, 0.2);

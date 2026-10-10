@@ -107,7 +107,9 @@ describe('director motion: smooth channels', () => {
     };
     const one = run(true, false), alone = run(false, true), grown = run(true, true);
     const dip = (r) => r.headPitch[70] - Math.min(...r.headPitch.slice(70));
-    expect(dip(grown)).toBeGreaterThan(1.5 * dip(one));
+    // (v0.4: an accent's nod varies in size, log-normal, so it may be the larger one: the running
+    // nod ends up as large as the larger of the two either way)
+    expect(dip(grown)).toBeGreaterThan(0.95 * Math.max(dip(one), dip(alone)));
     // as smooth as the emphasis' own nod (raising the running nod's amplitude stepped its speed
     // by ~5x that)
     expect(steps(grown)).toBeLessThan(1.3 * steps(alone));

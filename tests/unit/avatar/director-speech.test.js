@@ -146,6 +146,38 @@ describe('Director: prosody (secondary speech motion)', () => {
     expect(Math.abs(r.a.headPitch - p0)).toBeLessThan(0.004); // back
   });
 
+  it('weaker accents vary: nods of many sizes, turns and tilts, brow flicks, or nothing; strong ones nod', () => {
+    const DEG = 180 / Math.PI;
+    const outcomes = { nod: 0, beat: 0, still: 0 }, nods = [];
+    for (let seed = 1; seed <= 60; seed++) {
+      const { d, t } = speaking(seed);
+      const p0 = d.out.headPitch, y0 = d.out.headYaw, r0 = d.out.headRoll;
+      d.setProsody({ type: 'accent', strength: 0.45 });
+      let dip = 0, turn = 0;
+      run(d, 0.6, 60, (tt, a) => {
+        dip = Math.max(dip, (p0 - a.headPitch) * DEG);
+        turn = Math.max(turn, Math.abs(a.headYaw - y0) * DEG, Math.abs(a.headRoll - r0) * DEG);
+      }, t);
+      if (dip > 0.15) { outcomes.nod++; nods.push(dip); } else if (turn > 0.15) outcomes.beat++; else outcomes.still++;
+    }
+    expect(outcomes.nod).toBeGreaterThan(18);
+    expect(outcomes.nod).toBeLessThan(42);
+    expect(outcomes.beat).toBeGreaterThan(5);
+    expect(outcomes.still).toBeGreaterThan(3);
+    const mean = nods.reduce((a, b) => a + b, 0) / nods.length;
+    const sd = Math.sqrt(nods.reduce((a, b) => a + (b - mean) ** 2, 0) / nods.length);
+    expect(sd / mean).toBeGreaterThan(0.2);          // (they used to be within +-20 %, sd/mean ~0.11)
+    // a phrase's nuclear accent always nods
+    for (let seed = 1; seed <= 12; seed++) {
+      const { d, t } = speaking(seed);
+      const p0 = d.out.headPitch;
+      d.setProsody({ type: 'accent', strength: 1 });
+      let dip = 0;
+      run(d, 0.6, 60, (tt, a) => { dip = Math.max(dip, (p0 - a.headPitch) * DEG); }, t);
+      expect(dip, `seed ${seed}`).toBeGreaterThan(0.3);
+    }
+  });
+
   it('one nod per syllable at most', () => {
     const { d, t } = speaking(6);
     d.setProsody({ type: 'accent', strength: 1 });

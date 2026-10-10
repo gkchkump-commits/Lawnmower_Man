@@ -4,7 +4,8 @@
 //   main → worker  { type: 'init', wasmBase, modelUrl, delegate? }
 //                  { type: 'frame', id, image: VideoFrame|ImageBitmap (transferred), width, height, t }
 //                  { type: 'close' }
-//   worker → main  { type: 'ready', delegate, ms }            the model is loaded
+//   worker → main  { type: 'loading' }                        the script runs and got 'init'
+//                  { type: 'ready', delegate, ms }            the model is loaded
 //                  { type: 'result', id, obs: FaceObservation|null, ms }
 //                  { type: 'error', message, fatal }
 //
@@ -44,6 +45,8 @@ self.addEventListener('message', async (e) => {
   const msg = /** @type {any} */ (e).data || {};
   if (msg.type === 'init') {
     if (starting) return;
+    // the script runs: loading the runtime and the model may take long on a busy PC
+    post({ type: 'loading' });
     const t0 = performance.now();
     starting = createFaceEngine({ wasmBase: msg.wasmBase, modelUrl: msg.modelUrl, delegate: msg.delegate })
       .then((eng) => {

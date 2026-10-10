@@ -27,6 +27,12 @@ export const MAIN_THREAD_MAX_HZ = 4;
 /** This many failed detections in a row, or no answer for this long, stop the tracker. */
 export const MAX_CONSECUTIVE_ERRORS = 5;
 export const ANSWER_TIMEOUT_MS = 10_000;
+/**
+ * A worker that has not said a word by then never ran its script (→ the main-thread fallback);
+ * one that is loading may take longer on a busy PC, and the main thread would be slower still.
+ */
+export const WORKER_SILENT_MS = 30_000;
+export const WORKER_START_MAX_MS = 120_000;
 
 /**
  * The <video>'s current frame as something to transfer to the worker: a VideoFrame (no copy) or,
@@ -167,7 +173,7 @@ export class FaceTracker extends Emitter {
         return;
       }
       const t0 = this._now();
-      const timeout = setTimeout(() => fail(new Error('the face tracker worker did not start within 30 s')), 30_000);
+      let timeout = setTimeout(() => fail(new Error(`the face tracker worker did not answer within ${WORKER_SILENT_MS / 1000} s`)), WORKER_SILENT_MS);
       const fail = (/** @type {any} */ err) => {
         clearTimeout(timeout);
         try { w.terminate(); } catch { /* ignore */ }
@@ -184,7 +190,12 @@ export class FaceTracker extends Emitter {
       w.addEventListener('message', (e) => {
         const m = /** @type {any} */ (e).data || {};
         if (gen !== this._gen) return;
-        if (m.type === 'ready') {
+        if (m.type === 'loading' && this.mode === 'starting') {
+          // alive: give the runtime and the model the rest of the longer start budget
+          clearTimeout(timeout);
+          const left = Math.max(0, WORKER_START_MAX_MS - (this._now() - t0));
+          timeout = setTimeout(() => fail(new Error(`the face tracker worker did not start within ${WORKER_START_MAX_MS / 1000} s`)), left);
+        } else if (m.type === 'ready') {
           clearTimeout(timeout);
           this.mode = 'worker';
           this.delegate = m.delegate || '';

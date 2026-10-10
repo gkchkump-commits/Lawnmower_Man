@@ -1,7 +1,7 @@
 // FaceTracker (src/vision/face-tracker.js) with a fake worker and fake frames: the worker
 // protocol, back-pressure and rate, the main-thread fallback, and giving up cleanly.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ANSWER_TIMEOUT_MS, FaceTracker, MAIN_THREAD_MAX_HZ, MAX_CONSECUTIVE_ERRORS } from '../../../src/vision/face-tracker.js';
+import { ANSWER_TIMEOUT_MS, FaceTracker, MAIN_THREAD_MAX_HZ, MAX_CONSECUTIVE_ERRORS, WORKER_SILENT_MS, WORKER_START_MAX_MS } from '../../../src/vision/face-tracker.js';
 
 const URLS = { wasmBase: 'app://lawnmower/assets/vision/wasm/', modelUrl: 'app://lawnmower/assets/vision/face_landmarker.task' };
 const video = () => ({ readyState: 4, videoWidth: 640, videoHeight: 480 });
@@ -159,6 +159,49 @@ describe('FaceTracker', () => {
     // same thread: MediaPipe reads the video element itself, no frame copies
     expect(detect).toHaveBeenCalledWith(expect.objectContaining({ videoWidth: 640 }), 640, 480, expect.any(Number));
     expect(bitmaps).toHaveLength(0);
+  });
+
+  it('a silent worker falls back after 30 s; a loading one gets up to 2 min (a busy PC)', async () => {
+    const loadEngine = vi.fn(async () => ({ createFaceEngine: async () => ({ delegate: 'CPU', detect: vi.fn(), close: vi.fn() }) }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // never says a word: its script did not run
+      const silent = tracker({ loadEngine });
+      const s1 = silent.t.start();
+      await vi.advanceTimersByTimeAsync(WORKER_SILENT_MS - 1);
+      expect(silent.t.mode).toBe('starting');
+      await vi.advanceTimersByTimeAsync(2);
+      await s1;
+      expect(silent.t.mode).toBe('main');
+      expect(silent.workers[0].terminated).toBe(true);
+
+      // loading: still a worker when the model is ready after a minute
+      const slow = tracker({ loadEngine });
+      const s2 = slow.t.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      slow.workers[0].reply({ type: 'loading' });
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(slow.t.mode).toBe('starting');
+      slow.workers[0].reply({ type: 'ready', delegate: 'CPU' });
+      await s2;
+      expect(slow.t.mode).toBe('worker');
+      expect(slow.workers[0].terminated).toBe(false);
+      slow.t.stop();
+
+      // loading, but never ready: the main thread after 2 min in all
+      const stuck = tracker({ loadEngine });
+      const s3 = stuck.t.start();
+      await vi.advanceTimersByTimeAsync(10_000);
+      stuck.workers[0].reply({ type: 'loading' });
+      await vi.advanceTimersByTimeAsync(WORKER_START_MAX_MS - 10_000 - 1);
+      expect(stuck.t.mode).toBe('starting');
+      await vi.advanceTimersByTimeAsync(2);
+      await s3;
+      expect(stuck.t.mode).toBe('main');
+      expect(warn).toHaveBeenLastCalledWith(expect.any(String), expect.stringMatching(/did not start within 120 s/));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('neither worker nor main thread: a fatal error, mode "failed"', async () => {

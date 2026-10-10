@@ -373,19 +373,20 @@ Synthetic speech (Kokoro, 28 voices), from the wake-word evaluation:
 | false wakes, cascade | 0 in 4.4 h | |
 | "Hey Jude" woke the cascade | 0/18 | 0/18 |
 
-In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on shared vCPUs, load 2-9, five runs):
+In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on shared vCPUs at load 2-9; four
+full passing runs with both models, two with B alone):
 
-| | |
-|---|---|
-| end of "Jade" → stage-1 hit in the utility | 216-230 ms with A + B; 536 ms with B alone |
-| end of "Jade" → *attention* shown | 222-268 ms |
-| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 236-246 ms |
-| her voice 10 dB down after a barge-in hit | 43-50 ms (duck to −15 dB) |
-| PC locked → microphone track ended | 9-13 ms |
-| follow-up window | 6.00 s |
-| utility CPU in silence (20 s) | 1.95-2.2 % of one core |
-| utility CPU while people talk without her name | 9.1-9.8 % of one core (107-110 ms per second of speech) |
-| engine start (both models) | 1.7-8.2 s, depending on load |
+| | both models (A + B) | B alone |
+|---|---|---|
+| end of "Jade" → stage-1 hit in the utility | 216-230 ms | 536-550 ms |
+| end of "Jade" → *attention* shown | 222-268 ms | 593 ms |
+| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 236-247 ms | 247 ms |
+| her voice 10 dB down after a barge-in hit (duck to −15 dB) | 45-54 ms | 53 ms |
+| PC locked → microphone track ended | 8-11 ms | 13 ms |
+| follow-up window | 6.00 s | 6.00 s |
+| utility CPU in silence (20 s) | 1.95-2.25 % of one core | 2.15 % |
+| utility CPU while people talk without her name | 9.1-9.9 % of one core (107-112 ms per second of speech) | 5.9 % (65 ms) |
+| engine start | 2.9-8.2 s, depending on load | 1.7-1.8 s |
 
 GPU latency of stage 2 on the RTX 5070 is not measured yet; about 0.1-0.2 s for a short segment
 is an estimate.

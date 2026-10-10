@@ -1290,12 +1290,11 @@ export function createMockCameraBridge(o = {}) {
       /** @param {any} [over] */
       async test(over = {}) {
         core.calls.push({ at: Date.now(), op: 'test', host: over.host, hasPassword: !!over.password });
+        // the scripted answer belongs to the next call made, not to one already running
+        const r = scripted;
+        scripted = null;
         await sleep(700);
-        if (scripted) {
-          const r = scripted;
-          scripted = null;
-          return clone(r);
-        }
+        if (r) return clone(r);
         return mockTestReport({ host: over.host || settings.tapo.host, password: over.password, scenario });
       },
       async discover() {

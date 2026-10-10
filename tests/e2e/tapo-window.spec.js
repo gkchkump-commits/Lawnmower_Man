@@ -230,6 +230,7 @@ test.describe('Home camera window', () => {
     await expect(page.locator('#tapo-set-password-error')).toHaveClass(/warn/);
     await expect(page.locator('#tapo-set-password-error')).toContainText('6 to 32 characters');
     await expect(page.locator('#tapo-set-password')).not.toHaveAttribute('aria-invalid', 'true');
+    await expect(page.locator('.report')).not.toHaveClass(/busy/);
     await page.locator('#tapo-set-password').fill('se&cret12');
     await expect(page.locator('#tapo-set-password-error')).toBeHidden();
     // a scripted report: the events step fails with a hint

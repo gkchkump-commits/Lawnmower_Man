@@ -24,22 +24,24 @@ float noise(float x) { float i = floor(x), f = fract(x); return mix(hash(i), has
 void main() {
   vec2 d = vP - uEmit.xy;
   float h = d.y / uEmit.z;                         // 0 at the emitter, 1 at the chin
-  // the emitter: a small bright ellipse with a soft glow
-  float e = exp(-pow(d.x / (0.09 * uHalf), 2.0) - pow(d.y / (0.012 * uEmit.z + 0.004), 2.0));
-  float glow = exp(-dot(d / vec2(0.5 * uHalf, 0.1 * uEmit.z), d / vec2(0.5 * uHalf, 0.1 * uEmit.z)));
-  vec3 col = uColor * (1.6 * e + 0.25 * glow);
+  // the emitter: a small bright lens with a soft glow
+  float e = exp(-pow(d.x / (0.05 * uHalf), 2.0) - pow(d.y / (0.006 * uEmit.z + 0.003), 2.0));
+  vec2 gq = d / vec2(0.35 * uHalf, 0.07 * uEmit.z);
+  float glow = exp(-dot(gq, gq));
+  vec3 col = uColor * (2.0 * e + 0.3 * glow);
   if (h > 0.0 && h < 1.2) {
-    // the cone: wider as it rises, its edges soft
-    float w = mix(0.08, 1.0, h) * uHalf;
-    float x = d.x / w;
-    float cone = (1.0 - smoothstep(0.55, 1.0, abs(x)));
+    // the cone: wider as it rises, soft inside, its edges a little brighter (a beam of light)
+    float w = mix(0.12, 1.0, h) * uHalf;
+    float x = abs(d.x / w);
+    float cone = 1.0 - smoothstep(0.35, 1.0, x);
+    float rim = exp(-pow((x - 0.9) / 0.09, 2.0));
     // beams: streaks along the cone's rays, drifting slowly; scan lines running up
-    float ray = x * 9.0;
-    float beams = 0.55 + 0.45 * noise(ray + uTime * 0.15) * noise(ray * 2.3 - uTime * 0.1 + 7.0);
-    float scan = 0.75 + 0.25 * sin((h * 26.0 - uTime * 1.6) * 6.2832 / 3.0);
-    // brightest just above the emitter, fading out into the neck (no light on the face)
-    float fade = smoothstep(0.0, 0.08, h) * pow(1.0 - smoothstep(0.15, 1.05, h), 1.5);
-    col += uColor * cone * beams * scan * fade * 0.34;
+    float ray = d.x / w * 9.0;
+    float beams = 0.6 + 0.4 * noise(ray + uTime * 0.15) * noise(ray * 2.3 - uTime * 0.1 + 7.0);
+    float scan = 0.8 + 0.2 * sin((h * 26.0 - uTime * 1.6) * 6.2832 / 3.0);
+    // over most of its height, fading out into the neck (no light on the face)
+    float fade = smoothstep(0.0, 0.05, h) * (1.0 - smoothstep(0.5, 1.05, h));
+    col += uColor * (0.36 * cone * beams + 0.28 * rim) * scan * fade;
   }
   gl_FragColor = vec4(col * uLevel, 0.0);
 }`;

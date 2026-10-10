@@ -389,9 +389,9 @@ void main() {
     // them: crisp lines with a halo, not a haze over the face); the eyes breathe, and glow up
     // with the voice
     float hot = smoothstep(0.42, 0.95, baseLum);
-    float eyeGlow = 0.3 + 0.08 * (uBreath - 0.5) + 0.4 * uSpeech * uSpeak + 0.2 * uListen;
+    float eyeGlow = 0.36 + 0.08 * (uBreath - 0.5) + 0.4 * uSpeech * uSpeak + 0.2 * uListen;
     col += uColEye * ap * hot * eyeGlow * uPop * (1.0 - 0.6 * uSleep);
-    col += uColLine * gold * smoothstep(0.12, 0.55, baseLum) * 0.22 * uPop;
+    col += uColLine * gold * smoothstep(0.12, 0.55, baseLum) * 0.32 * uPop;
     // an energy wave on emphasis: a bright front runs out from the brow over the lines and grid
     if (uPulseW.y > 0.002) {
       float front = exp(-pow((length(dp) - uPulseW.x) / 0.035, 2.0));

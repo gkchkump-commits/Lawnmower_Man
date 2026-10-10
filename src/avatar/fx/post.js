@@ -333,7 +333,7 @@ export class Post {
     c.tScene.value = this.sceneRT.texture;
     // Bloom strength: options.bloom (0..2) x base, breathing a little with the avatar's energy.
     const levels = this.mips.length;
-    c.uBloom.value = bloomOn ? (this.bloom * 0.42 * (0.75 + 0.5 * this.energy)) / Math.max(1, levels * 0.6) : 0;
+    c.uBloom.value = bloomOn ? (this.bloom * 0.52 * (0.75 + 0.5 * this.energy)) / Math.max(1, levels * 0.6) : 0;
     c.uTransparent.value = this.transparent ? 1 : 0;
     c.uOpacity.value = this.opacity;
     // (the halo rides on the bloom chain: none without it)

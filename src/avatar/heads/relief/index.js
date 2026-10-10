@@ -403,7 +403,7 @@ export default class ReliefHead {
 
 /** The relief's light (FACE_FRAG "light and life"): the key light's change as the head turns,
  * the glint, the rim on the edges turning away, the plate's sharpening. */
-export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.5, glint: 0.5, rim: 0.55, sharpen: 0.45 });
+export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.5, glint: 0.6, rim: 0.8, sharpen: 0.5 });
 
 /**
  * Area-weighted vertex normals of a height-field mesh, every face turned toward +z (the viewer).

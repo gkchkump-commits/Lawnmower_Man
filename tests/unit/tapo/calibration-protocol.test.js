@@ -62,6 +62,17 @@ describe('shift-ref: only a gated reference counts', () => {
     expect(await p).toEqual({ ok: true, at: 1040, still: false });
   });
 
+  it('its contrast and how far it is from the frame the last measurement ended on are passed on (a malformed one is not)', async () => {
+    for (const [vsLast, want] of [[{ at: 900, dx: 0.001, dy: -0.002, score: 0.97 }, { at: 900, dx: 0.001, dy: -0.002, score: 0.97 }], [{ at: 'x', dx: 0, dy: 0, score: 1 }, undefined]]) {
+      const { s, answer } = await service();
+      const p = s._shiftRef(1000);
+      await answer('shift-ref', () => ({ t: 'shift-ref-ok', gated: true, ok: true, still: true, at: 1040, contrast: 22.1, vsLast }));
+      const r = await p;
+      expect(r).toMatchObject({ ok: true, at: 1040, still: true, contrast: 22.1 });
+      expect(r.vsLast).toEqual(want);
+    }
+  });
+
   it('an older worker\'s bare answer, the worker\'s "none" and a picture from before the move are no reference', async () => {
     for (const reply of [
       { t: 'shift-ref-ok' }, // an older camera window: says nothing about how current its picture is
@@ -80,12 +91,41 @@ describe('shift-ref: only a gated reference counts', () => {
 });
 
 describe('shift-measure: an answer without the gate is not measurable', () => {
+  // (updated on purpose: a gated answer now also says whether the picture settled and when it
+  // first changed, which main passes on)
   it('a gated answer is passed on with its stamps', async () => {
     const { s, answer } = await service();
     const p = s._shiftMeasure(6000, true, 2000);
-    const req = await answer('shift-measure', () => ({ t: 'shift', dx: 0.25, dy: 0, score: 0.9, settledMs: 800, gated: true, at: 2100, refAt: 1040, frames: 5, moved: true }));
+    const req = await answer('shift-measure', () => ({ t: 'shift', dx: 0.25, dy: 0, score: 0.9, settledMs: 800, gated: true, at: 2100, refAt: 1040, frames: 5, moved: true, settled: true, firstAt: 2010, changedAt: 2050, contrast: 31.5 }));
     expect(req).toMatchObject({ timeoutMs: 6000, expectMove: true, after: 2000 });
-    expect(await p).toEqual({ dx: 0.25, dy: 0, score: 0.9, settledMs: 800, at: 2100, refAt: 1040, frames: 5, moved: true });
+    expect(await p).toEqual({ dx: 0.25, dy: 0, score: 0.9, settledMs: 800, at: 2100, refAt: 1040, frames: 5, moved: true, settled: true, firstAt: 2010, changedAt: 2050, contrast: 31.5 });
+  });
+
+  it('a gated answer that does not say the picture settled (a camera window from before `settled`) reads as not settled', async () => {
+    const { s, answer } = await service();
+    const p = s._shiftMeasure(6000, true, 2000);
+    await answer('shift-measure', () => ({ t: 'shift', dx: 0.25, dy: 0, score: 0.9, settledMs: 800, gated: true, at: 2100, refAt: 1040, frames: 5, moved: true }));
+    const r = await p;
+    expect(r.settled).toBe(false); // and the wizard does not use a measurement that did not settle
+    expect(r.changedAt).toBeUndefined();
+  });
+
+  it('a cancelled calibration drops its pending request at once (no 30 s wait for a stalled worker)', async () => {
+    const { s, sent } = await service();
+    const ac = new AbortController();
+    const p = s._shiftMeasure(6000, true, 2000, ac.signal);
+    for (let i = 0; i < 50 && !sent.some((m) => m.t === 'shift-measure'); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(s._pending.size).toBe(1);
+    const t0 = Date.now();
+    ac.abort();
+    expect(await p).toEqual({ dx: 0, dy: 0, score: 0, settledMs: 0 });
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(s._pending.size).toBe(0);
+    // the late answer is dropped
+    const req = sent.find((m) => m.t === 'shift-measure');
+    s._onWorkerMessage(s._port, { t: 'shift', id: req.id, dx: 0.25, dy: 0, score: 0.9, settledMs: 800, gated: true, at: 2100, refAt: 1040, frames: 5, moved: true, settled: true });
+    const r = s._shiftRef(1000, ac.signal);
+    expect((await r).ok).toBe(false); // an aborted signal: no request at all
   });
 
   it('an older worker\'s answer (no gate: its picture may be from before the move) has score 0', async () => {
@@ -98,6 +138,34 @@ describe('shift-measure: an answer without the gate is not measurable', () => {
 });
 
 describe('the wizard through the service', () => {
+  it('while it runs, other camera moves are refused (the D-pad, keys, click-to-center, Claude\'s camera_look), then allowed again', async () => {
+    const { s } = await service();
+    const commands = [];
+    const moves = [];
+    s.ptzCtl = /** @type {any} */ ({ caps: { available: true }, privacySuspected: false, moving: false, settleUntil: 0,
+      command: async (c) => { commands.push(c); return { ok: true, moved: true }; },
+      rawMove: async (x, y) => { moves.push([x, y]); return { settledMs: 900, measured: true, moved: true, travel: { x, y } }; },
+      readPosition: async () => ({ x: 0, y: 0 }), stopAll: async () => {} });
+    s._conn = { state: 'online', detail: '' };
+    s._shiftRefTimeoutMs = 60_000; // a worker that does not answer: the calibration waits
+    s.calibration.start();
+    expect(s.calibration.running).toBe(true);
+    for (const cmd of [{ op: 'nudge', dir: 'left', amount: 'small' }, { op: 'center', u: 0.7, v: 0.5 }, { op: 'hold', dir: 'up' }, { op: 'preset-name', name: 'Door' }, { op: 'home' }, { op: 'stop' }]) {
+      const r = await s.ptz(/** @type {any} */ (cmd));
+      expect(r).toMatchObject({ ok: false, code: 'busy' });
+      expect(r.error).toMatch(/calibrating/);
+    }
+    expect((await s.ptz({ op: 'heartbeat' })).ok).toBe(true); // (ends nothing: no hold can start)
+    // Claude's camera_look goes through the same door
+    const look = await s._mcpAdapter().ptz({ op: 'nudge', dir: 'right', amount: 'medium' });
+    expect(look).toMatchObject({ ok: false, code: 'busy' });
+    expect(commands).toEqual([{ op: 'heartbeat' }]);
+    s.calibration.cancel();
+    for (let i = 0; i < 100 && s.calibration.running; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(s.calibration.running).toBe(false);
+    expect((await s.ptz({ op: 'nudge', dir: 'left', amount: 'small' })).ok).toBe(true);
+  });
+
   it('with an older camera window (bare answers) it never measures: it asks', async () => {
     const { s, sent, port } = await service();
     // a fake PTZ that reports its moves, and an old worker that answers everything at once

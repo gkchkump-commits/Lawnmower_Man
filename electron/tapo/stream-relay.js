@@ -66,6 +66,11 @@ export class StreamRelay extends EventEmitter {
     return this._state;
   }
 
+  /** Why it is not live (the relay's own words; shown in the camera window). */
+  get detail() {
+    return this._detail;
+  }
+
   get needed() {
     return this._needed;
   }

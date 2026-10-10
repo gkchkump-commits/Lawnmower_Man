@@ -1189,9 +1189,15 @@ export function createMockCameraBridge(o = {}) {
     toWorker({ t: 'shift-measure', id, timeoutMs });
   });
   /** @param {string} question @returns {Promise<string>} */
-  const ask = (question, progress) => new Promise((resolve) => {
-    calib.answer = resolve;
-    setCalib({ step: 'ask', question, progress });
+  /** Like main (calibration.js): only the answers for the axis just moved are taken. */
+  const ask = (question, progress, answers) => new Promise((resolve) => {
+    calib.answer = (/** @type {string} */ a) => {
+      if (!answers.includes(a)) return false;
+      calib.answer = null;
+      resolve(a);
+      return true;
+    };
+    setCalib({ step: 'ask', question, progress, answers: [...answers] });
   });
   async function runCalibration(token) {
     const check = () => {
@@ -1224,10 +1230,10 @@ export function createMockCameraBridge(o = {}) {
       result.viewUnitsX = Math.round((0.2 / Math.abs(pan.dx)) * 1000) / 1000;
       result.msPerUnit = Math.round(Math.max(500, Math.min(20000, pan.ms / 0.2)));
     } else {
-      const a = await ask('Which way did the picture move?', 0.25);
+      const a = await ask('Which way did the camera turn? (The picture moves the other way.)', 0.25, ['left', 'right', 'none']);
       check();
       if (a === 'none') throw new Error('The camera did not seem to move. Is privacy mode on, or is pan and tilt disabled?');
-      result.invertPan = a === 'right';
+      result.invertPan = a === 'left'; // told to turn right, it turned left: mirrored
     }
     setCalib({ step: 'pan', progress: 0.35 });
     await back(0.2, 0);
@@ -1237,10 +1243,10 @@ export function createMockCameraBridge(o = {}) {
       result.invertTilt = tilt.dy < 0;
       result.viewUnitsY = Math.round((0.2 / Math.abs(tilt.dy)) * 1000) / 1000;
     } else {
-      const a = await ask('Which way did the picture move this time?', 0.6);
+      const a = await ask('Which way did the camera tilt? (The picture moves the other way.)', 0.6, ['up', 'down', 'none']);
       check();
       if (a === 'none') throw new Error('The camera did not seem to tilt.');
-      result.invertTilt = a === 'up';
+      result.invertTilt = a === 'down'; // told to tilt up, it tilted down: inverted
     }
     setCalib({ step: 'tilt', progress: 0.7 });
     await back(0, 0.2);
@@ -1329,9 +1335,8 @@ export function createMockCameraBridge(o = {}) {
         if (action === 'answer') {
           const a = String(req.answer || '');
           if (!['left', 'right', 'up', 'down', 'none'].includes(a)) throw new Error('Invalid answer');
-          const cb = calib.answer;
-          calib.answer = null;
-          cb?.(a);
+          // an answer for the other axis is not taken: the state stays "ask" (as in main)
+          calib.answer?.(a);
           return clone(calib.state);
         }
         if (action === 'cancel') {
@@ -1359,6 +1364,22 @@ export function createMockCameraBridge(o = {}) {
       async requestPort() {
         openPort();
         return { ok: true };
+      },
+      /** Reconnect now (offline / a problem; never a refused sign-in). */
+      async retry() {
+        core.calls.push({ at: Date.now(), op: 'retry' });
+        const st = core.statusNow();
+        if (st.connection === 'auth-failed') return { ok: false, needsPassword: true };
+        return { ok: true, connection: st.connection };
+      },
+      /** The redacted diagnostic report (what main builds from the connection test and the status). */
+      async diagnostics() {
+        core.calls.push({ at: Date.now(), op: 'diagnostics' });
+        await sleep(300);
+        const test = mockTestReport({ host: settings.tapo.host, scenario });
+        const user = (settings.tapo.username || '').length >= 3 ? settings.tapo.username : '\u0000';
+        return JSON.parse(JSON.stringify({ tool: 'lawnmower-diagnostics', version: 1, appVersion: '0.1.0', at: new Date().toISOString(), platform: 'browser', test, status: core.statusNow() })
+          .split(settings.tapo.host || '\u0000').join('<camera>').split(user).join('<camera account>'));
       },
     },
     app: {

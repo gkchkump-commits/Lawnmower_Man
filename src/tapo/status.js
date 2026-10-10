@@ -15,7 +15,8 @@ export function connectionBadge(st) {
   const detail = String(st.detail || '');
   if (!st.enabled) return { text: 'Off', tone: 'off', title: 'The Home camera is turned off in Settings.' };
   if (!st.configured || st.connection === 'not-configured') return { text: 'Not set up', tone: 'off', title: detail || 'Enter the camera’s address and Camera Account.' };
-  if (st.ptz?.privacySuspected) return { text: 'Privacy mode?', tone: 'warn', title: 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.' };
+  // an offline or refused camera says so first: privacy mode is only a guess from odd answers
+  if (st.connection === 'online' && st.ptz?.privacySuspected) return { text: 'Privacy mode?', tone: 'warn', title: 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.' };
   switch (st.connection) {
     case 'online': return { text: 'Online', tone: 'ok', title: detail || 'Connected to the camera.' };
     case 'connecting': return { text: 'Connecting…', tone: 'busy', title: detail || 'Connecting to the camera…' };
@@ -30,7 +31,7 @@ export function connectionBadge(st) {
 /**
  * The arm control. `nowMs` is Date.now().
  * @param {TapoStatus|null|undefined} st @param {number} nowMs
- * @returns {{ mode: 'disarmed'|'arming'|'armed', label: string, action: string, secondsLeft: number }}
+ * @returns {{ mode: 'disarmed'|'arming'|'armed', label: string, action: string, secondsLeft: number, blind?: boolean }}
  */
 export function armState(st, nowMs) {
   const sec = st?.security || {};
@@ -38,7 +39,11 @@ export function armState(st, nowMs) {
     const left = Number.isFinite(sec.armingEndsAt) ? Math.max(0, Math.ceil((sec.armingEndsAt - nowMs) / 1000)) : 0;
     return { mode: 'arming', label: `Arming… ${left} s`, action: 'Cancel', secondsLeft: left };
   }
-  if (sec.armed) return { mode: 'armed', label: 'Armed', action: 'Disarm', secondsLeft: 0 };
+  if (sec.armed) {
+    // armed but blind: say so (an unplugged or jammed camera must not look protected)
+    const label = sec.watching === 'offline' ? 'Armed · camera offline' : sec.watching === 'no-video' ? 'Armed · not watching' : 'Armed';
+    return { mode: 'armed', label, action: 'Disarm', secondsLeft: 0, ...(label !== 'Armed' ? { blind: true } : {}) };
+  }
   return { mode: 'disarmed', label: 'Disarmed', action: 'Arm', secondsLeft: 0 };
 }
 
@@ -55,7 +60,6 @@ export function viewPlaceholder(st, w = null) {
   if (w && w.configSupported === false) {
     return { kind: 'codec', title: 'This PC cannot show this video', detail: 'This camera stream uses a format this PC cannot decode. Switch to stream2 in Settings, or set the Tapo app’s video quality to a lower setting.', tone: 'error' };
   }
-  if (st.ptz?.privacySuspected) return { kind: 'privacy', title: 'Privacy mode seems to be on', detail: 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.', tone: 'warn' };
   switch (st.connection) {
     case 'auth-failed': return { kind: 'auth', title: 'Sign-in failed', detail: `${st.detail || 'The camera did not accept the Camera Account.'} Check the user name and password in Settings, then press Retry. (The app does not keep retrying, so the camera does not lock you out.)`, tone: 'error' };
     case 'unreachable': return { kind: 'offline', title: 'The camera is offline', detail: st.detail || 'It does not answer. Is it switched on and on the same network as this PC?', tone: 'error' };
@@ -66,8 +70,12 @@ export function viewPlaceholder(st, w = null) {
   if (st.go2rtc?.state === 'missing') return { kind: 'missing', title: 'The video component is missing', detail: st.go2rtc.detail || 'Reinstall Lawnmower Man.', tone: 'error' };
   if (st.go2rtc?.state === 'error') return { kind: 'video-error', title: 'The video could not start', detail: st.go2rtc.detail || 'Pan, tilt and alerts still work.', tone: 'error' };
   const stream = st.stream?.state;
-  if (stream === 'error') return { kind: 'video-error', title: 'The video could not start', detail: st.detail || 'Pan, tilt and alerts still work.', tone: 'error' };
+  // the video's own reason (never the connection's sentence: that one says "Connected")
+  if (stream === 'error') return { kind: 'video-error', title: 'The video could not start', detail: st.stream?.detail || 'Pan, tilt and alerts still work.', tone: 'error' };
   if (stream === 'stalled') return { kind: 'stalled', title: 'The video stopped', detail: 'Reconnecting… If the Tapo app or another viewer is open, close it: the camera allows only two at a time.', tone: 'warn' };
+  // a guess from odd PTZ answers: below the real states (offline, sign-in, a stalled video); it
+  // clears as soon as the camera answers normally again (ptz.js re-checks every 5 s)
+  if (st.ptz?.privacySuspected) return { kind: 'privacy', title: 'Privacy mode seems to be on', detail: 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.', tone: 'warn' };
   if (!w?.hasFrame) return { kind: 'starting', title: 'Starting the video…', detail: '', tone: 'busy' };
   return null;
 }

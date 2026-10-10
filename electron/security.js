@@ -106,7 +106,8 @@ export function isTrustedUrl(url, o = {}) {
 /**
  * Permission policy, for our own origin only: microphone capture ('media' with audio), the
  * camera ('media' with video) only while settings.camera.enabled is on (`o.camera`), and
- * sanitized clipboard writes (copy buttons in the chat panel). Everything else is denied.
+ * sanitized clipboard writes (copy buttons in the chat panel), and full screen for the home
+ * camera's page (its live view: F, double-click). Everything else is denied.
  * @param {string} permission
  * @param {{ url?: string, mediaTypes?: string[], mediaType?: string }} details
  * @param {{ devServerUrl?: string|null, camera?: boolean }} [o]
@@ -120,6 +121,13 @@ export function decidePermission(permission, details, o = {}) {
     }
     // Permission *checks* carry a single mediaType ('audio' | 'video' | 'unknown').
     return details.mediaType === undefined || allowed.includes(details.mediaType);
+  }
+  if (permission === 'fullscreen') {
+    try {
+      return new URL(String(details.url)).pathname.startsWith('/tapo/');
+    } catch {
+      return false;
+    }
   }
   return permission === 'clipboard-sanitized-write';
 }

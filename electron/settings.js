@@ -132,6 +132,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     claudeSee: 'ask', // 'ask' | 'always' | 'never'  (camera_snapshot)
     claudeMove: 'ask', // 'ask' | 'always' | 'never'  (camera_look)
     voiceCommands: true, // simple camera commands run locally, without a Claude turn
+    startAtLogin: false, // start Lawnmower Man with Windows (hidden), so an armed alarm comes back after a restart
+    startAtLoginOffered: false, // the camera window offered it once, on the first arm
   },
   // ---- end of the Home camera block ----------------------------------------------------------
 });
@@ -456,6 +458,8 @@ const SCHEMA = {
     claudeSee: oneOf(['ask', 'always', 'never']),
     claudeMove: oneOf(['ask', 'always', 'never']),
     voiceCommands: bool(),
+    startAtLogin: bool(),
+    startAtLoginOffered: bool(),
   },
   // ---- end of the Home camera groups ------------------------------------------------------------
 };

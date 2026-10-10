@@ -119,6 +119,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     claudeSee: 'ask', // 'ask' | 'always' | 'never'  camera_snapshot
     claudeMove: 'ask', // 'ask' | 'always' | 'never'  camera_look
     voiceCommands: true, // "camera left", "arm the camera" run locally, without a Claude turn
+    startAtLogin: false, // start with Windows (hidden): an armed alarm comes back after a restart
+    startAtLoginOffered: false,
   },
   // ---- end Home camera -----------------------------------------------------------------------
 });

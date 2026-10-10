@@ -62,6 +62,10 @@ describe('origins and permissions', () => {
     expect(decidePermission('media', { url, mediaType: 'video' })).toBe(false);
     expect(decidePermission('media', { url: 'https://evil.example', mediaTypes: ['audio'] })).toBe(false);
     expect(decidePermission('clipboard-sanitized-write', { url })).toBe(true);
+    // full screen: only the home camera's page (its live view), only our origin
+    expect(decidePermission('fullscreen', { url: `${APP_ORIGIN}/tapo/index.html` })).toBe(true);
+    expect(decidePermission('fullscreen', { url })).toBe(false);
+    expect(decidePermission('fullscreen', { url: 'https://evil.example/tapo/index.html' })).toBe(false);
     for (const p of ['geolocation', 'notifications', 'display-capture', 'clipboard-read', 'openExternal', 'hid']) {
       expect(decidePermission(p, { url })).toBe(false);
     }

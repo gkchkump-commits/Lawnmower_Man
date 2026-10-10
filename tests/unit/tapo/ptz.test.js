@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  PtzController, PRIVACY_HINT, centerTranslation, matchPresetName, normalizePresetName, nudgeTranslation,
+  PtzController, PRIVACY_HINT, PRIVACY_MS, PRIVACY_RECHECK_MS, centerTranslation, matchPresetName, normalizePresetName, nudgeTranslation,
 } from '../../../electron/tapo/ptz.js';
 import { OnvifError } from '../../../electron/tapo/onvif-soap.js';
 
@@ -308,22 +308,47 @@ describe('press-and-hold', () => {
 });
 
 describe('privacy mode', () => {
-  it('a malformed answer suspends PTZ for 60 s with the hint, never "unsupported"', async () => {
+  // Updated on purpose (UX review: the D-pad stayed dead for 60 s after privacy mode was turned
+  // off): commands still go out while privacy is suspected, and a cheap read every 5 s clears it
+  // as soon as the camera answers normally. The hint and "never unsupported" stay.
+  it('a malformed answer: privacy suspected with the hint, never "unsupported"; a normal answer clears it within 5 s', async () => {
     await make();
     const events = [];
     ptz.on('privacy', (v) => events.push(v));
-    client.fail.RelativeMove = new OnvifError('malformed', 'Parse Error', { code: 'HPE_INVALID_CONSTANT' });
+    const malformed = new OnvifError('malformed', 'Parse Error', { code: 'HPE_INVALID_CONSTANT' });
+    client.fail.RelativeMove = malformed;
+    client.fail.GetStatus = malformed;
     expect(await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' })).toEqual({ ok: false, code: 'privacy', error: PRIVACY_HINT });
     expect(ptz.caps.available).toBe(true);
     expect(ptz.privacySuspected).toBe(true);
-    const n = client.calls.length;
+    // the user may just have turned privacy mode off: the next command is still sent
+    const sent = () => client.calls.filter((x) => x.op === 'RelativeMove').length;
+    const n = sent();
     expect((await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' })).code).toBe('privacy');
-    expect(client.calls.length).toBe(n);
+    expect(sent()).toBe(n + 1);
+    // still in privacy mode: the 5 s check keeps the suspicion
+    await vi.advanceTimersByTimeAsync(PRIVACY_RECHECK_MS * 2 + 100);
+    expect(ptz.privacySuspected).toBe(true);
+    expect(ptz.caps.available).toBe(true);
+    // privacy mode off: the next check clears it
     delete client.fail.RelativeMove;
-    await vi.advanceTimersByTimeAsync(60_000);
+    delete client.fail.GetStatus;
+    await vi.advanceTimersByTimeAsync(PRIVACY_RECHECK_MS + 100);
     expect(ptz.privacySuspected).toBe(false);
     expect((await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' })).ok).toBe(true);
     expect(events).toEqual([true, false]);
+  });
+
+  it('without new symptoms the suspicion ends after 60 s at the latest', async () => {
+    await make();
+    client.fail.RelativeMove = new OnvifError('malformed', 'Parse Error', { code: 'HPE_INVALID_CONSTANT' });
+    client.fail.GetStatus = new OnvifError('http', 'HTTP 500', { status: 500 });
+    await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' });
+    expect(ptz.privacySuspected).toBe(true);
+    delete client.fail.GetStatus;
+    client.fail.GetStatus = new OnvifError('fault', 'not now', { status: 400 }); // not a privacy symptom, not a normal answer
+    await vi.advanceTimersByTimeAsync(PRIVACY_MS + 100);
+    expect(ptz.privacySuspected).toBe(false);
   });
 
   it('HTTP 500 counts too; a probe during privacy keeps the earlier capabilities', async () => {

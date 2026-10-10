@@ -224,8 +224,13 @@ test.describe('Home camera window', () => {
     await page.locator('.found-cam').click();
     await expect(page.locator('#tapo-set-host')).toHaveValue('192.168.1.50');
     await page.locator('#tapo-set-username').fill('camacct');
-    // an unusual password length is a note under the field, not a blocker
+    // fewer than 4 characters is refused, as main refuses it (updated on purpose: the UX review
+    // found the form accepting what main then dropped)
     await page.locator('#tapo-set-password').fill('abc');
+    await page.getByRole('button', { name: 'Test connection' }).click();
+    await expect(page.locator('#tapo-set-password')).toHaveAttribute('aria-invalid', 'true');
+    // an unusual password length is a note under the field, not a blocker
+    await page.locator('#tapo-set-password').fill('abcd');
     await page.getByRole('button', { name: 'Test connection' }).click();
     await expect(page.locator('#tapo-set-password-error')).toHaveClass(/warn/);
     await expect(page.locator('#tapo-set-password-error')).toContainText('6 to 32 characters');
@@ -264,6 +269,27 @@ test.describe('Home camera window', () => {
     await expect(page.locator('.setup-h')).toHaveText('Camera settings');
     await expect(page.locator('#tapo-set-password')).toHaveValue('');
     await expect(page.locator('#tapo-set-password')).toHaveAttribute('placeholder', /Saved/);
+    // the saved password belongs to that address: a new address asks for it again
+    await page.locator('#tapo-set-host').fill('192.168.1.51');
+    await page.locator('#setup').getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.locator('#tapo-set-password-error')).toContainText('Type the password again');
+    expect((await page.evaluate(() => window.__tapo.settings().tapo)).host).toBe('192.168.1.50');
+    await page.locator('#tapo-set-host').fill('192.168.1.50');
+  });
+
+  test('setup: "Copy diagnostic report" copies a redacted report, the camera does not move', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openCamera(page);
+    await waitLive(page);
+    await page.locator('#btn-settings').click();
+    await clearCalls(page);
+    await page.getByRole('button', { name: 'Copy diagnostic report' }).click();
+    await expect(page.locator('.toast')).toContainText('diagnostic report was copied', { timeout: 10_000 });
+    const text = await page.evaluate(() => navigator.clipboard.readText());
+    const rep = JSON.parse(text);
+    expect(rep.tool).toBe('lawnmower-diagnostics');
+    expect(text).not.toMatch(/se&cret|camacct|192\.168\.1\.50/);
+    expect((await calls(page)).map((c) => c.op).filter((op) => !['diagnostics', 'test'].includes(op))).toEqual([]);
   });
 
   test('calibration: the wizard measures the mirrored pan through the worker', async ({ page }, testInfo) => {
@@ -297,11 +323,19 @@ test.describe('Home camera window', () => {
     const dlg = page.locator('dialog#calibrate');
     await dlg.getByRole('button', { name: 'Start', exact: true }).click();
     await expect(dlg).toHaveAttribute('data-step', 'ask', { timeout: 30_000 });
-    await expect(dlg).toContainText('Which way did the picture move?');
-    await dlg.locator('[data-answer="right"]').click();
+    // the question main asks (about the camera), with only the answers for the axis it moved
+    await expect(dlg).toContainText('Which way did the camera turn?');
+    await expect(dlg.locator('[data-answer="up"], [data-answer="down"]')).toHaveCount(0);
+    await expect(dlg.locator('[data-answer="left"]')).toHaveText('The camera turned left');
+    // an answer for the other axis is not taken: still asking, the same question
+    const st = await page.evaluate(() => window.__tapo.bridge.tapo.calibrate({ action: 'answer', answer: 'up' }));
+    expect(st.step).toBe('ask');
+    await expect(dlg).toHaveAttribute('data-step', 'ask');
+    await dlg.locator('[data-answer="left"]').click(); // told to turn right, it turned left: mirrored
     await expect(dlg).toHaveAttribute('data-step', 'ask', { timeout: 30_000 });
-    await expect(dlg).toContainText('this time');
-    await dlg.locator('[data-answer="up"]').click();
+    await expect(dlg).toContainText('Which way did the camera tilt?');
+    await expect(dlg.locator('[data-answer="left"], [data-answer="right"]')).toHaveCount(0);
+    await dlg.locator('[data-answer="down"]').click(); // told to tilt up, it tilted down: inverted
     await expect(dlg).toHaveAttribute('data-step', 'done', { timeout: 30_000 });
     const t = await page.evaluate(() => window.__tapo.settings().tapo);
     expect(t).toMatchObject({ invertPan: true, invertTilt: true });
@@ -318,6 +352,12 @@ test.describe('Home camera window', () => {
     await openCamera(page, { scenario: 'privacy' });
     await expect(page.locator('.badge')).toHaveText('Privacy mode?', { timeout: 5000 });
     await expect(page.locator('.live-placeholder')).toContainText('Turn privacy mode off in the Tapo app');
+    // privacy mode is only a guess: the D-pad stays usable (the user may just have turned it off)
+    await expect(page.locator('.dpad-right')).toBeEnabled();
+    await clearCalls(page);
+    await page.locator('.dpad-right').click();
+    await expect.poll(async () => (await calls(page)).map((c) => c.op)).toEqual(['nudge']);
+    await expect(page.locator('.toast.warn')).toContainText('privacy mode');
     await openCamera(page, { scenario: 'h265' });
     const hevc = await page.evaluate(async () => (await VideoDecoder.isConfigSupported({ codec: 'hvc1.1.6.L120.B0', codedWidth: 2304, codedHeight: 1296 }).catch(() => ({ supported: false }))).supported);
     if (!hevc) await expect(page.locator('.live-placeholder')).toContainText('cannot decode', { timeout: 10_000 });

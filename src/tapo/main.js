@@ -68,6 +68,12 @@ async function boot() {
     }),
   ]);
   let settings = withDefaults(rawSettings);
+  /** the platform (the "start with Windows" offer is for Windows) */
+  let platform = '';
+  bridge.app?.info?.().then((/** @type {any} */ i) => {
+    platform = String(i?.platform || '');
+    renderBanners();
+  }).catch(() => {});
   /** @type {any} */
   let status = firstStatus;
   /** @type {any} the worker's last stats */
@@ -298,16 +304,27 @@ async function boot() {
   }
 
   async function retry() {
-    if (typeof tapo.retry === 'function') {
-      tapo.retry().catch((/** @type {any} */ err) => toast(String(err?.message || err), 'warn'));
-      return;
-    }
+    // a refused sign-in is never retried on its own (lockouts): the password again
     if (status?.connection === 'auth-failed') {
       openSetup({ focus: 'password' });
       toast('Type the Camera Account password again, then press Save.', 'info');
-    } else {
-      openSetup();
+      return;
     }
+    if (typeof tapo.retry === 'function') {
+      try {
+        const r = await tapo.retry();
+        if (r?.needsPassword) {
+          openSetup({ focus: 'password' });
+          toast('Type the Camera Account password again, then press Save.', 'info');
+        } else {
+          toast('Connecting to the camera again…', 'info');
+        }
+      } catch (err) {
+        toast(String(/** @type {any} */ (err)?.message || err), 'warn');
+      }
+      return;
+    }
+    openSetup();
   }
 
   // ---------------------------------------------------------------- layout
@@ -355,9 +372,12 @@ async function boot() {
       return;
     }
     try {
-      await $('live').requestFullscreen();
+      // a refusal can also be silence (a permission handler that never answers): 1 s at most
+      await Promise.race([$('live').requestFullscreen(), new Promise((_r, reject) => setTimeout(() => reject(new Error('no answer')), 1000))]);
+      if (!document.fullscreenElement) throw new Error('not in full screen');
     } catch {
-      // full screen refused (permissions): fill the window instead
+      // full screen refused: fill the window instead
+      if (document.fullscreenElement) return;
       pseudoFull = true;
       body.dataset.full = '1';
     }
@@ -393,6 +413,14 @@ async function boot() {
       if (st.clock?.warn) list.push({ id: 'clock', tone: 'warn', text: `The camera’s clock is ${Math.round(Math.abs(st.clock.offsetSec))} s off. The app makes up for it; if sign-in fails later, let the camera reach the internet or restart it.` });
     }
     if (st?.hasPassword && st.persistence === 'memory') list.push({ id: 'memory', tone: 'warn', text: 'This PC cannot encrypt the camera password, so you will be asked for it again after Lawnmower Man restarts.' });
+    // armed but blind: nothing is being watched (an unplugged or jammed camera must not look protected)
+    const watching = st?.security?.armed && !st.security.arming ? st.security.watching : 'yes';
+    if (watching === 'offline') list.push({ id: 'blind-offline', tone: 'warn', text: 'Armed, but the camera does not answer: nothing is being watched right now.' });
+    if (watching === 'no-video') list.push({ id: 'blind-video', tone: 'warn', text: 'Armed, but no video comes from the camera: nothing is being recorded right now.' });
+    // the first time it is armed: the alarm needs this PC on and the app running
+    if (st?.security?.armed && platform === 'win32' && !settings.security.startAtLogin && !settings.security.startAtLoginOffered) {
+      list.push({ id: 'login', tone: 'info', text: 'The alarm works while this PC is on and Lawnmower Man runs (it keeps the PC awake while armed). Start Lawnmower Man with Windows, so it comes back after a restart?', action: { label: 'Start with Windows', onClick: () => { saveSettings({ security: { startAtLogin: true, startAtLoginOffered: true } }).catch(() => {}); } } });
+    }
     for (const w of st?.security?.warnings || []) list.push({ id: `w:${w}`, tone: 'warn', text: String(w) });
     const key = JSON.stringify(list.filter((b) => !dismissed.has(b.id)).map((b) => [b.id, b.text]));
     if (root.dataset.key === key) return;
@@ -402,6 +430,7 @@ async function boot() {
       if (dismissed.has(b.id)) continue;
       const close = h('button', { type: 'button', class: 'icon-btn tiny', 'aria-label': 'Dismiss', title: 'Dismiss', onclick: () => {
         dismissed.add(b.id);
+        if (b.id === 'login') saveSettings({ security: { startAtLoginOffered: true } }).catch(() => {}); // offered once
         renderBanners();
       } }, tapoIcon('close', 'icon tiny'));
       root.append(h('div', { class: `banner tone-${b.tone}`, dataset: { banner: b.id } },
@@ -421,8 +450,10 @@ async function boot() {
     const ph = viewPlaceholder(st, workerStats);
     live.setPlaceholder(ph, ph?.kind === 'setup' ? { label: 'Set up the camera', onClick: () => openSetup() }
       : ph?.kind === 'auth' ? { label: 'Check the password', onClick: () => retry() } : null);
-    const ptzOk = !!st?.ptz?.available && st.connection === 'online' && !st.ptz.privacySuspected;
-    const why = !st?.configured ? 'Set the camera up first' : st?.ptz?.privacySuspected ? 'The camera seems to be in privacy mode' : st?.connection !== 'online' ? 'The camera is offline' : 'Pan and tilt are not available on this camera';
+    // (privacy mode is only a guess: the D-pad stays usable, a command answers with the hint, and
+    // the one that works clears the guess)
+    const ptzOk = !!st?.ptz?.available && st.connection === 'online';
+    const why = !st?.configured ? 'Set the camera up first' : st?.connection !== 'online' ? 'The camera is offline' : 'Pan and tilt are not available on this camera';
     dpad.setEnabled(ptzOk, why);
     live.setCenterEnabled(ptzOk && !ph, why);
     presets.setEnabled(ptzOk);

@@ -33,6 +33,8 @@ export const TAPO_CHANNELS = Object.freeze({
   'lm:tapo:open-clips': BOTH,
   'lm:tapo:window': AVATAR,
   'lm:tapo:request-port': CAMERA,
+  'lm:tapo:retry': CAMERA,
+  'lm:tapo:diagnostics': CAMERA,
   'lm:tapo:view': CAMERA, // ipcRenderer.send
 });
 
@@ -95,6 +97,16 @@ export function registerTapoIpc(o) {
   handle('lm:tapo:request-port', (e, ...a) => {
     noArgs(a);
     return { ok: service.attachWorker(e.sender) };
+  });
+  // Retry now (offline / a problem); a refused sign-in is never retried here (lockouts)
+  handle('lm:tapo:retry', (_e, ...a) => {
+    noArgs(a);
+    return service.retry();
+  });
+  // the redacted diagnostic report (connection test + read-only probe steps + status)
+  handle('lm:tapo:diagnostics', (_e, ...a) => {
+    noArgs(a);
+    return service.diagnostics();
   });
 
   /** @param {any} event @param {any} payload */

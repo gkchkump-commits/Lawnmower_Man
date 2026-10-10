@@ -27,6 +27,9 @@
 }
 .status-armed[data-mode="arming"] { border-color: rgba(255, 184, 103, 0.6); background: rgba(255, 184, 103, 0.1); color: var(--gold); }
 .status-armed[data-mode="arming"] .status-armed-dot { background: var(--amber); box-shadow: none; animation: pulse 1s infinite; }
+/* armed but not watching (camera offline, no video) */
+.status-armed[data-blind="1"] { border-style: dashed; border-color: rgba(255, 184, 103, 0.7); background: rgba(255, 184, 103, 0.1); color: var(--gold); }
+.status-armed[data-blind="1"] .status-armed-dot { background: var(--amber); box-shadow: none; }
 /* both pills: the armed one takes the free space, hands-free sits next to it */
 .status-armed:not([hidden]) ~ .status-hands { margin-left: 4px; }
 .tapo-consent .setup-head .icon { color: var(--amber); }

@@ -113,7 +113,8 @@ describe('validate', () => {
     expect(checkUsername('my user').ok).toBe(false);
     expect(checkUsername('').ok).toBe(false);
     expect(checkPassword('se&cret12')).toEqual({ ok: true, value: 'se&cret12' });
-    expect(checkPassword('abc')).toMatchObject({ ok: true, warning: expect.stringMatching(/6 to 32/) });
+    expect(checkPassword('abcd')).toMatchObject({ ok: true, warning: expect.stringMatching(/6 to 32/) });
+    expect(checkPassword('abc')).toMatchObject({ ok: false, error: expect.stringMatching(/too short/) }); // main refuses it
     expect(checkPassword('a\nb').ok).toBe(false);
     expect(checkPassword('').ok).toBe(false);
     expect(checkPort('2020')).toEqual({ ok: true, value: 2020 });

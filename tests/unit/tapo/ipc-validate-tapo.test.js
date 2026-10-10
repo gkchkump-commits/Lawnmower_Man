@@ -160,6 +160,9 @@ function fakeService() {
     openClips: rec('openClips', { ok: true }),
     attachWorker: rec('attachWorker', true),
     setViewVisible: rec('setViewVisible'),
+    // added by the UX fixes: Retry, Copy diagnostic report (camera window only)
+    retry: rec('retry', { ok: true, connection: 'connecting' }),
+    diagnostics: rec('diagnostics', { tool: 'lawnmower-diagnostics' }),
   };
 }
 

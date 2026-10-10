@@ -157,6 +157,15 @@ body.tapo[data-env="browser"] { background: #0b0f14; }
 .arm[data-mode="armed"] .arm-icon { color: #ffb3aa; }
 .arm[data-mode="armed"] .arm-label { color: #ffe1dc; }
 .arm[data-mode="armed"] .arm-action { color: #ffb3aa; }
+/* armed but not watching (camera offline, no video): amber, and a dashed edge */
+.arm[data-mode="armed"][data-blind="1"] {
+  border-style: dashed;
+  border-color: rgba(255, 184, 103, 0.85);
+  background: rgba(255, 184, 103, 0.12);
+  box-shadow: none;
+}
+.arm[data-mode="armed"][data-blind="1"] .arm-icon,
+.arm[data-mode="armed"][data-blind="1"] .arm-label { color: var(--gold); }
 
 .btn.subtle-inline {
   display: inline-flex;
@@ -377,7 +386,9 @@ body[data-side="closed"] .side { display: none; }
 }
 .dpad:hover,
 .dpad:focus-within { opacity: 1; }
-.live[data-placeholder] .dpad,
+/* (a camera that still turns — privacy mode is only a guess, "the video stopped / could not start:
+   pan, tilt and alerts still work" — keeps its D-pad above the placeholder) */
+.live[data-placeholder] .dpad.disabled,
 .live[data-placeholder] .live-hint,
 .live[data-placeholder] .live-moving { display: none; }
 .dpad.disabled { opacity: 0.35; }

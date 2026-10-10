@@ -22,6 +22,7 @@
  * @property {boolean} configured            host, Camera Account and password are set
  * @property {string} connection             TapoStatus.connection
  * @property {boolean} armed
+ * @property {'yes'|'offline'|'no-video'} [watching]   armed but not watching (TapoStatus.security.watching)
  * @property {boolean} arming
  * @property {string} name
  */
@@ -65,10 +66,16 @@ export function trayTooltip(st) {
 }
 
 /** "armed" | "arming" | "online" | "offline" … for the tooltip and the menu. @param {TapoTrayState} t */
-function tapoLabel(t) {
+export function tapoLabel(t) {
   if (!t.enabled) return 'Off';
   if (!t.configured) return 'Not set up';
-  if (t.armed) return t.arming ? 'Arming' : 'Armed';
+  if (t.armed) {
+    if (t.arming) return 'Arming';
+    // armed but blind must not read "Armed" (an unplugged or jammed camera looks protected)
+    if (t.watching === 'offline' || ['unreachable', 'auth-failed', 'error', 'off', 'not-configured'].includes(String(t.connection))) return 'Armed · camera offline';
+    if (t.watching === 'no-video') return 'Armed · not watching';
+    return 'Armed';
+  }
   if (t.connection === 'online') return 'Online';
   if (t.connection === 'connecting') return 'Connecting';
   if (t.connection === 'auth-failed') return 'Sign-in failed';

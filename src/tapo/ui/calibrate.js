@@ -76,11 +76,15 @@ export class CalibrationDialog {
 
   /** @param {'left'|'right'|'up'|'down'|'none'} answer */
   async answer(answer) {
-    this.render({ ...this.state, step: this.state.step === 'ask' ? 'pan' : this.state.step, question: undefined });
+    const asked = this.state;
+    this.render({ ...asked, step: asked.step === 'ask' ? 'pan' : asked.step, question: undefined });
     try {
       const s = await this.o.calibrate({ action: 'answer', answer });
-      if (s && s.step !== 'ask') this.update(s);
+      // main's state after the answer; still asking (the answer was not taken): ask again
+      if (s) this.update(s);
+      else this.render(asked);
     } catch (err) {
+      this.render(asked);
       this.o.toast(`Could not send the answer: ${/** @type {any} */ (err)?.message || err}`, 'error');
     }
   }
@@ -137,13 +141,17 @@ export class CalibrationDialog {
       h('div', { class: 'calib-step' }, s.step === 'ask' ? tapoIcon('help', 'icon') : h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', null, STEP_TEXT[/** @type {keyof typeof STEP_TEXT} */ (s.step)] || s.step)),
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct }, h('div', { class: 'progress-bar', style: { width: `${pct}%` } })));
     if (s.step === 'ask') {
-      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the picture move?'), h('p', { class: 'calib-small' }, 'The picture was too dark or too plain to measure. Watch the live view behind this window, then choose.'));
-      const pad = h('div', { class: 'calib-pad', role: 'group', 'aria-label': 'The picture moved' });
-      for (const [dir, label] of /** @type {const} */ ([['up', 'Up'], ['left', 'Left'], ['right', 'Right'], ['down', 'Down']])) {
-        pad.append(h('button', { type: 'button', class: `btn ghost calib-${dir}`, dataset: { answer: dir }, onclick: () => this.answer(dir) }, tapoIcon(dir, 'icon tiny'), label));
+      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the camera turn?'), h('p', { class: 'calib-small' }, 'The picture was too dark or too plain to measure. Watch the live view behind this window, then choose.'));
+      // only the answers main asks for (the axis it just moved), about the camera, as the question is
+      const answers = Array.isArray(s.answers) && s.answers.length ? s.answers : ['left', 'right', 'none'];
+      const pad = h('div', { class: 'calib-pad', role: 'group', 'aria-label': 'The camera turned' });
+      for (const dir of /** @type {const} */ (['up', 'left', 'right', 'down'])) {
+        if (!answers.includes(dir)) continue;
+        const verb = dir === 'up' || dir === 'down' ? 'tilted' : 'turned';
+        pad.append(h('button', { type: 'button', class: `btn ghost calib-${dir}`, dataset: { answer: dir }, onclick: () => this.answer(dir) }, tapoIcon(dir, 'icon tiny'), `The camera ${verb} ${dir}`));
       }
       this.body.append(pad);
-      this.actions.append(h('button', { type: 'button', class: 'btn ghost', dataset: { answer: 'none' }, onclick: () => this.answer('none') }, 'It did not move'));
+      if (answers.includes('none')) this.actions.append(h('button', { type: 'button', class: 'btn ghost', dataset: { answer: 'none' }, onclick: () => this.answer('none') }, 'It did not move'));
     }
     this.actions.append(h('button', { type: 'button', class: 'btn ghost', onclick: () => this.close() }, 'Stop'));
   }

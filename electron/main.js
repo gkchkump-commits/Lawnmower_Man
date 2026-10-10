@@ -40,6 +40,8 @@ import {
   globalShortcut,
   ipcMain,
   nativeImage,
+  powerMonitor,
+  powerSaveBlocker,
   protocol,
   safeStorage,
   screen,
@@ -163,6 +165,8 @@ if (process.platform === 'win32') app.setAppUserModelId('com.lawnmower.avatar');
 if (process.env.LAWNMOWER_USER_DATA) app.setPath('userData', path.resolve(process.env.LAWNMOWER_USER_DATA));
 
 const gotLock = app.requestSingleInstanceLock();
+/** Started at login (--hidden, "Start Lawnmower Man with Windows"): the avatar stays in the tray until shown. */
+const START_HIDDEN = process.argv.includes('--hidden');
 
 /** Resolves once the app is initialised (used by the smoke test). */
 export const mainReady = gotLock
@@ -225,7 +229,7 @@ async function init() {
   // Its own window, IPC channels (lm:tapo:*), notifications and the Claude tools. It talks to the
   // camera only while settings.tapo.enabled is on and the camera is set up.
   const tapo = createTapo({
-    electron: { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain, dialog },
+    electron: { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain, dialog, powerSaveBlocker, powerMonitor },
     settings,
     log,
     userData,
@@ -503,7 +507,8 @@ function createWindow() {
   if (s.window.alwaysOnTop) win.setAlwaysOnTop(true, 'floating');
 
   win.once('ready-to-show', () => {
-    win.show();
+    // started with Windows ("Start Lawnmower Man with Windows", Home camera): stay in the tray
+    if (!START_HIDDEN) win.show();
     applyMouseIgnore(false);
     syncCursorTracking();
   });
@@ -949,8 +954,29 @@ const trayActions = {
   openLogs: () => {
     if (state.log.dir) shell.openPath(state.log.dir).catch(() => {});
   },
-  quit: () => app.quit(),
+  quit: () => confirmQuit(),
 };
+
+/**
+ * Quit — but ask first while the home camera is armed: after quitting nothing watches it, and
+ * no alert or clip comes until the app runs again.
+ */
+async function confirmQuit() {
+  if (state.tapo?.isArmed?.() && process.env.LAWNMOWER_E2E !== '1') {
+    const r = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Quit anyway', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: 'Lawnmower Man',
+      message: 'The home camera is armed.',
+      detail: 'If Lawnmower Man quits, nothing watches the camera: no alerts and no clips until it runs again.',
+    }).catch(() => ({ response: 0 }));
+    if (r.response !== 0) return;
+  }
+  app.quit();
+}
 
 function rebuildTray() {
   const tray = state.tray;
@@ -1129,7 +1155,7 @@ function registerIpc() {
   });
   on('lm:window:minimize', () => state.win?.minimize());
   on('lm:window:hide', () => state.win?.hide());
-  on('lm:window:quit', () => app.quit());
+  on('lm:window:quit', () => { confirmQuit(); });
 }
 
 // ---------------------------------------------------------------------------------------------

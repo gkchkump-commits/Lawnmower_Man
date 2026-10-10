@@ -11,10 +11,13 @@
 //      press-and-hold, click-to-center, a preset, home, and the same from the keyboard
 //   4. arm → a person walks in → event, notification, the avatar's line, a clip with pre-roll that
 //      parses, its .jpg/.json, the events list and the player over app://…/__clips (Range)
+//   4b. the camera's own events off → the local detector alone confirms a person (notification, clip)
+//   4c. disarmed while the camera saw someone, re-armed with nobody there → no event, no alert
 //   5. "describe" on → the next alert sends Claude a hidden turn with one picture
 //   6. Claude's camera tools: approval card for a snapshot and for turning the camera,
 //      pre-approved with claudeSee 'always', unavailable with claudeMove 'never'
-//   7. privacy mode (PTZ "privacy", never "unsupported"), the camera going offline and coming back
+//   7. privacy mode (PTZ "privacy", never "unsupported"; it clears by itself), the camera going
+//      offline mid-session (shown as offline, the tray does not say plain "Armed") and coming back
 //   8. quit: Unsubscribe, the RTSP session ends, go2rtc is gone
 //
 //   npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file.json>] [--keep] [--verbose]
@@ -307,6 +310,9 @@ try {
       if (process.platform === 'linux') {
         const cmdline = fs.readFileSync(`/proc/${go2rtcPid}/cmdline`, 'utf8');
         check('the password is not on go2rtc\'s command line', !cmdline.includes(PASSWORD) && !cmdline.includes(encodeURIComponent(PASSWORD)));
+        // go2rtc reaches the camera through main's RTSP auth proxy: it never has the password
+        const environ = String(await e2e('go2rtcEnviron') || '');
+        check('go2rtc never has the password (not in its environment either: main\'s RTSP proxy signs in)', environ.length > 0 && !environ.includes(PASSWORD) && !environ.includes(encodeURIComponent(PASSWORD)) && !/LM_CAM_/.test(environ), environ.split('\0').map((l) => l.split('=')[0]).filter((k) => k.startsWith('LM_')));
       }
     }
     await sleep(500);
@@ -421,6 +427,16 @@ try {
     await idle();
     check('the motor never pushed against an end stop', sim.state.ptz.endStopMs === 0, sim.state.ptz.endStopMs);
     await sleep(1600);
+    // F: full screen (the live view), and back
+    const camFull = () => app.evaluate(({ BrowserWindow }) => {
+      const w = BrowserWindow.getAllWindows().find((x) => /\/tapo\/index\.html/.test(x.webContents.getURL()));
+      return w ? w.isFullScreen() : null;
+    });
+    await cam.keyboard.press('f');
+    const full = await until(async () => (await cam.evaluate(() => !!document.fullscreenElement)) || (await camFull()), 5000);
+    check('key F: the live view goes full screen', full, { page: await cam.evaluate(() => !!document.fullscreenElement), window: await camFull() });
+    await cam.keyboard.press('f');
+    await until(async () => !(await cam.evaluate(() => !!document.fullscreenElement)), 5000);
   });
 
   // ---- 4. arm, a person, the clip --------------------------------------------------------------
@@ -516,6 +532,54 @@ try {
     await dlg.getByRole('button', { name: 'Close', exact: true }).last().click().catch(() => {});
   });
 
+  // ---- 4b. the camera's events off: the local detector alone (1 Hz) confirms a person ------------
+  await step('4b local only', async () => {
+    await setSettings({ security: { cameraEvents: false } });
+    await until(async () => (await status())?.events?.onvif === 'off', 10000);
+    await sleep(11_000); // past the 10 s cooldown of the last person alert
+    const n0 = ((await e2e('notifications')) || []).length;
+    sim.set({ person: true });
+    const ev = await until(async () => {
+      const a = (await status())?.security?.active;
+      return a && a.kind === 'person' && a.sources?.includes('local-person') ? a : null;
+    }, 30000);
+    check('camera events off: the local detector alone confirms the person (armed rate, no boost)', ev && !ev.sources.some((/** @type {string} */ x) => x.startsWith('camera-')), ev || (await status())?.security?.active);
+    const notes = await until(async () => {
+      const n = (await e2e('notifications')) || [];
+      return n.length > n0 ? n : null;
+    }, 10000);
+    check('…a notification is shown', notes && /Person at the camera/.test(notes.at(-1).title), notes && notes.slice(n0));
+    check('…and it is recorded', (await status())?.security?.recording === true, (await status())?.security);
+    sim.set({ person: false });
+    await until(async () => !(await status())?.security?.active, 20000);
+    const clip = await until(async () => {
+      const r = await cam.evaluate(() => window.lawnmowerCamera.tapo.events.list({ limit: 5 }));
+      return r.events.find((/** @type {any} */ x) => x.id === ev?.id && x.clipUrl) || null;
+    }, 15000);
+    check('…with a clip', !!clip, clip);
+    await setSettings({ security: { cameraEvents: true } });
+    await until(async () => (await status())?.events?.onvif === 'subscribed', 15000);
+  });
+
+  // ---- 4c. disarmed while the camera saw someone, re-armed with nobody there: nothing --------------
+  await step('4c re-arm', async () => {
+    await sleep(11_000); // past the cooldown
+    sim.set({ person: true });
+    await until(async () => (await status())?.security?.active, 20000);
+    await cam.locator('.arm').click(); // disarm while the camera still reports the person
+    await until(async () => !(await status())?.security?.armed, 5000);
+    sim.set({ person: false });
+    await sleep(3000);
+    const n0 = ((await e2e('notifications')) || []).length;
+    const total0 = (await cam.evaluate(() => window.lawnmowerCamera.tapo.events.list({ limit: 1 }))).total;
+    await cam.locator('.arm').click();
+    await until(async () => (await status())?.security?.armed && (await status())?.events?.onvif === 'subscribed', 15000);
+    await sleep(10_000);
+    const total1 = (await cam.evaluate(() => window.lawnmowerCamera.tapo.events.list({ limit: 1 }))).total;
+    const n1 = ((await e2e('notifications')) || []).length;
+    check('re-armed with nobody there: no event and no notification (the old camera state ended with the subscription)', total1 === total0 && n1 === n0 && !(await status())?.security?.active, { events: total1 - total0, notifications: n1 - n0, active: (await status())?.security?.active });
+  });
+
   // ---- 5. Claude describes the next alert --------------------------------------------------------
   await step('5 describe', async () => {
     await setSettings({ security: { describe: true } });
@@ -594,10 +658,19 @@ try {
     check('the camera window says to turn privacy mode off', hint);
     await shot(cam, '7-privacy');
     sim.set({ privacy: false });
+    // the suspicion is re-checked every 5 s: it clears once the camera answers normally again
+    const cleared = await until(async () => !(await status())?.ptz?.privacySuspected, 20000, 500);
+    check('privacy mode off → the suspicion clears by itself (no 60 s wait)', cleared, (await status())?.ptz);
 
     sim.set({ offline: true });
-    const down = await until(async () => ['unreachable', 'connecting', 'error'].includes((await status())?.connection) || (await status())?.stream?.state !== 'live', 60000, 500);
-    check('the camera going offline is noticed', down, { connection: (await status())?.connection, stream: (await status())?.stream?.state });
+    // armed: the video stops, the app asks the camera (no sign-in), and calls it offline
+    const down = await until(async () => (await status())?.connection === 'unreachable', 45000, 500);
+    check('the camera going offline mid-session is shown as offline (not "Online")', down, { connection: (await status())?.connection, stream: (await status())?.stream?.state });
+    const { tapoLabel } = await import(pathToFileURL(path.join(root, 'electron/tray-menu.js')).href);
+    const tray = await e2e('trayState');
+    check('…and the tray does not say plain "Armed"', !tray?.armed || tapoLabel(tray) === 'Armed · camera offline', { tray, label: tray && tapoLabel(tray) });
+    const badge = await cam.locator('.badge-text').innerText().catch(() => '');
+    check('…nor the camera window ("Offline")', badge === 'Offline', badge);
     await shot(cam, '7-offline');
     sim.set({ offline: false });
     const back = await until(async () => {
@@ -605,6 +678,8 @@ try {
       return s?.connection === 'online' && s?.stream?.state === 'live';
     }, 120000, 500);
     check('…and it recovers when the camera is back', back, { connection: (await status())?.connection, stream: (await status())?.stream });
+    // (quit checks the Unsubscribe of a subscription made after the outage)
+    if ((await status())?.security?.armed) await until(async () => (await status())?.events?.onvif === 'subscribed', 30000, 500);
   });
 
   // the LAN fetch of step 2 is refused by the CSP on purpose, which Chromium logs as an error

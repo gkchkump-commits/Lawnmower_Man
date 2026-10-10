@@ -86,11 +86,24 @@ export class AlertManager {
   }
 
   /**
+   * The armed camera stopped watching (offline, no video): one notification; a click shows the
+   * camera window.
+   * @param {{ title: string, body: string, silent?: boolean }} o
+   */
+  notifyTrouble(o) {
+    return this._show({ title: o.title, body: o.body, silent: !!o.silent, urgency: 'critical', timeoutType: 'default' }, '');
+  }
+
+  /**
    * @param {{ event: { id: string, kind: 'person'|'motion'|'tamper', startedAt: number }, cameraName: string, snapshotPath?: string|null, silent?: boolean }} o
    */
   notify(o) {
-    const opts = buildNotificationOptions(o);
-    if (this._record) this.shown.push({ title: opts.title, body: opts.body, at: Date.now(), eventId: o.event.id, silent: opts.silent, icon: !!opts.icon });
+    return this._show(buildNotificationOptions(o), o.event.id);
+  }
+
+  /** @param {any} opts @param {string} eventId '' = no event (the click opens the camera window) */
+  _show(opts, eventId) {
+    if (this._record) this.shown.push({ title: opts.title, body: opts.body, at: Date.now(), eventId, silent: opts.silent, icon: !!opts.icon });
     if (!this.supported()) {
       this._log('info', '[tapo] notifications are not supported here');
       return false;
@@ -108,7 +121,7 @@ export class AlertManager {
     }
     try {
       const n = new this._N(nopts);
-      n.on('click', () => this._onClick(o.event.id));
+      n.on('click', () => this._onClick(eventId));
       n.on('close', () => { this._live = this._live.filter((x) => x !== n); });
       n.on('failed', (/** @type {any} */ _e, /** @type {string} */ err) => this._log('warn', `[tapo] notification failed: ${err}`));
       n.show();

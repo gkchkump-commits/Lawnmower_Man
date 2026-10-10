@@ -71,6 +71,10 @@ const api = {
     },
     setViewVisible: (v) => send('lm:tapo:view', { visible: !!v }),
     requestPort: () => invoke('lm:tapo:request-port'),
+    // reconnect now (offline / a problem; never a refused sign-in)
+    retry: () => invoke('lm:tapo:retry'),
+    // the redacted diagnostic report ("Copy diagnostic report")
+    diagnostics: () => invoke('lm:tapo:diagnostics'),
   },
   app: {
     info: () => invoke('lm:app:info'),

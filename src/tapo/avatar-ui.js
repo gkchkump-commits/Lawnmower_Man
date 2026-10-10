@@ -37,8 +37,11 @@ export class ArmedPill {
     if (!on) return;
     this.el.dataset.mode = a.mode;
     const name = st.name || 'camera';
-    /** @type {HTMLElement} */ (this.el.querySelector('.status-armed-text')).textContent = a.mode === 'arming' ? `arming ${a.secondsLeft} s` : 'armed';
-    this.el.title = a.mode === 'arming' ? `The ${name} is arming. Click to open the camera window.` : `The ${name} is armed and watching. Click to open the camera window.`;
+    this.el.dataset.blind = a.blind ? '1' : '';
+    /** @type {HTMLElement} */ (this.el.querySelector('.status-armed-text')).textContent = a.mode === 'arming' ? `arming ${a.secondsLeft} s` : a.blind ? a.label.toLowerCase() : 'armed';
+    this.el.title = a.mode === 'arming' ? `The ${name} is arming. Click to open the camera window.`
+      : a.blind ? `The ${name} is armed but not watching (${st.security?.watching === 'offline' ? 'it does not answer' : 'no video'}). Click to open the camera window.`
+        : `The ${name} is armed and watching. Click to open the camera window.`;
   }
 }
 

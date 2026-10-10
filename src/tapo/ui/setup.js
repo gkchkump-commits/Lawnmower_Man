@@ -145,6 +145,9 @@ export class SetupPanel {
     this.testBtn = /** @type {HTMLButtonElement} */ (h('button', { type: 'button', class: 'btn ghost', onclick: () => this._test() }, 'Test connection'));
     this.saveBtn = /** @type {HTMLButtonElement} */ (h('button', { type: 'button', class: 'btn amber', onclick: () => this._save() }, 'Save'));
     this.report = h('div', { class: 'report', hidden: true, 'aria-live': 'polite' });
+    // what support needs, without the source code: the test plus the probe's read-only steps,
+    // redacted (no password, user name, address or serial number)
+    this.diagBtn = /** @type {HTMLButtonElement} */ (h('button', { type: 'button', class: 'link-btn diag-btn', onclick: () => this._copyDiagnostics() }, 'Copy diagnostic report'));
     const ports = h('details', { class: 'sub' }, h('summary', null, 'Ports and stream (only if you changed them)'),
       row('onvifPort', 'ONVIF port', this.inputs.onvifPort, 'Tapo: 2020'),
       row('rtspPort', 'Video (RTSP) port', this.inputs.rtspPort, 'Tapo: 554'),
@@ -159,10 +162,15 @@ export class SetupPanel {
       row('name', 'What do you call it?', this.inputs.name, 'The avatar says “Someone is at the …”. For example: front door camera, hallway camera.'),
       ports,
       h('div', { class: 'form-actions' }, this.testBtn, this.saveBtn),
-      this.report);
+      this.report,
+      h('div', { class: 'form-hint diag' }, this.diagBtn, ' — for help with a camera that does not work (no password, user name or address in it).'));
     this.inputs.password.setAttribute('aria-describedby', `${field('password')}-error`);
     for (const k of /** @type {const} */ (['host', 'username', 'password', 'name', 'onvifPort', 'rtspPort'])) {
-      this.inputs[k].addEventListener('input', () => this._clearError(k));
+      this.inputs[k].addEventListener('input', () => {
+        this._clearError(k);
+        // an old test result does not describe what is typed now
+        if (k !== 'name') this._hideReport();
+      });
       this.inputs[k].addEventListener('keydown', (e) => {
         if (/** @type {KeyboardEvent} */ (e).key === 'Enter') this._save();
       });
@@ -195,7 +203,9 @@ export class SetupPanel {
       this._toggle('security.confirmLocally', 'Double-check people on this PC', 'Fewer false alarms: an alert needs this PC’s person detector to agree'),
       this._range('security.retentionDays', 'Keep clips for', 1, 90, 1, (v) => `${v} day${v === 1 ? '' : 's'}`),
       this._range('security.maxStorageGB', 'Use at most', 0.5, 50, 0.5, (v) => `${v} GB`),
-      this._text('security.clipsDir', 'Clips folder', 'Videos\\Lawnmower Man\\Security', 'Leave empty for the default'));
+      this._text('security.clipsDir', 'Clips folder', 'Videos\\Lawnmower Man\\Security', 'Leave empty for the default'),
+      // the PC must be on, awake and running the app to watch (armed, it keeps the PC awake)
+      this._toggle('security.startAtLogin', 'Start Lawnmower Man with Windows', 'So an armed alarm comes back after the PC restarts (it starts in the tray). While armed, the PC does not go to sleep.'));
 
     // ---- Claude
     this.seeNote = h('div', { class: 'form-hint warn', hidden: true }, 'Claude can then look through the camera whenever it decides to, without asking you.');
@@ -387,10 +397,42 @@ export class SetupPanel {
     el.append(list);
   }
 
+  _hideReport() {
+    if (this.report.hidden || this.report.classList.contains('busy')) return;
+    this.report.hidden = true;
+    clear(this.report);
+  }
+
+  /** "Copy diagnostic report": main builds it (redacted), this copies it as JSON. */
+  async _copyDiagnostics() {
+    if (typeof this.bridge.tapo.diagnostics !== 'function') return;
+    this.diagBtn.disabled = true;
+    const label = this.diagBtn.textContent;
+    this.diagBtn.textContent = 'Collecting… (the camera does not move)';
+    try {
+      const report = await this.bridge.tapo.diagnostics();
+      const text = JSON.stringify(report, null, 2);
+      await navigator.clipboard.writeText(text);
+      this.o.toast('The diagnostic report was copied. Paste it into your message (Ctrl+V).', 'success');
+    } catch (err) {
+      this.o.toast(`Could not make the report: ${/** @type {any} */ (err)?.message || err}`, 'warn');
+    } finally {
+      this.diagBtn.disabled = false;
+      this.diagBtn.textContent = label;
+    }
+  }
+
   async _save() {
-    const needPassword = !this.status?.hasPassword;
+    const savedHost = String(this.settings?.tapo?.host || '');
+    // the saved password belongs to the address it was saved with: a new address needs it again
+    const typedHost = checkHost(this.inputs.host.value);
+    const hostChanged = typedHost.ok && savedHost !== '' && typedHost.value !== savedHost;
+    const needPassword = !this.status?.hasPassword || hostChanged;
     const c = this._collect({ needPassword });
-    if (!c) return;
+    if (!c) {
+      if (hostChanged && !this.inputs.password.value) this._error('password', 'Type the password again: it is kept for one camera address.');
+      return;
+    }
     this.saveBtn.disabled = true;
     const wasConfigured = !!this.status?.configured;
     try {
@@ -398,9 +440,11 @@ export class SetupPanel {
       const saved = await this.o.saveSettings(patch);
       const kept = saved?.tapo;
       if (kept && kept.host !== c.host) {
-        this._error('host', 'This address was not accepted: it must be on your home network.');
+        // (the check above follows main's rules; this is the rare case it did not)
+        this._error('host', 'Lawnmower Man did not accept this address. Use the camera’s IP address, for example 192.168.1.50.');
         return;
       }
+      this._hideReport();
       if (c.password) {
         await this.bridge.tapo.setCredentials({ username: c.username, password: c.password });
         this.inputs.password.value = '';

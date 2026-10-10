@@ -66,7 +66,8 @@ export class Header {
     }
     this.arm.title = a.mode === 'disarmed'
       ? (usable ? `Arm: watch for people and movement${st?.security ? '' : ''} (A)` : 'Set the camera up first')
-      : a.mode === 'arming' ? 'Arming: leave the room. Click to cancel (A)' : 'Armed: watching. Click to disarm (A)';
+      : a.mode === 'arming' ? 'Arming: leave the room. Click to cancel (A)' : a.blind ? `${a.label}: nothing is being watched right now. Click to disarm (A)` : 'Armed: watching. Click to disarm (A)';
+    this.arm.dataset.blind = a.blind ? '1' : '';
     this.arm.setAttribute('aria-label', `${a.label}. ${a.action}`);
   }
 

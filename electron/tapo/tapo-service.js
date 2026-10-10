@@ -26,11 +26,12 @@ import { StreamRelay } from './stream-relay.js';
 import { ClipRecorder } from './recorder.js';
 import { EventStore, newEventId, eventBase, toSummary } from './event-store.js';
 import { runRetention } from './retention.js';
-import { SecurityEngine } from './security-engine.js';
+import { SecurityEngine, inQuietHours } from './security-engine.js';
 import { buildAvatarAlert } from './alerts.js';
 import { createCameraMcp, qualifiedToolName, SERVER_NAME } from './camera-mcp.js';
 import { createMcpHttpServer } from './mcp-http.js';
 import { connectionTest, HINTS, tcpCheck } from './connection-test.js';
+import { diagnosticReport } from './diagnostics.js';
 import { discover } from './discovery.js';
 import { redact, validatePassword } from './credentials.js';
 import { validateWorkerMessage } from './validate.js';
@@ -42,6 +43,14 @@ const STATUS_MIN_MS = 250; // ≤ 4 status messages a second
 const TICK_MS = 500;
 const SNAPSHOT_STREAM_MS = 30_000;
 const DET_PER_SEC = 10;
+/** How often the camera's health is looked at. */
+export const HEALTH_EVERY_MS = 2000;
+/** The video gone this long (while it is wanted), or the camera's events failing: is the camera still there? */
+export const PROBE_AFTER_MS = 10_000;
+/** Armed but not watching (camera offline, no video) for this long: shown as such. */
+export const BLIND_GRACE_MS = 30_000;
+/** … and for this long: one notification and an avatar line. */
+export const BLIND_ALERT_MS = 60_000;
 
 /** @param {number} at */
 const iso = (at) => new Date(at).toISOString();
@@ -196,6 +205,16 @@ export class TapoService extends EventEmitter {
     /** @type {NodeJS.Timeout|null} */
     this._statusTimer = null;
     this._lastStatusAt = 0;
+
+    // health: the camera dropping off mid-session, an armed camera that stopped watching
+    /** @type {NodeJS.Timeout|null} */
+    this._healthTimer = null;
+    this._streamDownSince = 0;
+    this._lastProbeAt = 0;
+    this._probing = false;
+    /** armed but not watching: why and since when @type {{ why: ''|'offline'|'no-video', since: number, alerted: boolean }} */
+    this._blind = { why: '', since: 0, alerted: false };
+    this._lastWatching = 'yes';
   }
 
   // -------------------------------------------------------------------------------------------
@@ -234,6 +253,8 @@ export class TapoService extends EventEmitter {
     this._runRetention();
     this._retention = setInterval(() => this._runRetention(), 60 * 60 * 1000);
     this._retention.unref?.();
+    this._healthTimer = setInterval(() => this._checkHealth(), HEALTH_EVERY_MS);
+    this._healthTimer.unref?.();
     // an armed app re-arms right after a restart (no exit delay)
     if (this._sec().armed) this._apply(this.engine.arm(true, { immediate: true }));
     this._syncTick();
@@ -249,7 +270,8 @@ export class TapoService extends EventEmitter {
     if (this._tick) clearInterval(this._tick);
     if (this._retention) clearInterval(this._retention);
     if (this._statusTimer) clearTimeout(this._statusTimer);
-    this._tick = this._retention = this._statusTimer = this._retryTimer = null;
+    if (this._healthTimer) clearInterval(this._healthTimer);
+    this._tick = this._retention = this._statusTimer = this._retryTimer = this._healthTimer = null;
     const work = Promise.allSettled([
       this.ptzCtl ? this.ptzCtl.stopAll('quit', { force: true }) : null,
       this.monitor ? this.monitor.stop() : null,
@@ -302,6 +324,7 @@ export class TapoService extends EventEmitter {
     if (this._conn.state === state && this._conn.detail === detail) return;
     this._conn = { state, detail };
     this._log('info', `[tapo] ${state}: ${detail}`);
+    if (this._started) this._checkBlind(this._now());
     this._statusSoon();
   }
 
@@ -478,6 +501,127 @@ export class TapoService extends EventEmitter {
     }
     this.relay.kick();
     this._updateStream();
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // health (review: a camera that drops off mid-session was never shown as offline, and an armed
+  // camera that stopped watching looked protected)
+
+  /** Why an armed camera is not watching right now ('' when it is, or is not armed). */
+  _blindWhy() {
+    if (!this.engine.state.armed || !this._tapo().enabled) return '';
+    if (this._conn.state !== 'online') return 'offline';
+    if (this._streamWanted && this.relay.state !== 'live') return 'no-video';
+    return '';
+  }
+
+  /**
+   * 'yes', or why an armed camera is not watching (shown after BLIND_GRACE_MS; at once for a
+   * camera that does not answer). Computed from the state now, not from the last health tick.
+   */
+  _watching() {
+    const why = this._blindWhy();
+    if (!why) return 'yes';
+    if (why === 'offline' && ['unreachable', 'auth-failed', 'error', 'off', 'not-configured'].includes(this._conn.state)) return why;
+    const since = this._blind.why ? this._blind.since : this._now();
+    return this._now() - since >= BLIND_GRACE_MS ? why : 'yes';
+  }
+
+  /** Every HEALTH_EVERY_MS: is the camera still there, and is an armed camera watching? */
+  _checkHealth() {
+    if (!this._started) return;
+    const now = this._now();
+    const rs = this.relay.state;
+    const videoDown = this._streamWanted && (rs === 'stalled' || rs === 'error');
+    if (!videoDown) this._streamDownSince = 0;
+    else if (!this._streamDownSince) this._streamDownSince = now;
+    // the video gone for a while, or the camera's events failing: is the camera still there?
+    const suspicious = (this._streamDownSince && now - this._streamDownSince >= PROBE_AFTER_MS) || this._eventsState === 'failing';
+    if (suspicious && this._conn.state === 'online' && this.client && !this._probing && now - this._lastProbeAt >= PROBE_AFTER_MS) {
+      this._lastProbeAt = now;
+      this._probing = true;
+      const gen = this._gen;
+      const client = this.client;
+      // GetSystemDateAndTime needs no sign-in (no lockout risk)
+      client.syncClock().catch((err) => {
+        if (gen !== this._gen || this.client !== client || this._conn.state !== 'online') return;
+        if (err instanceof OnvifError && ['timeout', 'reset', 'refused', 'unreachable'].includes(err.kind)) this._lostCamera(gen);
+      }).finally(() => { this._probing = false; });
+    }
+    this._checkBlind(now);
+  }
+
+  /** The camera stopped answering mid-session: offline, everything that talks to it stops, retry with backoff. @param {number} gen */
+  _lostCamera(gen) {
+    const t = this._tapo();
+    this._log('warn', '[tapo] the camera stopped answering');
+    this._scheduleRetry(gen, `${t.host} stopped answering. ${HINTS.unreachable}`);
+    this._syncMonitor();
+    this._updateStream();
+  }
+
+  /** Track how long an armed camera has not been watching; tell the user once after a minute. @param {number} now */
+  _checkBlind(now) {
+    const why = /** @type {''|'offline'|'no-video'} */ (this._blindWhy());
+    const b = this._blind;
+    // offline ↔ no video: still the same stretch without watching
+    if (why !== b.why) this._blind = { why, since: why ? (b.why ? b.since : now) : 0, alerted: why ? b.alerted : false };
+    const w = this._watching();
+    if (w !== this._lastWatching) {
+      this._lastWatching = w;
+      this._statusSoon();
+    }
+    if (why && !this._blind.alerted && now - this._blind.since >= BLIND_ALERT_MS) {
+      this._blind.alerted = true;
+      this._troubleAlert(why);
+    }
+  }
+
+  /** One notification and an avatar line: the armed camera stopped watching. @param {'offline'|'no-video'} why */
+  _troubleAlert(why) {
+    const name = this.cameraName();
+    const s = this._sec();
+    const quiet = inQuietHours(s.quietHours, this._now());
+    const text = why === 'offline' ? `The ${name} stopped answering while armed: nothing is being watched.` : `The ${name} stopped sending video while armed: nothing is being recorded.`;
+    this._log('warn', `[tapo] ${text}`);
+    this._deps.alerts?.notifyTrouble?.({ title: `The ${name} is not watching`, body: `${text} Click to open the camera window.`, silent: quiet });
+    const line = why === 'offline' ? `I lost the ${name}.` : `The ${name} stopped sending video.`;
+    this.emit('alert', { id: `trouble-${this._now()}`, kind: 'trouble', at: this._now(), cameraName: name, line, quiet, describe: false }, { showAvatar: !quiet && s.showOnAlert !== false });
+  }
+
+  /** The PC woke up: the connection is stale, connect again at once. */
+  onResume() {
+    if (!this._started || !this._tapo().enabled) return;
+    this._log('info', '[tapo] the PC woke up: reconnecting to the camera');
+    this._attempt = 0;
+    this._connect('resume').catch(() => {});
+  }
+
+  /**
+   * The camera window's Retry: reconnect now (offline or a problem). A refused sign-in is not
+   * retried here (camera lockouts): the user types the password again.
+   */
+  async retry() {
+    const c = this._conn.state;
+    if (c === 'auth-failed') return { ok: false, needsPassword: true };
+    if (!['unreachable', 'error', 'connecting'].includes(c) && !this._videoAuthFailed && this.relay.state !== 'error') return { ok: true, connection: c };
+    this.sidecar.resetFailures?.();
+    this._attempt = 0;
+    this._connect('retry').catch(() => {});
+    return { ok: true, connection: 'connecting' };
+  }
+
+  /**
+   * The redacted diagnostic report ("Copy diagnostic report"): the connection test, the probe's
+   * read-only steps and the status. Never moves the camera.
+   */
+  async diagnostics() {
+    const t = this._tapo();
+    const password = (await this._cred.getPassword({ host: t.host })) || '';
+    return diagnosticReport({
+      host: t.host, onvifPort: t.onvifPort, rtspPort: t.rtspPort, username: t.username, password, allowLoopback: this._allowLoopback,
+      status: this.status(), appVersion: this._appVersion, ptzSettings: () => this._tapo(), log: this._log, now: this._now, deps: this._deps,
+    });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1136,6 +1280,7 @@ export class TapoService extends EventEmitter {
     const eng = this.engine.state;
     const counts = this.store.counts();
     const c = this.client;
+    const watching = this._watching();
     /** @type {any} */
     const st = {
       enabled: !!t.enabled,
@@ -1147,7 +1292,7 @@ export class TapoService extends EventEmitter {
       connection: this._conn.state,
       detail: this._conn.detail,
       go2rtc: { state: g.state, ...(g.detail ? { detail: g.detail } : {}) },
-      stream: { state: this.relay.state },
+      stream: { state: this.relay.state, ...(this.relay.detail && this.relay.state !== 'live' ? { detail: this.relay.detail } : {}) },
       ptz: {
         available: !!caps.available, mode: caps.mode, moving: !!ptz?.moving, canStatus: caps.canStatus, canAbsolute: caps.canAbsolute,
         canSetPreset: caps.canSetPreset, position: ptz?.position || null, privacySuspected: !!ptz?.privacySuspected, calibrated: !!t.calibratedAt,
@@ -1159,6 +1304,9 @@ export class TapoService extends EventEmitter {
         active: eng.active ? this._withUrls(eng.active) : null, recording: this.recorder.recording, todayCount: counts.todayCount,
         ...(counts.lastEventAt ? { lastEventAt: counts.lastEventAt } : {}),
         storage: { bytes: this._storage.bytes, clips: this._storage.clips, dir: this.clipsDir() }, warnings: [...this._warnings],
+        // armed but not watching: 'offline' (the camera does not answer) or 'no-video'
+        watching,
+        ...(watching !== 'yes' ? { notWatchingSince: this._blind.since || this._now() } : {}),
       },
     };
     if (c?.device) st.device = { manufacturer: c.device.manufacturer, model: c.device.model, firmware: c.device.firmware, hardwareId: c.device.hardwareId };

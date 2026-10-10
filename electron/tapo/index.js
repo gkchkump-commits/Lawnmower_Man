@@ -30,7 +30,8 @@ export function detectorAssets(devServerUrl) {
 
 /**
  * @typedef {object} CreateTapoOptions
- * @property {{ app: any, ipcMain: any, safeStorage: any, Notification: any, nativeImage: any, shell: any, screen: any, BrowserWindow: any, MessageChannelMain: any, dialog?: any }} electron
+ * @property {{ app: any, ipcMain: any, safeStorage: any, Notification: any, nativeImage: any, shell: any, screen: any, BrowserWindow: any, MessageChannelMain: any, dialog?: any,
+ *   powerSaveBlocker?: any, powerMonitor?: any }} electron
  * @property {any} settings                    the SettingsStore (get / update)
  * @property {(level: string, msg: string) => void} log
  * @property {string} userData
@@ -51,7 +52,7 @@ export function detectorAssets(devServerUrl) {
 
 /** @param {CreateTapoOptions} o */
 export function createTapo(o) {
-  const { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain } = o.electron;
+  const { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain, powerSaveBlocker, powerMonitor } = o.electron;
   const env = o.env || process.env;
   const log = o.log;
   const settings = o.settings;
@@ -77,7 +78,7 @@ export function createTapo(o) {
     onClick: (eventId) => {
       const w = ensureWindow();
       w?.show({ focus: true });
-      sendToCamera('lm:tapo:open-event', { id: eventId });
+      if (eventId) sendToCamera('lm:tapo:open-event', { id: eventId });
     },
   });
 
@@ -167,11 +168,45 @@ export function createTapo(o) {
     w?.destroy();
   }
 
+  // --- the PC itself (review: an armed camera stopped watching when Windows slept) -----------
+  // While armed (or arming) the PC must not go to sleep: nothing would watch the camera then.
+  /** @type {number|null} */
+  let blocker = null;
+  const syncPower = () => {
+    const want = !!(settings.get().tapo.enabled && service.engine.state.armed);
+    try {
+      if (want && blocker === null && powerSaveBlocker) {
+        blocker = powerSaveBlocker.start('prevent-app-suspension');
+        log('info', '[tapo] armed: keeping the PC awake');
+      } else if (!want && blocker !== null) {
+        powerSaveBlocker?.stop(blocker);
+        blocker = null;
+        log('info', '[tapo] disarmed: the PC may sleep again');
+      }
+    } catch (err) {
+      log('warn', `[tapo] power save blocker: ${/** @type {Error} */ (err).message}`);
+    }
+  };
+  // after sleep the connection is stale: reconnect at once
+  const onResume = () => service.onResume();
+  powerMonitor?.on?.('resume', onResume);
+  /** "Start Lawnmower Man with Windows" (security.startAtLogin): hidden, in the tray; installed builds only. */
+  const syncLogin = () => {
+    if (!o.isPackaged || typeof app.setLoginItemSettings !== 'function' || !['win32', 'darwin'].includes(process.platform)) return;
+    try {
+      app.setLoginItemSettings({ openAtLogin: !!settings.get().security.startAtLogin, args: ['--hidden'] });
+    } catch (err) {
+      log('warn', `[tapo] start with Windows: ${/** @type {Error} */ (err).message}`);
+    }
+  };
+  syncLogin();
+
   // --- service → windows -------------------------------------------------------------------
   service.on('status', (/** @type {any} */ st) => {
     o.sendToAvatar('lm:tapo:status', st);
     sendToCamera('lm:tapo:status', st);
     cam?.setTitle(st.name);
+    syncPower();
   });
   service.on('security-event', (/** @type {any} */ e) => sendToCamera('lm:tapo:event', e));
   service.on('calibration', (/** @type {any} */ st) => sendToCamera('lm:tapo:calibration', st));
@@ -248,6 +283,8 @@ export function createTapo(o) {
     /** main.js onSettingsChanged. @param {any} next @param {any} prev */
     applySettings: (next, prev) => {
       service.applySettings(next, prev);
+      syncPower();
+      if (next.security.startAtLogin !== prev?.security?.startAtLogin) syncLogin();
       if (next.tapo.enabled && !cam) ensureWindow();
       if (!next.tapo.enabled && cam) destroyWindow();
       if (cam && next.tapo.windowOnTop !== prev?.tapo?.windowOnTop) cam.setOnTop(next.tapo.windowOnTop);
@@ -256,7 +293,7 @@ export function createTapo(o) {
     /** TrayState.tapo */
     trayState: () => {
       const st = service.status();
-      return { enabled: st.enabled, configured: st.configured, connection: st.connection, armed: st.security.armed, arming: st.security.arming, name: st.name };
+      return { enabled: st.enabled, configured: st.configured, connection: st.connection, armed: st.security.armed, arming: st.security.arming, watching: st.security.watching, name: st.name };
     },
     trayActions,
     /** Bounded (≈ 4 s): Stop PTZ, Unsubscribe, finish the clip, kill go2rtc; then the window. */
@@ -264,11 +301,30 @@ export function createTapo(o) {
       quitting = true;
       await service.stop();
       unregisterIpc();
+      powerMonitor?.removeListener?.('resume', onResume);
+      if (blocker !== null) {
+        try { powerSaveBlocker?.stop(blocker); } catch { /* gone */ }
+        blocker = null;
+      }
       destroyWindow();
     },
+    /** Quitting would leave an armed camera unwatched (main.js asks first). */
+    isArmed: () => !!(settings.get().tapo.enabled && service.engine.state.armed),
     /** scripts/tapo-e2e.mjs (LAWNMOWER_E2E=1 only; main.js adds it to globalThis.__lawnmowerE2E). */
     e2e: {
       status: () => service.status(),
+      trayState: () => {
+        const st = service.status();
+        return { enabled: st.enabled, configured: st.configured, connection: st.connection, armed: st.security.armed, arming: st.security.arming, watching: st.security.watching, name: st.name };
+      },
+      go2rtcEnviron: () => {
+        const pid = service.sidecar.pid;
+        try {
+          return pid && process.platform === 'linux' ? fs.readFileSync(`/proc/${pid}/environ`, 'utf8') : null;
+        } catch {
+          return null;
+        }
+      },
       notifications: () => alerts.shown.slice(),
       setPassword: (/** @type {string} */ pw) => service.setCredentials({ username: settings.get().tapo.username, password: pw }),
       clipsDir: () => service.clipsDir(),
@@ -284,7 +340,7 @@ export function createTapo(o) {
 function bind(s) {
   /** @type {Record<string, any>} */
   const out = {};
-  for (const k of ['status', 'setCredentials', 'clearCredentials', 'test', 'discover', 'ptz', 'presets', 'savePreset', 'removePreset', 'arm', 'calibrate', 'listEvents', 'removeEvent', 'ackEvent', 'openClips', 'attachWorker']) {
+  for (const k of ['status', 'setCredentials', 'clearCredentials', 'test', 'discover', 'ptz', 'presets', 'savePreset', 'removePreset', 'arm', 'calibrate', 'listEvents', 'removeEvent', 'ackEvent', 'openClips', 'attachWorker', 'retry', 'diagnostics']) {
     out[k] = s[k].bind(s);
   }
   return out;

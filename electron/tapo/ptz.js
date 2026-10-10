@@ -13,8 +13,10 @@
 //    500 ms only while heartbeats arrive; 700 ms without one → Stop chain.
 //  * stopAll() on window blur, renderer gone, disarm-while-moving and quit.
 //  * one request in flight; a newer move replaces a queued one; Stop jumps the queue (client).
-// The camera in privacy mode answers PTZ with a malformed response, then HTTP 500: that suspends
-// PTZ for 60 s with a hint, and never marks it unsupported.
+// The camera in privacy mode answers PTZ with a malformed response, then HTTP 500 (or a 500 with a
+// SOAP fault that is no argument error): that is shown as "privacy mode?" with a hint, never as
+// "unsupported". The suspicion is re-checked every 5 s with a cheap read (GetStatus, else
+// GetNodes) and clears at the first normal answer or a move that works (≤ 60 s otherwise).
 
 import { EventEmitter } from 'node:events';
 
@@ -35,6 +37,8 @@ export const PROGRESS_EPS = 0.01;
 /** A hold ends this close to the end of the travel (the absolute position space is −1..1). */
 export const HOLD_LIMIT_EPS = 0.01;
 export const PRIVACY_MS = 60_000;
+/** While privacy mode is suspected, a cheap PTZ read this often: the first normal answer clears it. */
+export const PRIVACY_RECHECK_MS = 5000;
 export const CENTER_DEADBAND = 0.04;
 
 export const PRIVACY_HINT = 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.';
@@ -161,6 +165,18 @@ function isPrivacySymptom(err) {
   return err instanceof OnvifError && (err.kind === 'malformed' || (err.kind === 'http' && err.status === 500));
 }
 
+/** Faults that say what was wrong with a request (not privacy mode). */
+const ARGUMENT_FAULT = /InvalidArg|NoToken|NoProfile|NoPTZProfile|NoEntity|InvalidPosition|InvalidSpeed|InvalidTranslation|InvalidVelocity|NoSuchService|ActionNotSupported|NotSupported|OptionalAction|NotAuthorized|unsupported/i;
+
+/**
+ * A 5xx SOAP fault to a move or Stop that is no argument error: privacy mode answers like that too
+ * (the 500 carries a fault body). Not for GetStatus: firmwares without it answer with faults.
+ * @param {unknown} err
+ */
+function isPrivacyMoveFault(err) {
+  return err instanceof OnvifError && err.kind === 'fault' && err.status >= 500 && !ARGUMENT_FAULT.test(`${err.codes.join(' ')} ${err.text}`);
+}
+
 /**
  * @typedef {object} PtzOptions
  * @property {import('./onvif-client.js').OnvifClient} client
@@ -193,6 +209,8 @@ export class PtzController extends EventEmitter {
     /** @type {{ x: number, y: number }|null} */
     this.position = null;
     this._privacyUntil = 0;
+    /** @type {any} */
+    this._privacyTimer = null;
     this._disposed = false;
     /** watchdog of the current move @type {{ seq: number, timers: Array<any>, deadline: number, checkPos: { x: number, y: number }|null, pollOk: boolean }|null} */
     this._watch = null;
@@ -233,23 +251,56 @@ export class PtzController extends EventEmitter {
   }
 
   get privacySuspected() {
-    if (this._privacyUntil && this._now() >= this._privacyUntil) {
-      this._privacyUntil = 0;
-      this.emit('privacy', false);
-    }
+    if (this._privacyUntil && this._now() >= this._privacyUntil) this._clearPrivacy('60 s passed');
     return this._privacyUntil > 0;
   }
 
-  /** @param {unknown} err */
-  _notePrivacy(err) {
-    if (!isPrivacySymptom(err)) return false;
+  /** @param {unknown} err @param {{ move?: boolean }} [o] move: the answer to a move or Stop */
+  _notePrivacy(err, o = {}) {
+    if (!isPrivacySymptom(err) && !(o.move && isPrivacyMoveFault(err))) return false;
     const was = this._privacyUntil > 0;
     this._privacyUntil = this._now() + PRIVACY_MS;
     if (!was) {
-      this._log('info', '[tapo] PTZ answers look like privacy mode; pausing pan/tilt for 60 s');
+      this._log('info', '[tapo] PTZ answers look like privacy mode; checking again every 5 s');
       this.emit('privacy', true);
+      this._schedulePrivacyCheck();
     }
     return true;
+  }
+
+  /** The camera answered normally again (a read or a move worked): no longer suspected. @param {string} why */
+  _clearPrivacy(why) {
+    this._clearTimeout(this._privacyTimer);
+    this._privacyTimer = null;
+    if (!this._privacyUntil) return;
+    this._privacyUntil = 0;
+    this._log('info', `[tapo] privacy mode no longer suspected (${why})`);
+    this.emit('privacy', false);
+  }
+
+  /** While suspected: a cheap PTZ read every 5 s; the first well-formed answer clears it. */
+  _schedulePrivacyCheck() {
+    this._clearTimeout(this._privacyTimer);
+    this._privacyTimer = this._setTimeout(async () => {
+      this._privacyTimer = null;
+      if (this._disposed || !this._privacyUntil) return;
+      if (!this.privacySuspected) return;
+      try {
+        if (this.caps.canStatus) {
+          const st = await this.client.getStatus();
+          if (!st || !st.position) throw new Error('no position');
+          this._setPosition(st.position);
+        } else {
+          await this.client.getNodes();
+        }
+        this._clearPrivacy('the camera answers normally again');
+        if (this._reprobe) this.probe().catch(() => {});
+        return;
+      } catch (err) {
+        this._notePrivacy(err); // still odd: the suspicion lasts (60 s from the last symptom)
+      }
+      if (this._privacyUntil && !this._disposed) this._schedulePrivacyCheck();
+    }, PRIVACY_RECHECK_MS);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -352,8 +403,9 @@ export class PtzController extends EventEmitter {
     }
     if (this.client.authFailed) return { ok: false, code: 'auth', error: 'The camera refused the sign-in. Check the Camera Account in the setup.' };
     if (!this.caps.available) return { ok: false, code: 'unsupported', error: 'This camera does not offer pan and tilt over ONVIF (or it is turned off in the settings).' };
-    if (this.privacySuspected) return { ok: false, code: 'privacy', error: PRIVACY_HINT };
-    if (this._reprobe) await this.probe().catch(() => {});
+    // (while privacy mode is only suspected, commands still go out: the one that works clears it,
+    // and one in privacy mode gets the hint from the camera's own answer)
+    if (this._reprobe && !this.privacySuspected) await this.probe().catch(() => {});
 
     if (cmd.op === 'hold') return this._startHold(cmd.dir);
     // any other move ends a hold first
@@ -427,7 +479,7 @@ export class PtzController extends EventEmitter {
 
   /** @param {unknown} err @returns {PtzResult} */
   _errorResult(err) {
-    if (this._notePrivacy(err)) return { ok: false, code: 'privacy', error: PRIVACY_HINT };
+    if (this._notePrivacy(err, { move: true })) return { ok: false, code: 'privacy', error: PRIVACY_HINT };
     if (err instanceof OnvifError) {
       if (err.kind === 'auth') return { ok: false, code: 'auth', error: err.message };
       if (['timeout', 'reset', 'refused', 'unreachable'].includes(err.kind)) return { ok: false, code: 'offline', error: 'The camera did not answer. Is it switched on and on the network?' };
@@ -580,6 +632,7 @@ export class PtzController extends EventEmitter {
     this._beginMove();
     try {
       await send();
+      if (this._privacyUntil) this._clearPrivacy('a move worked');
     } catch (err) {
       const kind = err instanceof OnvifError ? err.kind : 'unknown';
       if (['fault', 'auth', 'refused'].includes(kind)) this._endMove(`move refused (${kind})`);
@@ -698,11 +751,11 @@ export class PtzController extends EventEmitter {
     try {
       await this.client.stop();
     } catch (err) {
-      this._notePrivacy(err);
+      this._notePrivacy(err, { move: true });
       try {
         await this.client.stop({ minimal: true });
       } catch (err2) {
-        this._notePrivacy(err2);
+        this._notePrivacy(err2, { move: true });
         errored = true;
         this._log('info', `[tapo] Stop failed (${/** @type {Error} */ (err2).message}); sending zero velocity`);
       }
@@ -983,5 +1036,7 @@ export class PtzController extends EventEmitter {
     this._disposed = true;
     this._cancelWatchdog();
     this._cancelStopCheck();
+    this._clearTimeout(this._privacyTimer);
+    this._privacyTimer = null;
   }
 }

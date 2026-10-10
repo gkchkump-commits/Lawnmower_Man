@@ -91,7 +91,7 @@ vi.mock('electron', async () => {
     BrowserWindow,
     Tray,
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn((t) => ({ template: t })) },
-    dialog: { showErrorBox: vi.fn() },
+    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn(async () => ({ response: 1 })) },
     globalShortcut: { register: vi.fn(() => true), unregister: vi.fn(), unregisterAll: vi.fn() },
     ipcMain: {
       handle: vi.fn((ch, h) => m.handlers.set(ch, h)),
@@ -122,6 +122,9 @@ vi.mock('electron', async () => {
     safeStorage: { isAsyncEncryptionAvailable: vi.fn(async () => false), getSelectedStorageBackend: vi.fn(() => 'basic_text') },
     Notification: class { static isSupported() { return false; } show() {} on() {} },
     MessageChannelMain: class {},
+    // an armed camera keeps the PC from sleeping and reconnects when it wakes
+    powerSaveBlocker: { start: vi.fn(() => 1), stop: vi.fn() },
+    powerMonitor: { on: vi.fn(), removeListener: vi.fn() },
   };
 });
 
@@ -222,7 +225,9 @@ describe('electron/main.js wiring', () => {
       'lm:tapo:arm', 'lm:tapo:calibrate', 'lm:tapo:clear-credentials', 'lm:tapo:discover', 'lm:tapo:event-ack', 'lm:tapo:event-remove', 'lm:tapo:events-list',
       'lm:tapo:open-clips', 'lm:tapo:preset-remove', 'lm:tapo:preset-save', 'lm:tapo:presets', 'lm:tapo:ptz', 'lm:tapo:request-port', 'lm:tapo:set-credentials',
       'lm:tapo:status', 'lm:tapo:test', 'lm:tapo:window',
-    ]);
+      // added by the UX fixes (camera window only): Retry, Copy diagnostic report
+      'lm:tapo:diagnostics', 'lm:tapo:retry',
+    ].sort());
   });
 
   it('round-trips a Claude turn through IPC and forwards events to the renderer', async () => {
@@ -852,6 +857,32 @@ describe('electron/main.js wiring', () => {
     }
     expect(camWindows()[0].destroyed).toBe(true);
     expect(t.state.tapo.cameraWindow()).toBe(null);
+  });
+
+  it('quitting while the home camera is armed asks first (UX review); disarmed it just quits', async () => {
+    const t = main.__test;
+    const tapo = t.state.tapo;
+    const was = tapo.isArmed;
+    try {
+      tapo.isArmed = () => true;
+      electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1 }); // Cancel
+      await t.trayActions.quit();
+      expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: 'The home camera is armed.', buttons: ['Quit anyway', 'Cancel'] }));
+      expect(electron.app.quit).not.toHaveBeenCalled();
+      electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 }); // Quit anyway
+      m.listeners.get('lm:window:quit')(trusted());
+      for (let i = 0; i < 50 && !electron.app.quit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(electron.app.quit).toHaveBeenCalledTimes(1);
+      electron.app.quit.mockClear();
+      electron.dialog.showMessageBox.mockClear();
+      tapo.isArmed = () => false;
+      await t.trayActions.quit();
+      expect(electron.dialog.showMessageBox).not.toHaveBeenCalled();
+      expect(electron.app.quit).toHaveBeenCalledTimes(1);
+    } finally {
+      tapo.isArmed = was;
+      electron.app.quit.mockClear();
+    }
   });
 
   it('shuts down child processes on will-quit, then quits', async () => {

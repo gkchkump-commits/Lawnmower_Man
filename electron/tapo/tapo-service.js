@@ -521,7 +521,8 @@ export class TapoService extends EventEmitter {
     if (port !== this._port) return;
     const m = validateWorkerMessage(raw);
     if (!m) {
-      this._log('debug', `[tapo] dropped an invalid worker message (${typeof raw?.t === 'string' ? raw.t.slice(0, 20) : typeof raw})`);
+      const what = typeof raw?.t === 'string' ? raw.t.slice(0, 20) : raw && typeof raw === 'object' ? `fields: ${Object.keys(raw).slice(0, 6).join(', ') || 'none'}` : typeof raw;
+      this._log('debug', `[tapo] dropped an invalid worker message (${what})`);
       return;
     }
     switch (m.t) {

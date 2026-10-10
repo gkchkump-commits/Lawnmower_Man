@@ -101,7 +101,7 @@ export function createTapo(o) {
   /** @param {string} channel @param {unknown} payload */
   function sendToCamera(channel, payload) {
     const wc = cam?.webContents;
-    if (!wc || wc.isDestroyed()) return;
+    if (!wc || wc.isDestroyed() || wc.isCrashed?.()) return; // a crashed page reloads and asks again
     try {
       wc.send(channel, payload);
     } catch (err) {

@@ -593,7 +593,12 @@ export class Controller extends Emitter {
         this.avatar.setIntonation?.(this._mouthActive ? m.intonation : null);
       }
     }
-    if (this.mic && (this.listen || this.handsFree)) this.view.setMicLevel?.(this.mic.paused ? 0 : this.mic.level || 0);
+    if (this.mic && (this.listen || this.handsFree)) {
+      const level = this.mic.paused ? 0 : this.mic.level || 0;
+      this.view.setMicLevel?.(level);
+      // (the avatar listens too: it nods at the pauses of the user's voice, src/avatar/behavior.js)
+      this.avatar?.setUser?.({ voice: level });
+    }
     if (this.sleepAfterMs > 0 && !this.sleeping && this.state === 'idle' && !this.listen && !this.permissions.size
       && this._now() - this._lastActivity > this.sleepAfterMs) {
       this.sleeping = true;

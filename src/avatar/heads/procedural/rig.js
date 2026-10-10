@@ -20,7 +20,7 @@ export const PROC_LIMITS = Object.freeze({
   vergence: 0.025,         // slight convergence (eyes look at a point in front of the face)
   breathFh: 0.004,
   // posture and lids of the behaviour layer (as the relief head's)
-  leanScale: 0.03, leanDropFh: 0.012, shiftFh: 0.02, squintBlink: 0.3, squintLower: 0.35,
+  leanScale: 0.03, leanDropFh: 0.012, shiftFh: 0.02, squintBlink: 0.42, squintLower: 0.35,
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
   teethLiftFh: 0.011,      // upper lip lift for teeth = 1 (the incisors show)
   tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)

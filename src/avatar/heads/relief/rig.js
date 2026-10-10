@@ -40,8 +40,8 @@ export const RIG_LIMITS = {
   leanScale: 0.03,        // the head grows this much at lean = 1 (toward the viewer)
   leanDropFh: 0.012,      // ... and sinks a little (leaning in from a seated pose)
   shiftFh: 0.02,          // sideways shift of the head at shiftX = 1
-  squintBlink: 0.3,       // a squint closes the eye this much (the lid wipe, both lids)
-  squintLowerFrac: 0.1,   // and pushes the lower lid up
+  squintBlink: 0.42,      // a squint closes the eye this much (the lid wipe, both lids; a yawn: half shut)
+  squintLowerFrac: 0.12,  // and pushes the lower lid up
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
   teethLiftFh: 0.016,     // upper lip lift for teeth = 1 (the incisors show)
   teethDropFh: 0.004,     // lower lip drop for teeth = 1

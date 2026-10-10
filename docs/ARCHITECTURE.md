@@ -557,14 +557,23 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   HTTP on port 2020 with hand-written SOAP and WS-Security PasswordDigest (`onvif-soap.js`,
   `onvif-client.js`), pan/tilt with motor watchdogs, press-and-hold heartbeats and calibration
   (`ptz.js`, `calibration.js`), the camera's PullPoint events (`events.js`), the bundled **go2rtc**
-  1.9.14 as a supervised sidecar on `127.0.0.1` (random port, random Basic credentials, the camera
-  password only in its environment; `go2rtc.js`), its fMP4 parsed in main (`fmp4.js`,
+  1.9.14 as a supervised sidecar on `127.0.0.1` (random port, random Basic credentials; `go2rtc.js`)
+  that pulls the camera's RTSP through an auth proxy in main (`rtsp-auth-proxy.js`: loopback,
+  a random path token, Digest only, never Basic, TEARDOWN on stop), so go2rtc never has the
+  Camera Account; its fMP4 parsed in main (`fmp4.js`,
   `stream-relay.js`) and fanned out to the clip recorder (`recorder.js`, `retention.js`,
   `event-store.js`) and to the camera window's worker over a `MessagePortMain`, the pure security
   engine (`security-engine.js`), Windows notifications (`alerts.js`), the password store
   (`credentials.js`, `safeStorage` async / DPAPI) and the camera window (`camera-window.js`).
   A wrong password is tried once and then not again until it or the address changes (camera
-  lockouts); go2rtc starts only after the ONVIF sign-in worked.
+  lockouts); go2rtc starts only after the ONVIF sign-in worked. A health check (every 2 s) finds a
+  camera that dropped off mid-session (unauthenticated `GetSystemDateAndTime` after a 10 s video
+  stall or failing events) and shows an armed camera that is not watching
+  (`status.security.watching`, the tray's *Armed · camera offline*); armed, a `powerSaveBlocker`
+  keeps the PC awake and `powerMonitor` *resume* reconnects; quitting while armed asks first;
+  `security.startAtLogin` sets the login item (packaged Windows/macOS builds). The camera window
+  has two more invoke channels, `lm:tapo:retry` and `lm:tapo:diagnostics` (the redacted report,
+  `diagnostics.js`).
 * **Windows:** the Home camera window (`src/tapo/`, `app://lawnmower/tapo/index.html`) is a normal
   framed, sandboxed window with its own preload (§3). Closing it hides it: its security worker
   (WebCodecs decoding, 64×36 motion, the MediaPipe EfficientDet-Lite0 int8 person detector,
@@ -580,14 +589,17 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   `security_arm`; Claude can arm but never disarm). `ClaudeSession` offers it over the stream-json
   control channel (`initialize.sdkMcpServers` + `control_request{subtype:'mcp_message'}`, "G1").
   If a CLI's `system/init` then lacks the server's tools, the session switches for the rest of the
-  app session to the server's loopback Streamable-HTTP endpoint ("G2", `mcp-http.js`):
+  app session (chat and assistant modes only: in agent mode Claude's Bash tool could read the
+  token from the CLI's environment and skip the approval card, so agent mode stays on G1) to the
+  server's loopback Streamable-HTTP endpoint ("G2", `mcp-http.js`):
   `startHttp(): Promise<{ url: 'http://127.0.0.1:<port>/mcp', token }>` (idempotent while running)
   and `stopHttp(): Promise<void>`; the CLI gets `--mcp-config <userData>/mcp/lawnmower-camera.json`
   (with `--strict-mcp-config`), whose `Authorization: Bearer ${LM_MCP_TOKEN}` header names an
   environment variable set only in the CLI's environment; the endpoint refuses requests without the
   token, with an `Origin` header or with another `Host`. `toolPermissions()` maps
   `security.claudeSee` / `claudeMove` to `--allowedTools` / `--disallowedTools` (`camera_status` and
-  `camera_events` are always pre-approved, `security_arm` never), and `personaContext()` adds the
+  `camera_events` are always pre-approved, `security_arm` never, `camera_look` not while armed;
+  the tools' texts never carry the camera's address), and `personaContext()` adds the
   camera paragraph to the persona. Main hands both to the session again whenever they change
   (a settings change or a status change, e.g. a password saved), which restarts the CLI after the
   running turn and resumes the conversation.
@@ -603,3 +615,8 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   `vendor/go2rtc/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy it
   to `resources/tapo/go2rtc(.exe)` with `resources/tapo/go2rtc-LICENSE.txt`. The person detector
   model is committed in `public/assets/security/` and ships in `app.asar`.
+* **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
+  Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
+  `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the
+  app does not ship. Windows, the supported platform, passes only handles marked inheritable;
+  not verified there.

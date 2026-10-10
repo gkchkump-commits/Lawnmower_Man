@@ -12,7 +12,7 @@ node tools/tapo-sim --quirks ideal  # random ports; prints {"event":"ready","onv
 ```
 
 To point the app at it: start the app with `LAWNMOWER_TAPO_ALLOW_LOOPBACK=1`, open the Home camera
-window, enter host `127.0.0.1`, user `camacct`, password `se&cret`, and under *Advanced* the ONVIF
+window, enter host `127.0.0.1`, user `camacct`, password `se&cret`, and under *Ports and stream* the ONVIF
 port 12020 and the RTSP port 10554. Then script the scene:
 
 ```bash

@@ -183,9 +183,11 @@ export class TapoAvatarLink extends Emitter {
   intercept(text, _o = {}) {
     const s = this.getSettings();
     if (!this.available || !s.tapo?.enabled || s.security?.voiceCommands === false) return false;
-    if (this.status?.connection !== 'online') return false;
     const intent = parseCameraIntent(text, { presets: this.presets.map((p) => p.name), name: s.tapo?.name || 'camera' });
     if (!intent) return false;
+    // only turning needs the camera; arming, disarming and the window are local (review: "disarm
+    // the camera" with the camera offline went to Claude, which has no disarm)
+    if (intent.kind === 'ptz' && this.status?.connection !== 'online') return false;
     this.emit('intent', intent);
     this._run(intent).catch((err) => this._confirm(`The camera did not answer: ${err?.message || err}`, 'error'));
     return true;

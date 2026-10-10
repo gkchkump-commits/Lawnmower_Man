@@ -606,6 +606,8 @@ try {
     const card = avatar.locator('.perm-card');
     const shown = await until(() => card.isVisible(), 20000);
     check('camera_snapshot on "ask" shows an approval card', shown);
+    const cardText = shown ? { tool: await card.locator('.perm-tool').textContent(), all: await card.textContent() } : null;
+    check('…the card says "Camera: snapshot", and the app\'s own words are not "Claude says"', !!cardText && cardText.tool === 'Camera: snapshot' && !/Claude says|mcp__/.test(cardText.all), cardText);
     await shot(avatar, '6-approval');
     if (shown) {
       await sleep(1200); // cards ignore clicks for a moment after they appear

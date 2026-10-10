@@ -131,7 +131,7 @@ export async function connectionTest(o) {
     const ptz = new PtzController({ client, getSettings: o.ptzSettings || (() => ({})), log, now });
     const caps = await ptz.probe().catch(() => noCaps());
     report.ptz = caps;
-    step('ptz', 'Pan and tilt', caps.available, caps.available ? `Works (${caps.mode} moves${caps.canStatus ? ', reports its position' : ''}).` : ptz.privacySuspected ? PRIVACY_HINT : 'Not offered over ONVIF by this camera or firmware.', caps.available ? undefined : ptz.privacySuspected ? undefined : 'Send the probe report (npm run probe:tapo) so support for your firmware can be checked.');
+    step('ptz', 'Pan and tilt', caps.available, caps.available ? `Works (${caps.mode} moves${caps.canStatus ? ', reports its position' : ''}).` : ptz.privacySuspected ? PRIVACY_HINT : 'Not offered over ONVIF by this camera or firmware.', caps.available ? undefined : ptz.privacySuspected ? undefined : 'Press “Copy diagnostic report” below and send it, so support for your firmware can be checked.');
     await ptz.dispose().catch(() => {});
     // camera events
     try {

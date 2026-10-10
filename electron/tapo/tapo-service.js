@@ -924,6 +924,9 @@ export class TapoService extends EventEmitter {
       }
       case 'event-start': {
         this._eventKinds.set(a.event.id, a.event.kind);
+        // a motion that may turn out to be a person: its clip then starts preRollSec before the
+        // event, not before the upgrade (released by record-start / event-end)
+        this.recorder.holdPreRoll(true);
         const pos = this.ptzCtl?.position || null;
         this.store.upsert({ ...this._record(a.event), base: eventBase(a.event.id, a.event.kind), ptz: pos }).catch(() => {});
         this.emit('security-event', { phase: 'start', event: this._withUrls(a.event) });
@@ -938,8 +941,11 @@ export class TapoService extends EventEmitter {
         return;
       case 'event-end': {
         const ev = a.event;
-        this.store.upsert({ ...this._record(ev), durationSec: Math.round(((ev.endedAt - ev.startedAt) / 1000) * 10) / 10 }).catch(() => {});
-        this.emit('security-event', { phase: 'end', event: this._withUrls(ev) });
+        const durationSec = Math.round(((ev.endedAt - ev.startedAt) / 1000) * 10) / 10;
+        this.store.upsert({ ...this._record(ev), durationSec }).catch(() => {});
+        // (the list row and the player show the duration: review)
+        this.emit('security-event', { phase: 'end', event: { ...this._withUrls(ev), durationSec } });
+        this.recorder.holdPreRoll(false);
         this._alertSnaps.delete(ev.id);
         this._syncTick();
         this._statusSoon();
@@ -948,6 +954,7 @@ export class TapoService extends EventEmitter {
       case 'record-start': {
         const kind = /** @type {any} */ (this._eventKinds.get(a.eventId) || 'motion');
         if (!this.recorder.start(a.eventId, { kind })) this._log('info', '[tapo] no clip: the stream is not running');
+        this.recorder.holdPreRoll(false);
         this._updateStream();
         return;
       }
@@ -1017,8 +1024,12 @@ export class TapoService extends EventEmitter {
       return;
     }
     const rec = this.store.get(c.id);
-    this.store.upsert({ id: c.id, bytes: (rec?.bytes || 0) + c.bytes }).catch(() => {});
-    this.emit('security-event', { phase: 'update', event: this._withUrls(rec ? toSummary(rec) : { id: c.id }) });
+    const bytes = (rec?.bytes || 0) + c.bytes;
+    this.store.upsert({ id: c.id, bytes }).catch(() => {});
+    // the clip usually finishes after its event ended: that is no new "update" of a live event
+    // (which the camera window would toast as "seen just now" again)
+    const live = this.engine.state.active?.id === c.id;
+    this.emit('security-event', { phase: live ? 'update' : 'end', event: { ...this._withUrls(rec ? toSummary(rec) : { id: c.id }), bytes } });
     this._statusSoon();
   }
 

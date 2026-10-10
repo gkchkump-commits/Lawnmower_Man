@@ -89,7 +89,8 @@ Also once:
 
 12. Open the camera window: in the **tray menu** choose **Home camera › Set up the home camera…**
     (later it says *Show camera window*), or in the settings drawer (gear icon) open **Home
-    camera** and press **Open camera window…**.
+    camera**, turn on **Home camera**, then press **Open camera window…** (the button appears
+    once the switch is on).
 13. In **2. Connect**:
     * **Camera address**: the camera's IP address from step 9. Or press **Find cameras** to look
       for it on your network (Windows may ask whether Lawnmower Man may use the network: allow it
@@ -103,11 +104,13 @@ Also once:
     tilt**) and then **Start**. The
     camera turns a little to the side, up and down, and back; it takes about 30 seconds. This
     teaches Lawnmower Man which way the camera turns and how far, so the arrows and
-    click-to-center go the right way. If the room is too dark to measure, it asks you which way the
-    picture moved.
+    click-to-center go the right way. If the room is too dark to measure, it turns the camera and
+    asks you **which way the camera turned** (not the picture: the picture moves the other way),
+    with only the answers for the direction it just tried.
 15. When you leave home, press **Arm** (top of the camera window). You have 30 seconds to leave
     the room. The first time, Windows may ask whether Lawnmower Man may show notifications: allow
-    it.
+    it. **The PC must stay on and Lawnmower Man must keep running** for the alarm to work (see
+    [Arming](#arming)).
 
 The password is stored encrypted for your Windows user (see [Privacy and
 security](#8-privacy-and-security)). It is never shown again; the form only says that one is
@@ -196,6 +199,16 @@ pictures briefly and factually and never to guess who someone is. In the camera 
   Change this under gear › **4. Alerts and recording** › *Time to leave after arming*.
 * An armed alarm stays armed when you restart the PC or the app.
 * While disarmed nothing is checked or recorded.
+* **The PC watches, not the camera.** The alarm only works while the PC is on and Lawnmower Man
+  is running. While armed, the app keeps Windows from going to sleep (the screen may still turn
+  off). Turn on gear › **4. Alerts and recording** › **Start Lawnmower Man with Windows**, so an
+  armed alarm comes back after a restart or a Windows update (it starts in the tray; the camera
+  window offers this the first time you arm). Quitting while armed asks first.
+* **When an armed camera is not watching**, it never just says *Armed*: the tray, the arm button
+  and the avatar's pill say **Armed · camera offline** (the camera does not answer) or **Armed ·
+  not watching** (no video for 30 seconds). After a minute you also get a notification, and the
+  avatar says *"I lost the camera."* The app reconnects by itself (and at once after the PC wakes
+  up); **Retry** in the camera window tries right away.
 
 ### What makes an alert
 
@@ -209,7 +222,8 @@ pictures briefly and factually and never to guess who someone is. In the camera 
   video (re)starts, and the whole picture changing at once (the night vision switching on at
   dusk, the lights being turned on).
 * **Sensitivity** (*Low / Medium / High*) sets how sure the detectors must be.
-* *At most one alert every* 60 seconds (default) for the same kind of event.
+* *At most one alert every* 60 seconds (default) for the same kind of event. A person who
+  arrives within that minute is told once the minute is up, if they are still there.
 * **Quiet hours** (for example `23:00-07:00`): no spoken alerts and silent notifications in
   that time; everything is still recorded.
 
@@ -219,7 +233,8 @@ pictures briefly and factually and never to guess who someone is. In the camera 
    to see the clip.
 2. The **avatar** comes back if it was hidden (*Bring the avatar back on an alert*), looks toward
    the camera window and says *"Someone is at the camera."* (*The avatar says it*).
-3. A **clip** is recorded: from 5 seconds before until 10 seconds after the last sign of the
+3. A **clip** is recorded: from 5 seconds before the event started (for movement that turned out
+   to be a person: 5 seconds before the movement) until 10 seconds after the last sign of the
    person (at most 2 minutes per file; a longer event continues in a new file).
 4. Optional, **off by default**: **Claude describes alerts**. The alert picture is sent to Claude,
    which says one sentence about it ("A person in a grey jacket is standing at the door."). The
@@ -245,16 +260,17 @@ pictures briefly and factually and never to guess who someone is. In the camera 
 |---|---|---|
 | **Sign-in failed** | The TP-Link login was used instead of the Camera Account, or a typo | Enter the Camera Account (step 3) again and press **Test connection**. Lawnmower Man does not try again by itself: repeated wrong passwords can lock the PC out of the camera for a while |
 | *"The camera's clock is … s off"*, or sign-in fails after some hours | The camera's clock is wrong (it cannot reach the internet to set it) | Let the camera reach the internet, or restart it (unplug it for 10 seconds). Lawnmower Man adjusts for the difference, but a clock that keeps drifting can still break the sign-in |
-| **Offline** / unreachable | Wrong address, the address changed, guest Wi-Fi, AP isolation | Give the camera a fixed address (step 9), put both on the same network (step 10), or press **Find cameras** |
+| **Offline** / unreachable | Wrong address, the address changed, guest Wi-Fi, AP isolation, the camera unplugged | Give the camera a fixed address (step 9), put both on the same network (step 10), or press **Find cameras**. The app tries again by itself (2 s, 5 s, 10 s, 30 s, then every minute); **Retry** tries at once |
+| The tray says **Armed · camera offline** or **Armed · not watching** | The camera stopped answering, or its video stopped, while armed | See *Offline* above, and *The live view is busy*. Nothing is watched until it reads plain **Armed** again |
 | The live view is **busy** or drops when the phone app watches | The camera allows only **two** live streams at a time, the Tapo app included | Close other viewers (the phone app's live view, a recorder, Home Assistant) |
 | No video and no connection at all, although the address is right | Tapo Care cloud recording **and** a microSD card are both on | Turn one of them off (step 7) |
-| **Pan and tilt does nothing** | Privacy mode is on, or this firmware has no ONVIF pan/tilt | Turn privacy mode off in the Tapo app. If the window says pan and tilt are not available, send the diagnostic report (§9) |
+| **Pan and tilt does nothing** | Privacy mode is on, or this firmware has no ONVIF pan/tilt | Turn privacy mode off in the Tapo app; the arrows work again within a few seconds. If the window says pan and tilt are not available, press **Copy diagnostic report** (§9) and send it |
 | The camera turns **the wrong way** | Mirrored axes (common on Tapo cameras) | **Calibrate…** again, or use *Swap left and right* / *Swap up and down* (gear › **3. Pan and tilt**) |
 | Clicking the picture turns **too far or not far enough** | Not calibrated, or calibrated in the dark | **Calibrate…** with the lights on |
 | **No camera events** (only "this PC" detections) | Detection is off in the Tapo app, or the firmware does not send events | Turn on motion and person detection (step 5). The PC's own detection still works |
 | *"This PC cannot decode this stream"* | The camera sends H.265 and this PC has no decoder for it | gear › **2. Connect** › *Ports and stream* › **stream2**, or a lower video quality in the Tapo app |
 | **No notifications** | Windows notifications are off for the app, or *Do not disturb* / Focus is on | Windows **Settings › System › Notifications › Lawnmower Man**: on. The avatar's announcement and the events list still work |
-| The video stops and comes back every ~15 seconds | The camera ends the video connection when it gets no "still watching" message in time | Should not happen (the app sends one every 10 seconds). If it does, send the diagnostic report (§9) |
+| The video stops and comes back every ~15 seconds | The camera ends the video connection when it gets no "still watching" message in time | Should not happen (the app sends one every 10 seconds). If it does, press **Copy diagnostic report** (§9) and send it |
 | *The video component is missing* | An antivirus program removed the bundled `go2rtc.exe` | Restore it from the antivirus quarantine, or reinstall Lawnmower Man. Pan, tilt and the camera's own events still work without it |
 | False alarms at dusk or when the camera patrols | Night vision switching, Tapo patrol/auto-tracking | Turn off patrol/auto-tracking in the Tapo app; lower the *Sensitivity* |
 
@@ -275,7 +291,16 @@ pictures briefly and factually and never to guess who someone is. In the camera 
 * **On your network the camera's video is not encrypted** (that is how RTSP works on these
   cameras). Use a home network you trust; keep the camera off guest and public networks.
 * The video component (**go2rtc**) listens **only on this PC** (`127.0.0.1`), behind a random
-  password that changes every start; it offers nothing to the network.
+  password that changes every start; it offers nothing to the network. **go2rtc never gets the
+  Camera Account**: it pulls the video through a small proxy in the app (also `127.0.0.1` only,
+  behind a random token), which signs in to the camera with Digest. If something at the camera's
+  address asks for an unencrypted (*Basic*) sign-in, the password is not sent, and the window
+  says so.
+* **Claude never hears the camera's address** (or the user name): the camera tools' answers are
+  fixed sentences, and anything the camera sends (names, error texts) is shortened and cleaned
+  first. *Always* for turning the camera is not used while the alarm is armed: then Claude asks
+  each time.
+* The camera password must have at least 4 characters (Tapo asks for 6 to 32).
 * The app talks only to the address you entered, and only if it is a home-network address
   (`192.168.x.x`, `10.x.x.x` and similar). The app's windows cannot reach your network or the
   internet themselves; all camera traffic goes through the app's main process.
@@ -296,17 +321,20 @@ pictures briefly and factually and never to guess who someone is. In the camera 
   and the video. A ✗ comes with a hint.
 * **The log**: tray menu › **Open logs folder** › `main.log`. Lines about the camera start with
   `[tapo]`. Passwords never appear in it.
-* **The probe report** (for help with a firmware that behaves differently; needs the source
-  code of Lawnmower Man and Node.js):
+* **Copy diagnostic report** (camera window › gear › **2. Connect**, under the test): runs the
+  connection test plus the camera's streams, services and serial number, adds what the app sees
+  right now (connection, video, pan/tilt, events, detector, armed), and copies it as JSON for you
+  to paste into a message. It leaves out the password, the user name and the address (shown as
+  `<camera>`), cuts the serial number to 4 characters, and does not move the camera. It sends
+  nothing anywhere.
+* **For developers**, the same from the source code (and optionally one small test move):
 
   ```
   npm run probe:tapo -- --host 192.168.1.50 --user <Camera Account user name> --move
   ```
 
-  It asks for the password (hidden; or set `TAPO_PASSWORD`), runs the connection test, asks the
-  camera for its streams and events, and with `--move` turns it a small step right and back. The
-  report leaves out the password, the user name and the address, and cuts the serial number. It
-  sends nothing anywhere; copy it yourself. `--json` prints it as JSON.
+  It asks for the password (hidden; or set `TAPO_PASSWORD`); `--move` turns the camera a small
+  step right and back; `--json` prints JSON.
 
 ---
 
@@ -316,7 +344,7 @@ pictures briefly and factually and never to guess who someone is. In the camera 
 
 ```
 Tapo C211 ──ONVIF SOAP :2020──► Electron main: electron/tapo/
-          ──RTSP :554 (1 session)──► go2rtc (127.0.0.1 only) ──fMP4──► stream-relay
+          ──RTSP :554 (1 session)──► rtsp-auth-proxy (main, Digest) ──► go2rtc (127.0.0.1 only) ──fMP4──► stream-relay
                                                                          ├─► recorder (GOP ring, clips)
                                                                          └─► MessagePort ─► camera window worker
                                                                                              (WebCodecs decode, motion,
@@ -328,7 +356,15 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
 * **Control:** ONVIF Profile S over plain HTTP on port 2020, hand-written SOAP in main
   (`electron/tapo/onvif-soap.js`, `onvif-client.js`), WS-Security UsernameToken
   PasswordDigest with the Camera Account, the camera clock's offset applied to `Created`.
-  Requests to one camera are serialized; event pulls have their own connection.
+  Requests to one camera are serialized; event pulls (PullMessages, Renew, Unsubscribe) have
+  their own connection, while GetEventProperties and CreatePullPointSubscription go through the
+  control queue. Renew follows the camera's own TerminationTime.
+* **Health:** every 2 s main checks whether the video has stalled for 10 s or the events keep
+  failing; then it asks the camera for its time (no sign-in, so no lockout risk), and a camera
+  that does not answer is shown as offline and retried with backoff. An armed camera that is not
+  watching is shown as such (`status.security.watching`: `offline` / `no-video`), with one
+  notification after 60 s. Armed, a `powerSaveBlocker` keeps the PC from suspending;
+  `powerMonitor` *resume* reconnects at once.
 * **Pan/tilt** (`ptz.js`): RelativeMove steps as fractions of the view (converted with the
   calibrated `viewUnitsX/Y`), press-and-hold as ContinuousMove with heartbeats, a watchdog `Stop`
   after every move and a Stop fallback chain (so a motor can never grind at its end stop),
@@ -338,17 +374,26 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
 * **Video:** the bundled **go2rtc 1.9.14** (`scripts/fetch-go2rtc.mjs`, SHA-256 pinned) pulls one
   RTSP session only while the stream is needed (window visible, armed, calibrating, recording or
   a snapshot) and serves fragmented MP4 on loopback behind random Basic credentials; modules
-  limited to api/mp4/rtsp, its RTSP server off. Main parses the fMP4 (`fmp4.js`) and relays
+  limited to api/mp4/rtsp, its RTSP server off. Its source is
+  `rtsp://127.0.0.1:<proxy port>/<random token>/stream1`: **`rtsp-auth-proxy.js`** in main forwards
+  RTSP to the camera, answers its Digest challenge (MD5 or SHA-256, with or without qop), never
+  answers a Basic one (it reports `insecure` and closes), tries a refused sign-in once, rewrites
+  the camera's URLs in both directions and ends the camera's session with TEARDOWN when the
+  video stops. go2rtc's config and environment hold no camera credentials. Main parses the fMP4 (`fmp4.js`) and relays
   frames over a `MessagePortMain` to a worker in the hidden camera window, which decodes with
   WebCodecs `VideoDecoder` (hardware first). The renderer never opens a socket; the CSP and the
   loopback-only request filter are unchanged.
 * **Detection:** the camera's PullPoint events (`events.js`: renew, not recreate; de-noised) and
   the worker's local motion and person detection (MediaPipe ObjectDetector, EfficientDet-Lite0
   int8) are fused in `security-engine.js`, a pure state machine (exit delay, suppression while
-  moving and after global changes, motion → person upgrade, cooldown, quiet hours).
-* **Clips:** the recorder keeps a GOP ring (pre-roll) and writes stream-copied fMP4 clips +
-  `.jpg` + `.json`; retention by age and size; served to the windows as
-  `app://lawnmower/__clips/<date>/<file>` with Range support.
+  moving and after global changes, motion → person upgrade, cooldown, quiet hours). Camera
+  events already active when watching starts (exit delay over, re-armed, resubscribed) count only
+  after they fall and rise again.
+* **Clips:** the recorder keeps a GOP ring (pre-roll; held from an event's start while it is not
+  recorded yet, ≤ 32 MB) and writes stream-copied fMP4 clips + `.jpg` + `.json`; retention by age
+  and size; served to the windows as `app://lawnmower/__clips/<date>/<file>` with single-range
+  support (the file's real path must stay inside the clips folder; a record names only its own
+  files, so deleting an event never touches anything else).
 
 Settings are the `tapo` and `security` groups of `settings.json`; the password is not a setting
 (`<userData>/tapo/credentials.json`).
@@ -364,7 +409,9 @@ the Claude CLI in two ways (`electron/claude-session.js`):
   the app already uses, and the app answers `control_response {subtype: 'success', request_id,
   response: {mcp_response}}` (a notification gets `{jsonrpc: '2.0', result: {}, id: 0}`).
   Requests are handled concurrently; answers for a CLI process that has gone are dropped.
-* **G2, loopback HTTP (automatic fallback).** If the CLI's `system/init` lists none of the
+* **G2, loopback HTTP (automatic fallback, chat and assistant modes only).** In agent mode the
+  in-process server is kept, because Claude's Bash tool could read the token from the CLI's
+  environment and call the tools without a card. If the CLI's `system/init` lists none of the
   server's `mcp__lawnmower-camera__*` tools (and the server is not still `pending`), the session
   switches to HTTP for the rest of the app session and restarts the CLI after the running turn
   (resuming the conversation): it calls the server's `startHttp()`, writes
@@ -387,8 +434,9 @@ the Claude CLI in two ways (`electron/claude-session.js`):
 
 **Permissions** (`TapoService.toolPermissions()` → `--allowedTools` / `--disallowedTools`):
 `camera_status` and `camera_events` always allowed; `camera_snapshot` and `camera_look` allowed
-with *Always*, disallowed with *Never*, otherwise the existing approval card; `security_arm`
-always asks. A change restarts the CLI after the running turn (the spawn key includes the server
+with *Always* (`camera_look` not while armed), disallowed with *Never*, otherwise the existing
+approval card; `camera_snapshot` with a `preset` refuses unless turning is *Always* and the alarm
+is disarmed (use `camera_look` first); `security_arm` always asks. A change restarts the CLI after the running turn (the spawn key includes the server
 names, the permissions, the persona context and the transport).
 
 **Persona** (`electron/persona.js`): when the camera is set up, every mode gets a paragraph naming

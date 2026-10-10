@@ -47,6 +47,12 @@ export class ClipRecorder extends EventEmitter {
     this._clip = null;
     /** when the newest sample arrived (now()) */
     this._lastSampleAt = 0;
+    /**
+     * While an event that is not recorded yet runs (a motion that may turn out to be a person),
+     * the pre-roll is kept from before the event's START, not from before now: the dts the
+     * pre-roll counts back from (null = the next sample's). @type {{ dts: number|null }|null}
+     */
+    this._hold = null;
   }
 
   get recording() {
@@ -81,6 +87,32 @@ export class ClipRecorder extends EventEmitter {
   _dropRing() {
     this._ring = [];
     this._ringBytes = 0;
+    if (this._hold) this._hold.dts = null; // a new stream: its dts start afresh
+  }
+
+  /**
+   * Keep the pre-roll from before now until it is released (review: with record = person, a
+   * motion that became a person 4 s later got a clip that started after the event, missing the
+   * entry). Bounded by the ring's 32 MB cap. @param {boolean} on
+   */
+  holdPreRoll(on) {
+    if (!on) {
+      this._hold = null;
+      this._trim();
+      return;
+    }
+    if (this._hold) return;
+    const last = this._ring[this._ring.length - 1];
+    this._hold = { dts: last ? last.endDts : null };
+  }
+
+  _trim() {
+    const gop = this._ring[this._ring.length - 1];
+    if (!gop || !this._init) return;
+    const pre = Math.max(0, Number(this._getSettings()?.preRollSec ?? 5)) * this._init.timescale;
+    const from = this._hold && this._hold.dts !== null ? Math.min(this._hold.dts, gop.endDts) : gop.endDts;
+    while (this._ring.length >= 2 && from - this._ring[1].startDts >= pre) this._dropOldest();
+    while (this._ringBytes > this._maxRing && this._ring.length > 1) this._dropOldest();
   }
 
   /** @param {import('./fmp4.js').Sample} s */
@@ -92,13 +124,12 @@ export class ClipRecorder extends EventEmitter {
     if (s.key) this._ring.push({ startDts: s.dts, endDts: s.dts + s.duration, bytes: 0, fragments: [] });
     const gop = this._ring[this._ring.length - 1];
     if (gop) {
+      if (this._hold && this._hold.dts === null) this._hold.dts = s.dts;
       gop.fragments.push(s.fragment);
       gop.bytes += s.fragment.length;
       gop.endDts = Math.max(gop.endDts, s.dts + s.duration);
       this._ringBytes += s.fragment.length;
-      const pre = Math.max(0, Number(this._getSettings()?.preRollSec ?? 5)) * ts;
-      while (this._ring.length >= 2 && gop.endDts - this._ring[1].startDts >= pre) this._dropOldest();
-      while (this._ringBytes > this._maxRing && this._ring.length > 1) this._dropOldest();
+      this._trim();
     }
     // --- the clip
     const c = this._clip;

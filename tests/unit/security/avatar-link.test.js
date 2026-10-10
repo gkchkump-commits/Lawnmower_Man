@@ -207,6 +207,20 @@ describe('status and local commands', () => {
     expect(offline.link.intercept('camera left')).toBe(false);
   });
 
+  it('offline or refused, "disarm the camera" and "show me the camera" still run here (they do not need the camera)', async () => {
+    for (const connection of ['unreachable', 'auth-failed']) {
+      const { link, bridge } = setup();
+      await vi.advanceTimersByTimeAsync(0);
+      link.onStatus({ enabled: true, connection, security: { armed: true } });
+      bridge.calls.length = 0;
+      expect(link.intercept('disarm the camera')).toBe(true);
+      expect(link.intercept('show me the camera')).toBe(true);
+      expect(link.intercept('camera left')).toBe(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bridge.calls).toEqual([['arm', false], ['openWindow']]);
+    }
+  });
+
   it('a refused move is explained (toast when the avatar cannot talk)', async () => {
     const { link, controller, bridge, toasts } = setup();
     await vi.advanceTimersByTimeAsync(0);

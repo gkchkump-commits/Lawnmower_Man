@@ -202,6 +202,29 @@ describe('SecurityEngine', () => {
     expect(r.log.filter((a) => a.type === 'notify')).toHaveLength(2);
   });
 
+  it('an event that starts inside the cooldown alerts once the cooldown has passed, if the person is still there (review)', () => {
+    const r = rig({ postRollSec: 10, cooldownSec: 60 });
+    r.local(5, person); // visit A: told
+    r.local(12, nobody); // A ends after the post-roll
+    expect(r.log.filter((a) => a.type === 'event-end')).toHaveLength(1);
+    r.local(180, person); // visit B starts 17 s after A's alert and lasts 3 minutes
+    const notes = r.log.filter((a) => a.type === 'notify');
+    expect(notes).toHaveLength(2);
+    expect(notes[1].event.id).not.toBe(notes[0].event.id);
+    const says = r.log.filter((a) => a.type === 'announce');
+    expect(says).toHaveLength(2);
+    // told once the 60 s cooldown had passed, not again afterwards
+    const startB = r.log.filter((a) => a.type === 'event-start')[1].event.startedAt;
+    expect(notes[1].event.startedAt).toBe(startB);
+    // a visit B that leaves before the cooldown ends is not told late
+    const q = rig({ postRollSec: 10, cooldownSec: 60 });
+    q.local(5, person);
+    q.local(12, nobody);
+    q.local(10, person);
+    q.local(60, nobody);
+    expect(q.log.filter((a) => a.type === 'notify')).toHaveLength(1);
+  });
+
   it('quiet hours: a silent toast, no voice, no description', () => {
     const r = rig({ quietHours: '13:00-07:00', describe: true });
     r.local(3, person);

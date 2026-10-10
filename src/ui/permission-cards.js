@@ -10,6 +10,7 @@
 //  * nothing is focused automatically.
 
 import { h, icon } from './dom.js';
+import { toolDisplayName } from '../app/permission.js';
 
 const RISK_LABEL = { danger: 'runs a command', write: 'changes files', read: 'reads files', web: 'uses the web', other: 'uses a tool' };
 
@@ -75,7 +76,7 @@ export class PermissionCards {
   }
 
   /**
-   * @param {{ requestId: string, toolName: string, description?: string,
+   * @param {{ requestId: string, toolName: string, input?: Record<string, any>, description?: string,
    *   summary: import('../app/permission.js').PermissionSummary,
    *   fullSummary?: import('../app/permission.js').PermissionSummary }} req
    */
@@ -112,6 +113,8 @@ export class PermissionCards {
     const body = h('div', { class: 'perm-body' });
     const renderBody = (/** @type {import('../app/permission.js').PermissionSummary} */ sum, /** @type {boolean} */ expanded) => {
       body.replaceChildren();
+      // the app's own words are not Claude's: only what Claude wrote gets "Claude says:"
+      if (sum.note) body.append(h('p', { class: 'perm-desc perm-note' }, sum.note));
       const explanation = sum.explanation || (req.description && req.description !== sum.title ? req.description : '');
       if (explanation) body.append(h('p', { class: 'perm-desc' }, h('span', { class: 'k' }, 'Claude says: '), explanation));
       if (sum.target) body.append(h('pre', { class: 'perm-target' }, sum.target));
@@ -148,7 +151,7 @@ export class PermissionCards {
     h('div', { class: 'perm-head' },
       icon('shield', 'icon'),
       h('span', { class: 'perm-ask' }, 'Claude wants to use'),
-      h('span', { class: 'perm-tool' }, req.toolName),
+      h('span', { class: 'perm-tool', title: req.toolName }, toolDisplayName(req.toolName, req.input)),
       h('span', { class: `perm-risk ${s.risk}` }, RISK_LABEL[s.risk] || 'uses a tool')),
     h('div', { class: 'perm-title', id: titleId }, s.title),
     body,

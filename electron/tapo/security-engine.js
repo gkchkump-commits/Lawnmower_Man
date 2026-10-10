@@ -410,6 +410,10 @@ export class SecurityEngine {
     } else if (JSON.stringify(this._summary(ev)) !== before) {
       out.push({ type: 'event-update', event: this._summary(ev) });
     }
+    // an event that started inside the cooldown: alert once the cooldown has passed, if its kind
+    // is still being seen (review: a 3-minute visit right after another one was never told)
+    const seenNow = ev.kind === 'person' ? person : ev.kind === 'tamper' ? camTamper : motion;
+    if (!upgrade && seenNow && !ev.alerted.has(ev.kind) && at >= this._cooldownUntil[ev.kind]) out.push(...this._alert(ev, at));
     // a better picture of the person: a new "best" snapshot (at most every 2 s)
     if (locPerson && this._localBestScore > prevMax + 0.02 && at - ev.lastSnapAt >= BEST_SNAPSHOT_EVERY_MS) {
       ev.lastSnapAt = at;
@@ -437,7 +441,8 @@ export class SecurityEngine {
 
   /**
    * notify / announce / describe, once per kind per event, when the kind's cooldown has passed;
-   * the cooldown starts at the first of them.
+   * the cooldown starts at the first of them. Inside the cooldown nothing is marked, so
+   * _evaluate can still alert once it has passed.
    * @param {any} ev @param {number} at @returns {Action[]}
    */
   _alert(ev, at) {
@@ -446,8 +451,8 @@ export class SecurityEngine {
     const kind = ev.kind;
     const worthy = kind !== 'motion' || s.notify === 'motion';
     if (!worthy || ev.alerted.has(kind)) return [];
-    ev.alerted.add(kind);
     if (at < this._cooldownUntil[kind]) return [];
+    ev.alerted.add(kind);
     const quiet = inQuietHours(s.quietHours, at);
     /** @type {Action[]} */
     const out = [];

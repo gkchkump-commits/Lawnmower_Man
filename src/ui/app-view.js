@@ -9,6 +9,7 @@
 //   data-handsfree  true when hands-free listening is armed
 //   data-sleep      true when the avatar dozes
 
+import { toolDisplayName } from '../app/permission.js';
 import { claudeSetupModel, voiceManualModel } from '../app/setup-help.js';
 import { PermissionCards } from './permission-cards.js';
 import { SetupCards } from './setup-cards.js';
@@ -105,7 +106,7 @@ export class AppView {
   }
 
   showPermission(req) {
-    this._perm.set(req.requestId, { turnId: req.turnId, toolName: req.toolName });
+    this._perm.set(req.requestId, { turnId: req.turnId, toolName: toolDisplayName(req.toolName, req.input) });
     this.cards.show(req);
     this.refreshPanel();
   }

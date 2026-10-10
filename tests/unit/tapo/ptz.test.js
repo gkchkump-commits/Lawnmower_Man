@@ -351,6 +351,17 @@ describe('privacy mode', () => {
     expect(ptz.privacySuspected).toBe(false);
   });
 
+  it('a 500 with a SOAP fault body to a move counts too (the sim alternates it with a malformed answer); an argument fault does not', async () => {
+    await make();
+    client.fail.RelativeMove = new OnvifError('fault', 'The camera reported an error: Privacy mode is on', { status: 500, codes: ['env:Receiver'], text: 'Privacy mode is on' });
+    expect(await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' })).toEqual({ ok: false, code: 'privacy', error: PRIVACY_HINT });
+    expect(ptz.privacySuspected).toBe(true);
+    await make();
+    client.fail.RelativeMove = new OnvifError('fault', 'The camera reported an error: InvalidArgVal', { status: 500, codes: ['env:Sender', 'ter:InvalidArgVal'], text: 'Invalid argument' });
+    expect((await ptz.command({ op: 'nudge', dir: 'left', amount: 'small' })).code).not.toBe('privacy');
+    expect(ptz.privacySuspected).toBe(false);
+  });
+
   it('HTTP 500 counts too; a probe during privacy keeps the earlier capabilities', async () => {
     await make();
     client.fail.GetNodes = new OnvifError('http', 'HTTP 500', { status: 500 });

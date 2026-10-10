@@ -1,7 +1,7 @@
 // Approval cards and spoken prompts for the Home camera's Claude tools (src/app/permission.js):
 // fixed titles (never the model's words), the input shown as the target, plain spoken prompts.
 import { describe, expect, it } from 'vitest';
-import { cameraTool, spokenPermissionPrompt, summarizeToolInput, theCamera, toolChipLabel, toolCue } from '../../../src/app/permission.js';
+import { cameraTool, spokenPermissionPrompt, summarizeToolInput, theCamera, toolChipLabel, toolCue, toolDisplayName } from '../../../src/app/permission.js';
 
 const T = (n) => `mcp__lawnmower-camera__${n}`;
 
@@ -17,12 +17,16 @@ describe('camera tools', () => {
 
   it('approval card summaries', () => {
     expect(summarizeToolInput(T('camera_snapshot'), {})).toMatchObject({ title: 'Look through the home camera', risk: 'other', target: '', truncated: false });
-    expect(summarizeToolInput(T('camera_snapshot'), {}).explanation).toMatch(/one picture/);
+    // the app's own wording is a `note` (shown as it is), not an `explanation` ("Claude says: …"):
+    // updated on purpose (UX review: the card put the app's words in Claude's mouth)
+    expect(summarizeToolInput(T('camera_snapshot'), {}).note).toMatch(/one picture/);
+    expect(summarizeToolInput(T('camera_snapshot'), {}).explanation).toBeUndefined();
     expect(summarizeToolInput(T('camera_snapshot'), { preset: 'Door' }).target).toBe('after turning to Door');
     expect(summarizeToolInput(T('camera_look'), { direction: 'left', amount: 'small' })).toMatchObject({ title: 'Turn the home camera', target: 'left a little', fields: [] });
     expect(summarizeToolInput(T('camera_look'), { preset: 'Window' }).target).toBe('to Window');
     expect(summarizeToolInput(T('camera_look'), { home: true }).target).toBe('back to its home position');
-    expect(summarizeToolInput(T('security_arm'), {})).toMatchObject({ title: 'Arm the home camera', explanation: expect.stringMatching(/cannot disarm/) });
+    expect(summarizeToolInput(T('security_arm'), {})).toMatchObject({ title: 'Arm the home camera', note: expect.stringMatching(/cannot disarm/) });
+    expect(summarizeToolInput(T('security_arm'), {}).explanation).toBeUndefined();
     expect(summarizeToolInput(T('camera_status'), {})).toMatchObject({ title: 'Check the home camera', risk: 'read' });
     expect(summarizeToolInput(T('camera_events'), { since_minutes: 60 })).toMatchObject({ title: 'List what the home camera saw', fields: [{ label: 'since_minutes', value: '60' }] });
   });
@@ -39,6 +43,13 @@ describe('camera tools', () => {
     expect(spokenPermissionPrompt(T('camera_look'), { preset: 'Door' })).toBe('Claude would like to turn the camera to Door.');
     expect(spokenPermissionPrompt(T('security_arm'), {})).toBe('Claude would like to arm the camera. Allow it?');
     expect(spokenPermissionPrompt('Bash', {})).toBe('I need your permission to run a command.'); // unchanged
+  });
+
+  it('the card header and the Allowed / Denied line name camera tools in words', () => {
+    expect(toolDisplayName(T('camera_snapshot'), {})).toBe('Camera: snapshot');
+    expect(toolDisplayName(T('camera_look'), { direction: 'left' })).toBe('Camera: turn left');
+    expect(toolDisplayName('Bash', { command: 'ls' })).toBe('Bash');
+    expect(toolDisplayName('mcp__other__thing')).toBe('mcp__other__thing');
   });
 
   it('chips and cues', () => {

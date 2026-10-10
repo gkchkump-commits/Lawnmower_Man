@@ -55,6 +55,32 @@ describe('ClipRecorder', () => {
     expect(readBoxes(fs.readFileSync(started.file)).slice(0, 2).map((b) => b.type)).toEqual(['ftyp', 'moov']);
   });
 
+  it('held from an event\'s start, the pre-roll counts back from the start, not from now (review: motion → person)', async () => {
+    settings.preRollSec = 1;
+    // without the hold: started at frame 45, the clip begins at the GOP of frame 30 or later
+    const plain = make();
+    plain.onInit(SRC.init);
+    SRC.samples.forEach((s) => plain.onSample(s));
+    const a = plain.start('20261010-140314-c3d4', { kind: 'person' });
+    await plain.stop('20261010-140314-c3d4');
+    const plainFirst = samplesOf(fs.readFileSync(a.file)).samples[0];
+    expect(Buffer.compare(plainFirst.data, SRC.samples[15].data)).not.toBe(0);
+    // held at frame 30 (the motion started), recorded at the end (it became a person)
+    const r = make();
+    r.onInit(SRC.init);
+    SRC.samples.slice(0, 31).forEach((s) => r.onSample(s));
+    r.holdPreRoll(true);
+    SRC.samples.slice(31).forEach((s) => r.onSample(s));
+    const { file } = r.start(ID, { kind: 'person' });
+    r.holdPreRoll(false);
+    await r.stop(ID);
+    const clip = samplesOf(fs.readFileSync(file)).samples;
+    expect(Buffer.compare(clip[0].data, SRC.samples[15].data)).toBe(0); // 1 s before frame 30
+    expect(clip).toHaveLength(SRC.samples.length - 15);
+    // released, the ring is trimmed back to the normal pre-roll
+    expect(r._ring[0].startDts).toBeGreaterThan(SRC.samples[15].dts);
+  });
+
   it('pre-roll granularity is one GOP; the memory cap keeps at least the newest GOP', async () => {
     settings.preRollSec = 0;
     const r = make();

@@ -8,6 +8,8 @@
  *                             text the model wrote (that goes in `explanation`)
  * @property {string} [explanation] the model's own description of the call (Bash/PowerShell);
  *                             shown as "Claude says: …", never as the title
+ * @property {string} [note]   the app's own fixed explanation (camera tools); shown as it is,
+ *                             never attributed to Claude
  * @property {string} target   the main subject (command, file path, URL, query) — may be ''
  * @property {string} [detail] a longer preview (file content, edit diff, prompt)
  * @property {'danger'|'write'|'read'|'web'|'other'} risk
@@ -175,7 +177,7 @@ export function summarizeToolInput(toolName, input, o = {}) {
       // ---- Home camera tools: fixed wording, the input's own words only as the target
       const cam = cameraTool(name);
       if (cam === 'camera_snapshot') {
-        s = { title: 'Look through the home camera', explanation: 'Claude gets one picture from the camera (it becomes part of the conversation).', target: inp.preset ? show(`after turning to ${inp.preset}`, MAX_TARGET) : '', risk: 'other', fields: rest(['preset']) };
+        s = { title: 'Look through the home camera', note: 'Claude gets one picture from the camera (it becomes part of the conversation).', target: inp.preset ? show(`after turning to ${inp.preset}`, MAX_TARGET) : '', risk: 'other', fields: rest(['preset']) };
         break;
       }
       if (cam === 'camera_look') {
@@ -183,7 +185,7 @@ export function summarizeToolInput(toolName, input, o = {}) {
         break;
       }
       if (cam === 'security_arm') {
-        s = { title: 'Arm the home camera', explanation: 'It starts watching after the exit delay. Claude cannot disarm it.', target: '', risk: 'other', fields: rest([]) };
+        s = { title: 'Arm the home camera', note: 'It starts watching after the exit delay. Claude cannot disarm it.', target: '', risk: 'other', fields: rest([]) };
         break;
       }
       if (cam === 'camera_status' || cam === 'camera_events') {
@@ -263,6 +265,15 @@ export function toolCue(toolName) {
     default:
       return 'One moment.';
   }
+}
+
+/**
+ * The tool's name as the card header and the "Allowed / Denied" line show it: "Camera: snapshot"
+ * for a Home camera tool (not mcp__lawnmower-camera__camera_snapshot), else the tool's own name.
+ * @param {string} name @param {Record<string, any>} [input]
+ */
+export function toolDisplayName(name, input) {
+  return cameraTool(name) ? toolChipLabel(name, input || {}) : name;
 }
 
 /** One-line label for a tool chip in the transcript. @param {string} name @param {Record<string, any>} input */

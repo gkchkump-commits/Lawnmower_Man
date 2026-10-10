@@ -87,13 +87,20 @@ export function createSpotter(addon, o) {
   };
 }
 
+/** Uninterrupted "speech" (music, a TV with no pauses) after which the VAD is reset (its buffer holds the segment). */
+export const VAD_MAX_CONTINUOUS_SEC = 25;
+
 /**
  * sherpa-onnx's Silero VAD. accept() returns isDetected() after the block and drops the speech
- * segments the detector collects (we only need the state).
+ * segments the detector collects (we only need the state). The detector keeps the samples of the
+ * segment in progress; after VAD_MAX_CONTINUOUS_SEC without a pause it is reset, which bounds that
+ * buffer (measured: 20 minutes of gapless real speech never got there, one long music segment did).
  * @param {any} addon
- * @param {{ model: string, threshold?: number, minSpeechDuration?: number, minSilenceDuration?: number, windowSize?: number, maxSpeechDuration?: number, bufferSec?: number }} o
+ * @param {{ model: string, threshold?: number, minSpeechDuration?: number, minSilenceDuration?: number, windowSize?: number, maxSpeechDuration?: number, bufferSec?: number, maxContinuousSec?: number }} o
  */
 export function createVad(addon, o) {
+  const maxRun = Math.round((o.maxContinuousSec ?? VAD_MAX_CONTINUOUS_SEC) * SAMPLE_RATE);
+  let run = 0;
   const h = addon.createVoiceActivityDetector({
     sileroVad: {
       model: o.model,
@@ -114,9 +121,15 @@ export function createVad(addon, o) {
       addon.voiceActivityDetectorAcceptWaveform(h, x);
       const d = !!addon.voiceActivityDetectorIsDetected(h);
       while (!addon.voiceActivityDetectorIsEmpty(h)) addon.voiceActivityDetectorPop(h);
+      run = d ? run + x.length : 0;
+      if (run >= maxRun) {
+        addon.voiceActivityDetectorReset(h);
+        run = 0;
+      }
       return d;
     },
     reset() {
+      run = 0;
       addon.voiceActivityDetectorReset(h);
     },
   };

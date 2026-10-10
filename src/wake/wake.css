@@ -20,6 +20,15 @@
   transition: color 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 .status-wake[hidden] { display: none; }
+/* a narrow window: the chip shares the line with Claude's and the voice's status (they shrink
+   too), its words end in an ellipsis; below 320 px only the ear is left (title and
+   aria-label keep the words) */
+.status-wake { flex: 0 1 auto; min-width: 0; max-width: 62%; }
+.status-wake-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 320px) {
+  .status-wake { padding: 1px 4px; }
+  .status-wake-text { display: none; }
+}
 .status-wake:hover { color: var(--text-2); border-color: var(--line-2); }
 .status-wake:focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 1px; }
 .status-armed:not([hidden]) ~ .status-wake,

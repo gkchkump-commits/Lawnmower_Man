@@ -57,7 +57,7 @@ export function chipModel(m) {
         : { hidden: false, text: 'Hey Jade: unavailable', title: r || 'The wake-word engine is not available', slashed: true, tone: 'warn' };
     case 'starting': return { hidden: false, text: 'Hey Jade: starting…', title: r, slashed: false, tone: 'dim' };
     case 'paused': return { hidden: false, text: 'Hey Jade: paused', title: 'Paused while the window is hidden (Settings › Voice › Listen while hidden)', slashed: true, tone: 'dim' };
-    case 'locked': return { hidden: false, text: 'Hey Jade: paused (PC locked)', title: 'The microphone is off while the PC is locked', slashed: true, tone: 'dim' };
+    case 'locked': return { hidden: false, text: 'Hey Jade: PC locked', title: 'The microphone is off while the PC is locked', slashed: true, tone: 'dim' };
     case 'blocked': return { hidden: false, text: 'Microphone blocked', title: r || 'The microphone could not be opened', slashed: true, tone: 'error' };
     case 'muted': return { hidden: false, text: 'Microphone is muted', title: 'Your microphone is muted (Windows or the device)', slashed: true, tone: 'warn' };
     // the status label next to it already says "Listening…": the chip says why no key was needed

@@ -313,17 +313,25 @@ test.describe('app (mock bridge)', () => {
 
 test.describe('voice (fake voice server)', () => {
   test('replies are spoken with lip-sync; Esc stops speaking', async ({ page }) => {
+    // the jaw of every rendered frame while speaking: software WebGL draws only a few frames a
+    // second, and almost half of them fall on consonants and closures, so count frames, not time
+    await page.addInitScript(() => {
+      window.__jaw = [];
+      const tick = () => {
+        const a = window.__app?.avatar?.animState?.();
+        if (a && document.body.dataset.state === 'speaking') window.__jaw.push(a.jawOpen);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     await boot(page, { voice: 'fake', mockDelay: 30 });
     await expect(page.locator('.status-voice')).toHaveText('Voice · GPU');
     await expect(page.locator('#mic')).toHaveAttribute('aria-disabled', 'false');
     await send(page, 'tell me about holograms');
     await page.waitForFunction(() => document.body.dataset.state === 'speaking' && window.__app.player.current?.kind === 'audio', null, { timeout: 30_000 });
-    let maxJaw = 0;
-    for (let i = 0; i < 25; i++) {
-      maxJaw = Math.max(maxJaw, await page.evaluate(() => window.__app.avatar.animState().jawOpen));
-      await page.waitForTimeout(40);
-    }
-    expect(maxJaw).toBeGreaterThan(0.12);
+    await page.waitForFunction(() => window.__jaw.length >= 12, null, { timeout: 30_000 });
+    expect(Math.max(...await page.evaluate(() => window.__jaw))).toBeGreaterThan(0.12);
+    expect(await page.evaluate(() => window.__app.player.busy)).toBe(true); // still talking, so Esc interrupts
     await page.keyboard.press('Escape');
     await expect.poll(() => page.evaluate(() => window.__app.player.busy)).toBe(false);
     await waitIdle(page);

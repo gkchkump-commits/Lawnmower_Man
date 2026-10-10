@@ -35,6 +35,7 @@ import { LiveCanvas } from './draw.js';
 import { MOTION_HEIGHT, MOTION_WIDTH, MotionDetector, changedFraction, lumaFromRgba } from './motion.js';
 import { SHIFT_HEIGHT, SHIFT_WIDTH, estimateShift } from './shift.js';
 import { encodeSnapshot } from './snapshot.js';
+import { PixelScratch, cpuReadable, frameToRgba } from './frame-pixels.js';
 import { stubDetect } from './stub-detector.js';
 
 export const RATES = Object.freeze({
@@ -183,6 +184,9 @@ export class SecurityPipeline {
      */
     this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), refAt: /** @type {number|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null), refSeq: 0 };
     this._canvases = /** @type {Record<string, any>} */ ({});
+    /** read decoded frames with VideoFrame.copyTo (off after one failure) */
+    this._cpuPixels = true;
+    this._scratch = new PixelScratch();
     const si = d.setInterval || ((fn, ms) => setInterval(fn, ms));
     this._statsTimer = si(() => this.postStats(), STATS_MS);
   }
@@ -458,11 +462,23 @@ export class SecurityPipeline {
   }
 
   /**
-   * A small RGBA copy of a frame (createImageBitmap does the scaling).
+   * A small RGBA copy of a frame. A decoded VideoFrame in a format the CPU can read is copied
+   * with VideoFrame.copyTo (asynchronous; frame-pixels.js): the canvas path's getImageData is a
+   * synchronous GPU readback that, under software GL on a busy PC, blocked this worker for up to
+   * a minute. Anything else (the mock's ImageBitmaps, GPU-only frames), or a copy that fails
+   * once, goes through createImageBitmap (which does the scaling) and a canvas.
    * @param {FrameRef} ref @param {number} w @param {number} h @param {string} key
    * @returns {Promise<Uint8ClampedArray>}
    */
   async _sample(ref, w, h, key) {
+    if (this._cpuPixels && cpuReadable(ref.image)) {
+      try {
+        return await frameToRgba(ref.image, w, h, this._scratch);
+      } catch (err) {
+        this._cpuPixels = false;
+        console.warn('[tapo-worker] reading the frame on the CPU failed; using the canvas', err?.message || err);
+      }
+    }
     const bmp = await this.d.createImageBitmap(ref.image, { resizeWidth: w, resizeHeight: h, resizeQuality: 'low' });
     try {
       let c = this._canvases[key];

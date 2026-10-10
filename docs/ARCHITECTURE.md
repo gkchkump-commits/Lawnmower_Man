@@ -637,8 +637,13 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   the last move ended) and the worker uses only frames that reached main later, naming the one it
   used; main ignores answers without that gate, never measures without a reference picture, and
   checks each axis on the way back (TAPO.md §10.1). A longer stall makes it ask the user, never
-  guess. Reading the Y plane with `VideoFrame.copyTo()` (asynchronous) would avoid the stall
-  itself.
+  guess. The stall itself: one `getImageData` of the motion sample blocked the worker for 62.7 s
+  in tapo-e2e under load (5 of 6 calibration runs then had to ask). The worker now reads decoded
+  frames in a CPU format (I420, NV12, RGBA…) with `VideoFrame.copyTo()` (asynchronous, about a
+  millisecond for 640×360; `src/tapo/worker/frame-pixels.js`) and box-downscales them itself;
+  only other frames (GPU-only, the mock's ImageBitmaps) still go through the canvas, and a copy
+  that fails once switches back to it. With that, 6 of 6 loaded calibration runs measured
+  without asking.
 * **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
   Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
   `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the

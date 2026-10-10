@@ -204,6 +204,10 @@ export class SecurityPipeline {
       case 'reset':
         this.decoder.reset(Number(msg.gen));
         this._needReseed = true;
+        // the newest frame is from before the reconnect: no snapshot of it (the canvas keeps
+        // showing it until the first new frame arrives)
+        this.lastFrame?.release();
+        this.lastFrame = null;
         return undefined;
       case 'idle': return this._idle();
       case 'bitmap': return this._onImage(msg.image, msg.image?.width || 0, msg.image?.height || 0, Number(msg.ts) || this.now());
@@ -614,10 +618,12 @@ export class SecurityPipeline {
   postStats() {
     const s = this.decoder.stats();
     const fps = this.fps();
-    const main = { t: 'stats', fps, decodeQueue: s.decodeQueue, dropped: s.dropped, decoder: s.decoder, configSupported: s.configSupported };
-    this.postMain(main);
     const now = this.now();
     const recent = this._detTimes.filter((x) => now - x <= 4000);
+    const detectorHz = Math.round((recent.length / 4) * 10) / 10;
+    const main = { t: 'stats', fps, decodeQueue: s.decodeQueue, dropped: s.dropped, decoder: s.decoder, configSupported: s.configSupported };
+    // the person detector's rate and last run time, for main's status (camera_status, the drawer)
+    this.postMain({ ...main, detectorHz, ...(recent.length ? { detectorMs: this.lastDetMs } : {}) });
     this.postPage({
       ...main,
       // how the video is decoded: null when nothing went through the decoder (the mock's pictures)
@@ -626,7 +632,7 @@ export class SecurityPipeline {
       hasFrame: !!this.lastFrame?.image,
       lastFrameAgoMs: Number.isFinite(this.lastFrameAt) ? Math.round(now - this.lastFrameAt) : null,
       video: { ...this.video },
-      detector: { state: this.detectorState, rateHz: Math.round((recent.length / 4) * 10) / 10, lastMs: this.lastDetMs, error: this.detectorError || undefined },
+      detector: { state: this.detectorState, rateHz: detectorHz, lastMs: this.lastDetMs, error: this.detectorError || undefined },
       motion: { ...this.lastMotion },
     });
   }

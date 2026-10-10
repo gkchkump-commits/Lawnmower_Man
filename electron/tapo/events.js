@@ -112,16 +112,27 @@ export class PullPointMonitor extends EventEmitter {
     return first;
   }
 
-  /** Unsubscribe (best effort, ≤ 3 s) and stop. */
+  /**
+   * Unsubscribe (best effort, ≤ 3 s) and stop. Every state that is still active falls first
+   * (synchronously, before the first await): nobody watches it any more, so it must not stay
+   * "active" in the security engine.
+   */
   async stop() {
     const wasRunning = this._running;
     this._running = false;
     this._wake();
-    for (const k of Object.values(this._kinds)) {
+    const kinds = this._kinds;
+    this._kinds = {};
+    for (const [kind, k] of Object.entries(kinds)) {
       this._clearTimeout(k.fall);
       this._clearTimeout(k.stale);
+      k.fall = null;
+      k.stale = null;
+      if (k.active) {
+        k.active = false;
+        this.emit('event', { kind, active: false, at: this._now(), topic: '', reason: 'stopped' });
+      }
     }
-    this._kinds = {};
     const sub = this._sub;
     this._sub = null;
     if (sub) await this._unsubscribe(sub.address);
@@ -273,13 +284,20 @@ export class PullPointMonitor extends EventEmitter {
       this._kinds[kind] = k;
     }
     if (operation === 'Initialized') {
-      // the baseline, no edge
+      // A (new) subscription's baseline. Unchanged: no edge. A state that ended while nobody was
+      // subscribed (a reboot, a Wi-Fi drop) falls now — or the event would never end. A state that
+      // is already active is reported as a baseline: the engine keeps it ignored until it falls.
       this._clearTimeout(k.fall);
       k.fall = null;
-      k.active = value;
       if (value) {
         k.lastTrueAt = now;
         this._armStale(kind, k, topic);
+        if (!k.active) {
+          k.active = true;
+          this.emit('event', { kind, active: true, at: now, topic, baseline: true });
+        }
+      } else if (k.active) {
+        this._fall(kind, k, topic);
       }
       return;
     }

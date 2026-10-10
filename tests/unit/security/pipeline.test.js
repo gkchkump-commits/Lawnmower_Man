@@ -190,8 +190,17 @@ describe('SecurityPipeline: frames, snapshots, stats', () => {
     await s.feed(12, () => room());
     s.p.postStats();
     const st = s.of(s.toMain, 'stats').at(-1);
-    expect(Object.keys(st).sort()).toEqual(['configSupported', 'decodeQueue', 'decoder', 'dropped', 'fps', 't']);
+    // the contract's fields plus the detector's rate (main's status shows it; validate.js reads it)
+    expect(Object.keys(st).sort()).toEqual(['configSupported', 'decodeQueue', 'decoder', 'detectorHz', 'dropped', 'fps', 't']);
+    expect(st.detectorHz).toBe(0); // disarmed, no overlay: the detector does not run
     expect(st.fps).toBeGreaterThan(8);
+    // armed: the detector runs (1 Hz) and main learns its rate and the time of one run
+    s.main({ t: 'armed', on: true, people: true, sensitivity: 'medium' });
+    await s.feed(75, () => room());
+    s.p.postStats();
+    const armed = s.of(s.toMain, 'stats').at(-1);
+    expect(armed.detectorHz).toBeGreaterThan(0.4);
+    expect(armed.detectorMs).toBeGreaterThanOrEqual(0); // the stub takes no time on the manual clock
     expect(s.of(s.toPage, 'stats').at(-1)).toMatchObject({ hasFrame: true, detector: { state: 'stub' }, video: { width: 640, height: 360 } });
   });
 });

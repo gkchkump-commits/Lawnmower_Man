@@ -448,6 +448,9 @@ export class TapoService extends EventEmitter {
 
   /** @param {string} s */
   _onRelayState(s) {
+    // no fresh frames: the pre-roll ring is history now (a clip of an event during the outage
+    // must not be made of the minutes before it)
+    if (s !== 'live') this.recorder.onStreamDown();
     this._apply(this.engine.onStream(s === 'live' ? 'live' : 'down'));
     this._statusSoon();
   }
@@ -520,9 +523,14 @@ export class TapoService extends EventEmitter {
     }
   }
 
+  /**
+   * The worker's duty cycle. It runs from the moment the user arms (the exit delay included), so
+   * the local detector is known to be alive — and has samples — when watching starts; the engine
+   * only counts evidence from then on.
+   */
   _postArmed() {
     const s = this._sec();
-    this._post({ t: 'armed', on: this.engine.watching, people: s.people !== false, sensitivity: s.sensitivity });
+    this._post({ t: 'armed', on: this.engine.state.armed, people: s.people !== false, sensitivity: s.sensitivity });
   }
 
   /** @param {any} port @param {any} raw */
@@ -545,7 +553,8 @@ export class TapoService extends EventEmitter {
         this._detTimes = this._detTimes.filter((x) => now - x < 1000);
         if (this._detTimes.length >= DET_PER_SEC) return; // over the rate: dropped
         this._detTimes.push(now);
-        this._apply(this.engine.onLocal({ at: now, motion: m.motion, persons: m.persons, detector: this._detector === 'stub' ? 'on' : this._detector }));
+        // persons only from a detector run (the motion samples in between say nothing about people)
+        this._apply(this.engine.onLocal({ at: now, motion: m.motion, persons: m.detected ? m.persons : undefined, detector: this._detector === 'stub' ? 'on' : this._detector }));
         return;
       }
       case 'snap-ok':
@@ -822,6 +831,8 @@ export class TapoService extends EventEmitter {
   _eventSnapshot(id, purpose) {
     const p = (async () => {
       try {
+        // the worker's newest frame is from before the outage while the stream is down
+        if (this.relay.state !== 'live') throw new Error('no live picture');
         const snap = await this._request({ t: 'snap', maxSide: 1280, quality: 0.8 }, 3000);
         return await this.store.writeSnapshot(id, snap.jpeg);
       } catch (err) {

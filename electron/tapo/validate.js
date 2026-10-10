@@ -253,12 +253,17 @@ export function validateWorkerMessage(m) {
       const mo = m.motion || {};
       if (typeof mo.active !== 'boolean' || (mo.score !== undefined && !num(mo.score, 0, 1)) || (mo.global !== undefined && typeof mo.global !== 'boolean')) return null;
       if (!Array.isArray(m.persons) || m.persons.length > 10) return null;
+      if (m.detected !== undefined && typeof m.detected !== 'boolean') return null;
       const persons = [];
       for (const p of m.persons) {
         if (!p || !num(p.score, 0, 1) || !Array.isArray(p.box) || p.box.length !== 4 || !p.box.every((/** @type {unknown} */ x) => num(x, 0, 1))) return null;
         persons.push({ score: p.score, box: /** @type {number[]} */ ([...p.box]) });
       }
-      return { t: 'det', at: m.at, frameTs: m.frameTs ?? 0, motion: { active: mo.active, score: mo.score ?? 0, global: !!mo.global }, persons };
+      // `detected` (lane B's additive field): does `persons` come from a person-detector run? The
+      // worker sends det at ~5 Hz but runs the detector at 1 Hz while armed; only detector runs
+      // are samples for the "2 of the last 3" rule. A sender without the field (§9.3 as written)
+      // means every det is a detector sample.
+      return { t: 'det', at: m.at, frameTs: m.frameTs ?? 0, motion: { active: mo.active, score: mo.score ?? 0, global: !!mo.global }, persons, detected: m.detected !== false };
     }
     case 'snap-ok': {
       const jpeg = bytesOf(m.jpeg);

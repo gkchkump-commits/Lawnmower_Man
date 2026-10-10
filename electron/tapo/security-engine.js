@@ -94,6 +94,8 @@ export class SecurityEngine {
     this._armed = false;
     this._arming = false;
     this._armingEndsAt = 0;
+    /** when watching last started (the end of the exit delay, or an immediate arm) */
+    this._watchingSince = 0;
     /** @type {Record<Kind, { active: boolean, since: number, ignored: boolean }>} */
     this._cam = { motion: { active: false, since: 0, ignored: false }, person: { active: false, since: 0, ignored: false }, tamper: { active: false, since: 0, ignored: false } };
     this._ptz = { moving: false, settleUntil: 0 };
@@ -146,17 +148,23 @@ export class SecurityEngine {
       if (this._armed) {
         if (this._arming && o.immediate) {
           this._arming = false;
+          this._startWatching(at);
           return [this._armedChanged(), ...this._evaluate(at)];
         }
         return [];
       }
       this._armed = true;
       this._clearLocal();
+      // the camera's event state from before (the monitor only runs while armed) is not evidence
+      this._resetCam();
       const delay = Math.max(0, this._s.armDelaySec) * 1000;
       this._arming = !o.immediate && delay > 0;
       this._armingEndsAt = this._arming ? at + delay : 0;
       const out = [this._armedChanged()];
-      if (!this._arming) out.push(...this._evaluate(at));
+      if (!this._arming) {
+        this._startWatching(at);
+        out.push(...this._evaluate(at));
+      }
       return out;
     }
     if (!this._armed) return [];
@@ -164,8 +172,40 @@ export class SecurityEngine {
     this._armed = false;
     this._arming = false;
     this._armingEndsAt = 0;
+    this._resetCam();
     out.push(this._armedChanged());
     return out;
+  }
+
+  /**
+   * The camera's event subscription stopped or was replaced (disarm, reconnect, sign-in
+   * failure, the monitor restarting): its states are unknown now, so none of them is active.
+   * @param {number} [at] @returns {Action[]}
+   */
+  resetCamera(at = this._now()) {
+    this._resetCam();
+    return this._evaluate(at);
+  }
+
+  _resetCam() {
+    for (const c of Object.values(this._cam)) {
+      c.active = false;
+      c.ignored = false;
+      c.since = 0;
+    }
+  }
+
+  /**
+   * Watching starts (the exit delay ended, or an immediate arm). Only evidence from now on counts:
+   * camera states that are already active (the user walking out; firmwares that never send the
+   * falling edge) are a baseline, ignored until they fall — like the episode of a PTZ move — and
+   * the local person history starts again (the detector keeps running, so it stays "alive").
+   * @param {number} at
+   */
+  _startWatching(at) {
+    this._watchingSince = at;
+    for (const c of Object.values(this._cam)) if (c.active) c.ignored = true;
+    this._clearLocal();
   }
 
   /** @returns {Action} */
@@ -177,8 +217,9 @@ export class SecurityEngine {
   }
 
   /**
-   * A de-noised camera event edge.
-   * @param {{ kind: Kind, active: boolean, at?: number }} e
+   * A de-noised camera event edge. `baseline`: the state a new subscription started with
+   * (ONVIF "Initialized"), not a change: active but ignored until it falls.
+   * @param {{ kind: Kind, active: boolean, at?: number, baseline?: boolean }} e
    * @returns {Action[]}
    */
   onCamera(e) {
@@ -190,7 +231,7 @@ export class SecurityEngine {
       c.active = true;
       c.since = at;
       // our own pan/tilt move triggers the camera's motion detection: ignore that whole episode
-      c.ignored = this._ptzSuppressed(at);
+      c.ignored = !!e.baseline || this._ptzSuppressed(at);
       if (!c.ignored && this.watching && e.kind !== 'tamper') out.push({ type: 'boost', untilMs: at + BOOST_MS });
     } else if (!e.active) {
       c.active = false;
@@ -253,6 +294,7 @@ export class SecurityEngine {
     if (this._arming && at >= this._armingEndsAt) {
       this._arming = false;
       this._armingEndsAt = 0;
+      this._startWatching(at);
       out.push(this._armedChanged());
     }
     out.push(...this._evaluate(at));
@@ -302,7 +344,7 @@ export class SecurityEngine {
     if (s.people) {
       if (locPerson) person = true;
       else if (camPerson && !s.confirmLocally) person = true;
-      else if (camPerson && !localAlive && at - this._cam.person.since >= UNCONFIRMED_AFTER_MS) {
+      else if (camPerson && !localAlive && at - Math.max(this._cam.person.since, this._watchingSince) >= UNCONFIRMED_AFTER_MS) {
         person = true;
         unconfirmed = true;
       }

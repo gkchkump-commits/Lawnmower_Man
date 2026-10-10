@@ -102,8 +102,13 @@ describe('worker messages', () => {
     expect(validateWorkerMessage({ t: 'ready', detector: 'failed', error: 'x'.repeat(400) }).error).toHaveLength(300);
     expect(validateWorkerMessage({ t: 'ready', detector: 'maybe' })).toBeNull();
     const det = { t: 'det', at: 1, frameTs: 2, motion: { active: true, score: 0.3, global: false }, persons: [{ score: 0.9, box: [0.1, 0.2, 0.3, 0.4], extra: 1 }], junk: 1 };
-    expect(validateWorkerMessage(det)).toEqual({ t: 'det', at: 1, frameTs: 2, motion: { active: true, score: 0.3, global: false }, persons: [{ score: 0.9, box: [0.1, 0.2, 0.3, 0.4] }] });
+    // no `detected` field (§9.3 as written): every det is a detector sample
+    expect(validateWorkerMessage(det)).toEqual({ t: 'det', at: 1, frameTs: 2, motion: { active: true, score: 0.3, global: false }, persons: [{ score: 0.9, box: [0.1, 0.2, 0.3, 0.4] }], detected: true });
+    // lane B's worker says which det messages carry a detector run (the others are motion samples)
+    expect(validateWorkerMessage({ ...det, persons: [], detected: false })).toMatchObject({ persons: [], detected: false });
+    expect(validateWorkerMessage({ ...det, detected: true })).toMatchObject({ detected: true });
     for (const b of [
+      { ...det, detected: 'yes' },
       { ...det, at: 'now' }, { ...det, motion: {} }, { ...det, motion: { active: true, score: 2 } }, { ...det, persons: null },
       { ...det, persons: Array(11).fill({ score: 0.5, box: [0, 0, 0.1, 0.1] }) }, { ...det, persons: [{ score: 0.5, box: [0, 0, 1.5, 0.1] }] },
       { ...det, persons: [{ score: 0.5, box: [0, 0, 0.1] }] },

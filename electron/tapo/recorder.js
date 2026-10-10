@@ -16,6 +16,8 @@ import { rewriteFragment } from './fmp4.js';
 import { eventBase } from './event-store.js';
 
 export const MAX_RING_BYTES = 32 * 1024 * 1024;
+/** A ring whose newest sample is older than this is not a pre-roll of "now". */
+export const STALE_RING_MS = 2000;
 const MAX_PENDING_BYTES = 32 * 1024 * 1024;
 
 /**
@@ -43,6 +45,8 @@ export class ClipRecorder extends EventEmitter {
     this._ringBytes = 0;
     /** @type {any} the clip being written */
     this._clip = null;
+    /** when the newest sample arrived (now()) */
+    this._lastSampleAt = 0;
   }
 
   get recording() {
@@ -62,14 +66,27 @@ export class ClipRecorder extends EventEmitter {
   /** A new stream generation: fresh ring; a running clip continues in a follow-up file. @param {import('./fmp4.js').TrackInit} init */
   onInit(init) {
     this._init = init;
+    this._dropRing();
+    if (this._clip) this._rollover('reconnect');
+  }
+
+  /**
+   * The stream stopped, stalled or failed: the ring is the past, not a pre-roll. A clip started
+   * now waits for the next keyframe of the stream that comes back (a reconnect rolls it over).
+   */
+  onStreamDown() {
+    this._dropRing();
+  }
+
+  _dropRing() {
     this._ring = [];
     this._ringBytes = 0;
-    if (this._clip) this._rollover('reconnect');
   }
 
   /** @param {import('./fmp4.js').Sample} s */
   onSample(s) {
     if (!this._init || s.fragIndex !== 0) return; // a fragment is handled once, with its first sample
+    this._lastSampleAt = this._now();
     const ts = this._init.timescale;
     // --- the pre-roll ring (whole GOPs, starting at a keyframe)
     if (s.key) this._ring.push({ startDts: s.dts, endDts: s.dts + s.duration, bytes: 0, fragments: [] });
@@ -114,6 +131,8 @@ export class ClipRecorder extends EventEmitter {
     if (this._clip && this._clip.id === eventId) return { file: this._clip.file, rel: this._clip.rel };
     if (this._clip) this.stop(this._clip.id, { reason: 'new event' }).catch(() => {});
     if (!this._init) return null;
+    // no fresh frames: no pre-roll of old ones (the clip starts at the next keyframe)
+    if (this._ring.length && this._now() - this._lastSampleAt > STALE_RING_MS) this._dropRing();
     const clip = this._open(eventId, o.kind, eventBase(eventId, o.kind), this._init);
     if (!clip) return null;
     this._clip = clip;

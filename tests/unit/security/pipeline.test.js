@@ -379,6 +379,22 @@ describe('SecurityPipeline: calibration shift gated by arrival (after)', () => {
     expect(r.at).toBeUndefined();
   });
 
+  it('a frame picked for one request is never used for the next one (a sample still in flight)', async () => {
+    for (const gated of [false, true]) {
+      const s = setup();
+      s.main({ t: 'shift-ref', id: 'a', ...(gated ? { after: 0 } : {}) });
+      await s.feed(4, () => room(), 10, arrived(100));
+      s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, ...(gated ? { after: 300 } : {}) });
+      // a frame of the measurement is being sampled when the next reference request arrives
+      s.main({ t: 'bitmap', image: fakeImage(room({ offset: 0.3 })), ts: s.clock.now(), rx: 400 });
+      expect(s.p.shift.busy).toBe(true);
+      s.main({ t: 'shift-ref', ...(gated ? { id: 'b', after: 500 } : {}) }); // (an older main: no id)
+      await flush();
+      expect(s.p.shift.ref).toBe(null); // that frame was not taken as the new reference
+      expect(s.p.shift.wantRef).toBe(true);
+    }
+  });
+
   it('a gated reference that never stands still (scene motion) is the newest current frame, marked not still', async () => {
     const s = setup();
     s.main({ t: 'shift-ref', id: 'w', after: 0 });

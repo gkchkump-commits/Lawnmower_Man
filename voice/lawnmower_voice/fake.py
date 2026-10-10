@@ -1,7 +1,13 @@
 """Deterministic stand-in engines for ``--fake`` (tests and other lanes' end-to-end runs).
 
 * :class:`FakeSTT` returns a fixed sentence for any non-silent audio (``""`` for silence).
-  Override the text with ``LAWNMOWER_VOICE_FAKE_TEXT``.
+  Override the text with ``LAWNMOWER_VOICE_FAKE_TEXT``, or script successive answers with
+  ``LAWNMOWER_VOICE_FAKE_TEXTS=<path to a JSON array of strings>``: each call that hears sound
+  takes the next entry and the last one repeats (it wins over ``LAWNMOWER_VOICE_FAKE_TEXT``).
+  Rewriting the file starts over from its first entry, so one server can serve several test
+  scenarios. The "Hey Jade" end-to-end test answers the wake segment and then the command this
+  way (docs/WAKE.md). ``LAWNMOWER_VOICE_FAKE_STT_LOG=<path>`` appends one JSON line per such call
+  (``{"n", "durationSec", "text"}``), so a test can count the calls and see what was sent.
 * :class:`FakeTTS` synthesises a short vowel/consonant buzz from the text with a matching,
   exact viseme timeline (so lip-sync can be exercised without models).
 
@@ -10,14 +16,17 @@
 
 from __future__ import annotations
 
+import json
 import os
+import threading
 import time
 import zlib
 
 import numpy as np
 
+from .audio import WHISPER_RATE
 from .config import VoiceConfig
-from .engines import Engine, EngineInputError, TTSResult
+from .engines import Engine, EngineInputError, EngineUnavailable, TTSResult
 from .tts import SAMPLE_RATE, clean_text, voice_info
 from .visemes import normalize_timeline, text_to_pseudo_phonemes, tokenize
 
@@ -37,6 +46,46 @@ def _delay() -> None:
         time.sleep(ms / 1000.0)
 
 
+class FakeTextQueue:
+    """The answers of successive ``/stt`` calls, read from a JSON array of strings in a file.
+
+    :meth:`next` returns the next entry; past the end the last entry repeats. The file is read on
+    every call (it is tiny): when its content changes, the queue starts again from its first entry.
+    A missing or malformed file raises :class:`EngineUnavailable` (HTTP 503 with the reason), so a
+    misconfigured test fails loudly instead of hearing the default sentence.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._raw: bytes | None = None
+        self._items: list[str] = []
+        self._pos = 0
+        self._lock = threading.Lock()
+
+    def _load(self) -> None:
+        try:
+            with open(self.path, "rb") as f:
+                raw = f.read(1 << 20)
+        except OSError as exc:
+            raise EngineUnavailable(f"LAWNMOWER_VOICE_FAKE_TEXTS: cannot read {self.path}: {exc.strerror or exc}") from None
+        if raw == self._raw:
+            return
+        try:
+            items = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EngineUnavailable(f"LAWNMOWER_VOICE_FAKE_TEXTS: {self.path} is not JSON: {exc}") from None
+        if not isinstance(items, list) or not items or not all(isinstance(t, str) for t in items):
+            raise EngineUnavailable(f"LAWNMOWER_VOICE_FAKE_TEXTS: {self.path} must hold a non-empty JSON array of strings")
+        self._raw, self._items, self._pos = raw, items, 0
+
+    def next(self) -> str:
+        with self._lock:
+            self._load()
+            text = self._items[min(self._pos, len(self._items) - 1)]
+            self._pos += 1
+            return text
+
+
 class FakeSTT(Engine):
     kind = "stt"
     backend = "fake"
@@ -44,9 +93,19 @@ class FakeSTT(Engine):
     def __init__(self, config: VoiceConfig) -> None:
         super().__init__()
         self.config = config
+        self._queue: FakeTextQueue | None = None
+        self.calls = 0  # calls that heard sound (the ones that take a queue entry)
 
     def _load(self) -> None:
         _delay()
+
+    def _text(self) -> str:
+        path = os.environ.get("LAWNMOWER_VOICE_FAKE_TEXTS", "")
+        if path:
+            if self._queue is None or self._queue.path != path:
+                self._queue = FakeTextQueue(path)
+            return self._queue.next()
+        return os.environ.get("LAWNMOWER_VOICE_FAKE_TEXT", DEFAULT_FAKE_TEXT)
 
     def transcribe(self, audio: np.ndarray, language: str | None = None) -> dict:
         with self._lock:
@@ -56,12 +115,27 @@ class FakeSTT(Engine):
             level = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) if len(audio) else 0.0
             if level < 1e-4:
                 return {"text": "", "language": lang}
-            return {"text": os.environ.get("LAWNMOWER_VOICE_FAKE_TEXT", DEFAULT_FAKE_TEXT), "language": lang}
+            text = self._text()
+            self.calls += 1
+            _log_call(self.calls, len(audio) / float(WHISPER_RATE), text)
+            return {"text": text, "language": lang}
 
     def status(self) -> dict:
         st = super().status()
         st.update({"model": self.config.stt_model, "device": "cpu", "computeType": "none"})
         return st
+
+
+def _log_call(n: int, duration_sec: float, text: str) -> None:
+    """``LAWNMOWER_VOICE_FAKE_STT_LOG``: one JSON line per transcription that heard sound."""
+    path = os.environ.get("LAWNMOWER_VOICE_FAKE_STT_LOG", "")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"n": n, "durationSec": round(duration_sec, 3), "text": text}) + "\n")
+    except OSError:
+        pass  # a test helper only: never fail the request over it
 
 
 def _resonate(src: np.ndarray, freq: float, bw: float, sr: int) -> np.ndarray:

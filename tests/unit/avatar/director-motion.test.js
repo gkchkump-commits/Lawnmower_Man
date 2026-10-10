@@ -244,8 +244,10 @@ describe('director motion: gaze', () => {
   });
 
   it('idle sway: ~0.8 deg rms yaw over 2 min, moving at ~0.5 deg/s (the documented amplitudes)', () => {
+    // (the sway alone: the behaviour layer's look-arounds and posture shifts come on top of it,
+    // tests/unit/avatar/behavior.test.js)
     for (const seed of [1, 2, 3]) {
-      const d = new Director({ seed });
+      const d = new Director({ seed, liveliness: 0 });
       const dt = 1 / 60;
       const yaw = [];
       for (let i = 1; i <= 120 * 60; i++) yaw.push(d.update(dt, i * dt).headYaw * DEG);

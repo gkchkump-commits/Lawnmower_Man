@@ -16,6 +16,8 @@
  * @property {number} [idleMotion]    idle sway / saccade amount (default 1, 0 for visual diffs)
  * @property {number} [expressiveness] 0..2 how much speech moves the head, brows and face (default 1;
  *           settings avatar.expressiveness)
+ * @property {number} [liveliness]    0..2 how much spontaneous behaviour (look-arounds, posture shifts, small
+ *           gestures; default 1, 0 = none; settings avatar.liveliness; src/avatar/behavior.js)
  * @property {number} [zoom]          camera zoom (default 1)
  * @property {Record<string,string>} [colors]  palette overrides: eye, line, rim, grid, wisp, mote (hex)
  * @property {boolean} [autoStart]    start the render loop (default true)

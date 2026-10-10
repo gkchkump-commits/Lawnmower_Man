@@ -49,6 +49,7 @@ export function normalizeOptions(o = {}) {
     opacity: num(o.opacity, 0.88, 0, 1),
     idleMotion: num(o.idleMotion, 1, 0, 3),
     expressiveness: num(o.expressiveness, 1, 0, 2),
+    liveliness: num(o.liveliness, 1, 0, 2),
     zoom: num(o.zoom, 1, 0.2, 5),
     colors: o.colors && typeof o.colors === 'object' ? { ...o.colors } : {},
     autoStart: o.autoStart !== false,
@@ -105,7 +106,7 @@ export async function createAvatar(canvas, options = {}) {
   /** @type {Partial<AnimState>} */
   let overrides = {};
 
-  const director = new Director({ seed: opts.seed, idleMotion: opts.idleMotion, expressiveness: opts.expressiveness });
+  const director = new Director({ seed: opts.seed, idleMotion: opts.idleMotion, expressiveness: opts.expressiveness, liveliness: opts.liveliness });
   const governor = new QualityGovernor();
   let motionLimits = null;
   let head = /** @type {any} */ (null);
@@ -343,6 +344,15 @@ export async function createAvatar(canvas, options = {}) {
     setIntonation(v) { director.setIntonation(v); },
     /** @param {{smile?:number, browUp?:number}} e */
     setExpression(e) { director.setExpression(e); stage.requestRender(); },
+    /**
+     * What the app knows about the user, for the avatar's spontaneous behaviour
+     * (src/avatar/behavior.js): `typing` (a key was typed now: it leans in and glances at the
+     * chat), and the camera's `present`, `looking` and `roll` (the user's head tilt in the selfie
+     * view, radians; + = counter-clockwise on screen): engaged, it mirrors the tilt a little and
+     * smiles when the user looks back. Partial updates; `present: null` = no camera.
+     * @param {{ typing?: boolean, present?: boolean|null, looking?: boolean, roll?: number }} u
+     */
+    setUser(u) { director.setUser(u); },
     blink() { director.blink(); stage.requestRender(); },
     /**
      * @param {number|null} x @param {number} [y]
@@ -371,6 +381,7 @@ export async function createAvatar(canvas, options = {}) {
       }
       if (p.idleMotion !== undefined) director.setIdleMotion(p.idleMotion);
       if (p.expressiveness !== undefined) director.setExpressiveness(p.expressiveness);
+      if (p.liveliness !== undefined) director.setLiveliness(p.liveliness);
       if (p.zoom !== undefined) { stage.setZoom(p.zoom); syncParticleView(); }
       stage.requestRender();
     },

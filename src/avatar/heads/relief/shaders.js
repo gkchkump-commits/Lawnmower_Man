@@ -12,6 +12,7 @@ uniform float uUpperLift;
 uniform float uLowerDrop;
 uniform float uLipPush;
 uniform float uBreathY;
+uniform vec3 uHeadXform;  // posture: shift x, y (world) and scale about the pivot (1 at rest)
 uniform float uPlateAspect;
 uniform vec2 uCornerL;
 uniform vec2 uCornerR;
@@ -94,7 +95,7 @@ vec3 applyRig(vec3 p, float slitD) {
 
 vec3 applyHead(vec3 p) {
   // the bust turns, the lower neck does not (a rigid card would swing the whole neck sideways)
-  vec3 r = uHeadPivot + uHeadRot * (p - uHeadPivot);
+  vec3 r = uHeadPivot + uHeadRot * (p - uHeadPivot) * uHeadXform.z + vec3(uHeadXform.xy, 0.0);
   return mix(p, r, smoothstep(uNeckBand.x, uNeckBand.y, p.y)) + vec3(0.0, uBreathY, 0.0);
 }
 

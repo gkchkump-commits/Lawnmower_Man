@@ -36,6 +36,12 @@ export const RIG_LIMITS = {
   gazeY: 0.45,            // (gazeY = 1: ~12.8 deg; the iris slides under the lids, which stay put)
   lidGaze: 0.25,          // upper lid travel (blink units) at gazeY = -1
   breathFh: 0.003,
+  // posture and lids of the behaviour layer (lean / shiftX / squint)
+  leanScale: 0.03,        // the head grows this much at lean = 1 (toward the viewer)
+  leanDropFh: 0.012,      // ... and sinks a little (leaning in from a seated pose)
+  shiftFh: 0.02,          // sideways shift of the head at shiftX = 1
+  squintBlink: 0.3,       // a squint closes the eye this much (the lid wipe, both lids)
+  squintLowerFrac: 0.1,   // and pushes the lower lid up
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
   teethLiftFh: 0.016,     // upper lip lift for teeth = 1 (the incisors show)
   teethDropFh: 0.004,     // lower lip drop for teeth = 1
@@ -235,14 +241,16 @@ export function rigUniforms(rig, a, u) {
   // eyelids (world units, + = toward closing); the upper lid follows a downward gaze part of the
   // way (lidGaze of its travel at gazeY = -1; nothing at rest)
   const lidG = L.lidGaze * clamp01(-(a.gazeY ?? 0));
-  const bl = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG), br = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG);
+  const squint = clamp01(a.squint ?? 0);
+  const sq = 1 - L.squintBlink * squint;
+  const bl = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG) * sq, br = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG) * sq;
   const eL = rig.eyes.L.height, eR = rig.eyes.R.height;
   const lt = rig.lidTravel ?? 1;
   u.lids = u.lids || [0, 0, 0, 0];
   u.lids[0] = lt * bl * eL;
-  u.lids[1] = (lt * bl + L.smileLidFrac * smile) * eL;
+  u.lids[1] = (lt * bl + L.smileLidFrac * smile + L.squintLowerFrac * squint) * eL;
   u.lids[2] = lt * br * eR;
-  u.lids[3] = (lt * br + L.smileLidFrac * smile) * eR;
+  u.lids[3] = (lt * br + L.smileLidFrac * smile + L.squintLowerFrac * squint) * eR;
   u.brows = u.brows || [0, 0];
   u.brows[0] = u.brows[1] = L.browFh * clamp01(a.browUp) * fh;
   // gaze: iris offset in plate UV units (x uses the plate aspect)
@@ -255,6 +263,12 @@ export function rigUniforms(rig, a, u) {
   u.blink[0] = bl; u.blink[1] = br;
   u.headRot = headRotation(a.headYaw, a.headPitch, a.headRoll, u.headRot || new Float32Array(9));
   u.breathY = (a.breath - 0.5) * L.breathFh * fh;
+  // posture: sideways shift, lean (scale about the head pivot, sinking a little); 0 / 1 at rest
+  const lean = clamp(a.lean ?? 0, -1, 1);
+  u.headXform = u.headXform || [0, 0, 1];
+  u.headXform[0] = L.shiftFh * clamp(a.shiftX ?? 0, -1, 1) * fh;
+  u.headXform[1] = -L.leanDropFh * lean * fh;
+  u.headXform[2] = 1 + L.leanScale * lean;
   return u;
 }
 

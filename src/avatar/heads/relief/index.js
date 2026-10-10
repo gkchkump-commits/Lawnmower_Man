@@ -109,7 +109,7 @@ export default class ReliefHead {
       uHeadRot: { value: new THREE.Matrix3() },
       uHeadPivot: { value: new THREE.Vector3(...r.headPivot) },
       uJawDrop: { value: 0 }, uUpperLift: { value: 0 }, uLowerDrop: { value: 0 }, uLipPush: { value: 0 },
-      uBreathY: { value: 0 }, uPlateAspect: { value: r.plateW },
+      uBreathY: { value: 0 }, uPlateAspect: { value: r.plateW }, uHeadXform: { value: new THREE.Vector3(0, 0, 1) },
       uCornerL: { value: new THREE.Vector2() }, uCornerR: { value: new THREE.Vector2() },
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
@@ -259,6 +259,7 @@ export default class ReliefHead {
     f.uLowerDrop.value = u.lowerDrop;
     f.uLipPush.value = u.lipPush;
     f.uBreathY.value = u.breathY;
+    f.uHeadXform.value.set(u.headXform[0], u.headXform[1], u.headXform[2]);
     f.uCornerL.value.set(u.cornerL[0], u.cornerL[1]);
     f.uCornerR.value.set(u.cornerR[0], u.cornerR[1]);
     f.uBrows.value.set(u.brows[0], u.brows[1]);

@@ -12,6 +12,7 @@
 import { clamp, clamp01, fbm1, lerp, mulberry32, noise1 } from './noise.js';
 import { EyeController, GAZE_DEG } from './eyes.js';
 import { Spring, envelope, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
+import { Behavior } from './behavior.js';
 
 /** @typedef {'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'} AvatarState */
 
@@ -47,6 +48,10 @@ import { Spring, envelope, logNormal, minJerk, pinkNoise, pulse, springStep } fr
  * @property {number} cheekRaise  0..1 cheeks and nasolabial folds lift (spread vowels, smiles)
  * @property {number} chinRaise   0..1 the chin (mentalis) bunches up under pressed lips
  * @property {number} nostrilFlare 0..1 the nostrils widen (a breath in before speaking)
+ * @property {number} lean       -1..1 posture: the head leans toward (+) / away from the viewer
+ * @property {number} shiftX     -1..1 posture: the head shifted sideways (+ = screen right)
+ * @property {number} squint     0..1 the eyes narrow (both lids; thinking, a yawn)
+ * @property {number} pulse      0..1 an energy wave through the hologram (accents, emphasis)
  */
 
 export const STATES = /** @type {const} */ (['idle', 'listening', 'thinking', 'speaking', 'error', 'sleep']);
@@ -56,6 +61,7 @@ export const ANIM_KEYS = /** @type {const} */ ([
   'jawOpen', 'mouthWide', 'mouthRound', 'smile', 'blinkL', 'blinkR', 'gazeX', 'gazeY', 'browUp',
   'headYaw', 'headPitch', 'headRoll', 'breath', 'speech', 'energy', 'listen', 'think', 'speak', 'error', 'sleep',
   'mouthPress', 'mouthTuck', 'mouthTeeth', 'mouthTongue', 'mouthAsym', 'cheekRaise', 'chinRaise', 'nostrilFlare',
+  'lean', 'shiftX', 'squint', 'pulse',
 ]);
 
 /** @returns {AnimState} the rest pose */
@@ -66,6 +72,7 @@ export function createAnimState() {
     listen: 0, think: 0, speak: 0, error: 0, sleep: 0,
     mouthPress: 0, mouthTuck: 0, mouthTeeth: 0, mouthTongue: 0, mouthAsym: 0,
     cheekRaise: 0, chinRaise: 0, nostrilFlare: 0,
+    lean: 0, shiftX: 0, squint: 0, pulse: 0,
   };
 }
 
@@ -158,6 +165,7 @@ const SETTLED_GY = 6.78 / GAZE_DEG.y;
 const WEIGHTED = /** @type {const} */ (['listening', 'thinking', 'speaking', 'error', 'sleep']);
 const WEIGHT_OMEGA = { listening: 8, thinking: 8, speaking: 8, error: 14, sleep: 3.2 };
 /** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
+const BLINK_REFRACTORY = 0.8;
 const BLINK_MEDIAN = { idle: 2.8, listening: 4.0, thinking: 2.4, speaking: 2.3, error: 2.6, sleep: 3 };
 /** Idle sway (rad, rms: pinkNoise has unit rms): 1/f-like noise from 0.1 Hz (yaw, pitch) and
  * 0.09 Hz (roll) up, 1 deg yaw, 0.45 pitch, 0.26 roll (over 2 min: ~0.8 / 0.45 / 0.25 deg rms,
@@ -169,10 +177,11 @@ const softOr = (a, b) => 1 - (1 - a) * (1 - b);
 
 export class Director {
   /**
-   * @param {{ seed?: number, idleMotion?: number, expressiveness?: number }} [opts]
+   * @param {{ seed?: number, idleMotion?: number, expressiveness?: number, liveliness?: number }} [opts]
    *   idleMotion scales idle head sway / saccades (0 disables them, e.g. for visual diffs);
    *   expressiveness (0..2, default 1) scales the motion that comes with speech: nods, tilts,
-   *   brows, glances, smiles, and the face moving with the mouth.
+   *   brows, glances, smiles, and the face moving with the mouth; liveliness (0..2, default 1)
+   *   the spontaneous behaviour of src/avatar/behavior.js (look-arounds, posture, gestures).
    */
   constructor(opts = {}) {
     this.seed = (opts.seed ?? 1) | 0;
@@ -264,7 +273,24 @@ export class Director {
     this._pitchS = 0;
     this._speechBreath = 0;
     this._settledLast = false;
+    // ---- behaviour layer (src/avatar/behavior.js): a person's spontaneous repertoire, its own
+    // random stream (the director's streams stay what they were for a seed)
+    this.behavior = new Behavior({ seed: this.seed, liveliness: opts.liveliness ?? 1 });
+    /** @type {import('./behavior.js').BehaviorOut|null} this frame's behaviour */
+    this._B = null;
   }
+
+  /** @param {number} k 0..2: how much spontaneous behaviour (1 = default, 0 = none) */
+  setLiveliness(k) { this.behavior.setLiveliness(k); }
+
+  get liveliness() { return this.behavior.liveliness; }
+
+  /**
+   * What the app knows about the user (src/avatar/behavior.js): typing (a key now), and the
+   * camera's present / looking / roll (the head tilt as seen in the selfie view, radians).
+   * @param {{ typing?: boolean, present?: boolean|null, looking?: boolean, roll?: number }} u
+   */
+  setUser(u) { this.behavior.setUser(u, this._time); }
 
   /** @param {AvatarState} s */
   setState(s) {
@@ -314,6 +340,7 @@ export class Director {
     if (!cue) return;
     if (Array.isArray(cue)) { for (const c of cue) this.setProsody(c); return; }
     const t = this._time;
+    this.behavior.cue(cue, t);
     const s = clamp01(Number(cue.strength ?? 1));
     // no two nods alike: each impulse varies a little in size and length, and turns a little
     const vary = () => 0.8 + 0.4 * this.rng2();
@@ -445,6 +472,7 @@ export class Director {
    */
   lookAt(x, y, kind) {
     this._lookKind = kind === 'glance' ? 'glance' : kind === 'face' ? 'face' : 'cursor';
+    if (this._lookKind === 'cursor' && x !== null && x !== undefined) this.behavior.engage(this._time);
     if (x === null || x === undefined) {
       if (this._look) this._selfJump = true;
       this._look = null;
@@ -547,6 +575,13 @@ export class Director {
     const inhaling = inhale > 0.05;
     sp(this._s.speechBreath, inhaling ? 1 : 0, inhaling ? 9 : 1.4);
 
+    // ---- behaviour (src/avatar/behavior.js): this frame's spontaneous gestures and posture -----
+    const B = this._B = this.behavior.update(dt, time, {
+      state: this.current, look: !!this._look, lookKind: this._lookKind, idleMotion: im,
+      thinkSide: this._thinkSide, thinkUp: this._think.mode !== 'down',
+    });
+    const quiet = 1 - w.speaking;
+
     // ---- mouth -------------------------------------------------------------------------------
     const age = time - this._mouth.at;
     const mt = this._mt || (this._mt = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0 });
@@ -572,15 +607,22 @@ export class Director {
       const om = mt[c] > s.x ? up : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
       o[MOUTH_OUT[c]] = clamp01(sp(s, mt[c], om));
     }
+    // (behaviour, outside speech only: a lip press or purse, a yawn, a sigh's parted lips; its
+    // envelopes start and end at rest themselves)
+    if (quiet > 0.001) {
+      o.jawOpen = Math.max(o.jawOpen, clamp01(B.jaw * quiet));
+      o.mouthPress = Math.max(o.mouthPress, clamp01(B.press * quiet));
+      o.mouthRound = Math.max(o.mouthRound, clamp01(B.round * quiet));
+    }
     // a little lopsided while talking (never at rest: the rest pose stays the reference)
     const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
     o.mouthAsym = clamp((this._asymBias + 0.6 * fbm1(time * 0.31, this.seed + 61)) * 0.4 * talk, -1, 1);
 
     // ---- expression ----------------------------------------------------------------------------
     const browPitch = 0.045 * clamp(pitchSt - 2.5, 0, 6);    // well above the usual pitch: brows lift
-    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error + 0.22 * smileK * ex);
+    const smileT = clamp01(this._expr.smile + 0.08 * w.listening - 0.3 * w.error + 0.22 * smileK * ex + B.smile * quiet);
     const browT = clamp01(this._expr.browUp + 0.18 * w.listening + 0.1 * w.thinking + 0.25 * w.error
-      - 0.2 * w.sleep + (0.4 * browK + browPitch + 0.08 * inhale - 0.06 * lower) * ex);
+      - 0.2 * w.sleep + (0.4 * browK + browPitch + 0.08 * inhale - 0.06 * lower) * ex + B.brow * quiet);
     o.smile = clamp01(sp(this._s.smile, smileT * (1 - w.sleep), 10));
     o.browUp = clamp01(sp(this._s.brow, browT, 15));
 
@@ -592,8 +634,8 @@ export class Director {
     // pressed lips bunch the chin up a little (mentalis); tucks and puckers less. It goes with the
     // lips' target (not the sprung lips, which would put a second lag on it), rising in ~100 ms
     // and falling as the lips part: in step with the closure, not after it.
-    const chinT = clamp01((0.58 * mt.press + 0.2 * mt.tuck + 0.12 * mt.round) * faceK);
-    const nostrilT = clamp01(inhale * faceK);
+    const chinT = Math.max(clamp01((0.58 * mt.press + 0.2 * mt.tuck + 0.12 * mt.round) * faceK), B.chin * quiet);
+    const nostrilT = Math.max(clamp01(inhale * faceK), B.nostril * quiet);
     const cS = this._s.cheek, chS = this._s.chin, nS = this._s.nostril;
     o.cheekRaise = clamp01(sp(cS, cheekT, cheekT > cS.x ? 26 : 18));
     o.chinRaise = clamp01(sp(chS, chinT, chinT > chS.x ? 40 : 26));
@@ -610,7 +652,7 @@ export class Director {
       this._sighAt = time;
       this._nextSigh = time + 40 + 80 * this.rng3();
     }
-    const sigh = envelope(time - this._sighAt, 1.4, 0.6, 2.4);
+    const sigh = Math.max(envelope(time - this._sighAt, 1.4, 0.6, 2.4), B.sigh);
     const depth = clamp(0.82 + 0.06 * pinkNoise(time, this.seed + 73, { f0: 0.05, octaves: 2 }) + 0.18 * sigh, 0.55, 1);
     const breathIdle = 0.5 - 0.5 * Math.cos(this._breathPhase) * depth;
     // while speaking, breaths come at the pauses (the inhale cues), not on a clock
@@ -639,6 +681,9 @@ export class Director {
     let pitch = pitchSway + pP + pitchPosture + eyes.hy.x / DEG
       + ex * (-0.024 * nod + 0.012 * lift + 0.012 * Math.abs(tilt) + 0.0036 * softClamp(pitchSt, -6, 8) - 0.016 * lower + 0.008 * inhaleHead);
     let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * 0.005 * nodRoll;
+    // (behaviour: gestures and posture)
+    yaw += B.yaw; pitch += B.pitch; roll += B.roll;
+    o.lean = B.lean; o.shiftX = B.shiftX; o.squint = clamp01(B.squint * quiet); o.pulse = B.pulse;
     yaw = clamp(yaw, -0.35, 0.35);
     pitch = clamp(pitch, -0.25, 0.25);
     roll = clamp(roll, -0.2, 0.2);
@@ -649,6 +694,7 @@ export class Director {
     o.gazeY = clamp((eyes.y - pitch * DEG) / GAZE_DEG.y, -1, 1);
 
     // ---- blinks ----------------------------------------------------------------------------------
+    if (B.blink && time - this._blinkStart > BLINK_REFRACTORY) this._blinkRequested = true;
     this._blinks(time, w, o);
 
     // ---- energy --------------------------------------------------------------------------------------
@@ -746,6 +792,14 @@ export class Director {
       x += this._glance.x * gk * GAZE_DEG.x;
       y += this._glance.y * gk * 6.78; // (0.3-0.8 deg: a little up or down)
     }
+    // ---- the behaviour's own looks (src/avatar/behavior.js): into the room, at the chat, around a
+    // thought; while one holds, the eyes go there with the gesture's head share
+    const bg = this._B?.gaze;
+    const bOn = !!bg?.on && gs !== 'sleep';
+    if (bOn) {
+      if (bg.rel) { x += bg.x; y += bg.y; } else { x = bg.x; y = bg.y; }
+    }
+    if (bg?.jump) jump = true;
     // ---- pursuit sees the target's velocity ~100 ms late (and never a 12 / 30 Hz staircase)
     const h = this._lookHist;
     const tg = this._tg;
@@ -759,15 +813,16 @@ export class Director {
     } else {
       h.n = 0;
     }
+    if (bOn) { tg.vx = 0; tg.vy = 0; } // (the gesture's look is still: nothing to pursue)
     tg.x = x; tg.y = y;
     tg.reactive = !!look && !jump;
     tg.now = jump;
     // the head goes along with a followed target (cursor, face: a 20 deg look ends with ~7 deg of
     // head, as before the eye controller) more than with the avatar's own looks; a glance away
     // from the user is the eyes' own look
-    const follow = !!look && this._lookKind !== 'glance';
+    const follow = !!look && this._lookKind !== 'glance' && !bOn;
     tg.headFollow = follow;
-    tg.headShare = follow ? HEAD_SHARE_FOLLOW : gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
+    tg.headShare = bOn ? bg.share : follow ? HEAD_SHARE_FOLLOW : gs === 'thinking' ? 0.3 : gs === 'speaking' ? 0.2 : 0.25;
     this.eyes.update(dt, time, tg);
   }
 
@@ -802,7 +857,7 @@ export class Director {
     if (!busy && time >= this._nextBlink && !due) this._blinkDeferred = true;
     // a large gaze shift often comes with a blink
     for (const amp of this.eyes.take()) {
-      if (amp >= 15 && time - this._blinkStart > 0.5 && this.rng3() < 0.65) this._blinkRequested = true;
+      if (amp >= 15 && time - this._blinkStart > BLINK_REFRACTORY && this.rng3() < 0.65) this._blinkRequested = true;
     }
     if (!busy && (this._blinkRequested || due || time >= this._pendingDouble)) {
       this._blinkDeferred = false;
@@ -817,7 +872,7 @@ export class Director {
       const close = 0.06 + 0.02 * r(), hold = 0.02 * r(), open = 0.15 + 0.07 * r();
       this._blink = { amp, close, hold, open, total: close + hold + open + 0.01 };
       if (!wasDouble && this.rng() < 0.04) this._pendingDouble = time + this._blink.total + 0.12 + 0.08 * r();
-      this._nextBlink = time + logNormal(this.rng, BLINK_MEDIAN[this.current] ?? 2.8, 0.6, 0.8, 12);
+      this._nextBlink = time + logNormal(this.rng, BLINK_MEDIAN[this.current] ?? 2.8, 0.6, BLINK_REFRACTORY, 12);
     }
     const bl = this._blink;
     const blinkL = bl.amp * blinkCurve(time - this._blinkStart, bl);
@@ -868,6 +923,7 @@ export class Director {
     o.cheekRaise = clamp01((0.55 * o.mouthWide * (1 - 0.6 * o.jawOpen) + 0.3 * o.mouthTeeth) * faceK * w.speaking + 0.9 * o.smile);
     o.chinRaise = clamp01((0.58 * o.mouthPress + 0.2 * o.mouthTuck + 0.12 * o.mouthRound) * faceK);
     o.nostrilFlare = 0;
+    o.lean = 0; o.shiftX = 0; o.squint = 0; o.pulse = 0;
     const sleepClose = smooth01(w.sleep * 1.15);
     o.blinkL = sleepClose;
     o.blinkR = sleepClose;

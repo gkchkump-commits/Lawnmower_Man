@@ -105,7 +105,7 @@ Off by default. Turn it on with the toolbar's camera button, *Settings › Camer
 * **says hello** when it first sees you (good morning / afternoon / evening) and **welcome back** when you return after a couple of minutes away (*Greet me*: Hello, Claude for a personal hello from Claude, or Off),
 * optionally **listens only while you look at the screen** in hands-free mode (*Listen only when I look*).
 
-Face tracking (Google's MediaPipe Face Landmarker) runs inside the app, offline; no video is recorded or uploaded. **Claude sees you only** when *Settings › Camera › Let Claude see me* is on (a snapshot goes with every message) or when you press the camera button in the message box (the next message only); the chat shows the picture that was sent. The camera is released while the window is hidden or minimized. Details, privacy and troubleshooting: [docs/CAMERA.md](docs/CAMERA.md).
+Face tracking (Google's MediaPipe Face Landmarker) runs inside the app, offline; no video is recorded or uploaded. **Claude sees you only** when *Settings › Camera › Let Jade see me* is on (a snapshot goes with every message) or when you press the camera button in the message box (the next message only); the chat shows the picture that was sent. The camera is released while the window is hidden or minimized. Details, privacy and troubleshooting: [docs/CAMERA.md](docs/CAMERA.md).
 
 ### The home camera (Tapo C211)
 

@@ -225,7 +225,7 @@ test.describe('camera (fake camera, mock bridge)', () => {
     await page.locator('#btn-settings').click();
     const section = page.locator('[data-section="camera"]');
     await expect(section).toBeVisible();
-    for (const label of ['Camera', 'Device', 'Eye contact', 'Notice when I leave', 'Smile back', 'Let Claude see me', 'Greet me', 'Listen only when I look']) {
+    for (const label of ['Camera', 'Device', 'Eye contact', 'Notice when I leave', 'Smile back', 'Let Jade see me', 'Greet me', 'Listen only when I look']) {
       await expect(section.locator('.field-label', { hasText: label }).first()).toBeVisible();
     }
     await expect(section.locator('[data-path="camera.enabled"] .switch')).toHaveAttribute('aria-checked', 'false');

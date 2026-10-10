@@ -8,6 +8,8 @@
 //   data-listen     ptt | utterance while the mic records
 //   data-handsfree  true when hands-free listening is armed
 //   data-sleep      true when the avatar dozes
+//   data-wake       the "Hey Jade" state (src/wake/machine.js WakeUiState), data-wake-strict 1
+//                   (the media-burst rule), data-wake-echo all | app | off (the mic's echo canceller)
 
 import { toolDisplayName } from '../app/permission.js';
 import { claudeSetupModel, voiceManualModel } from '../app/setup-help.js';
@@ -160,6 +162,19 @@ export class AppView {
     this.set('handsfree', !!on);
     this.status.setHandsFree(on);
   }
+
+  // ---- "Hey Jade" (src/wake/ui.js) ----
+  /**
+   * @param {{ hidden: boolean, text: string, title: string, slashed: boolean, tone: string }} chip
+   * @param {{ state: string, strict?: boolean, echo?: string }} m
+   */
+  setWake(chip, m) {
+    this.set('wake', m.state);
+    this.set('wakeStrict', m.strict ? '1' : '');
+    this.set('wakeEcho', m.state === 'off' ? '' : m.echo || 'off');
+    this.status.setWake(chip);
+  }
+  // ---- end "Hey Jade" ----
 
   setMicLevel(level) {
     const l = Math.round(Math.min(1, Math.max(0, level)) * 20) / 20;

@@ -59,11 +59,12 @@ for (const boundaries of [true, false]) {
     // Wait on the voice, not on a frame count: how many frames fit into it depends on the machine.
     await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 4 && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
     await waitIdle(page);
-    // ...then Settings › Voice › Test lip-sync, a line full of m / b / p, again until 40 frames of
-    // speech were drawn. A sealed closure lasts ~0.1 s (about 1 frame in 7 lands on one) and
-    // software WebGL may draw only a frame or two a second, so judge frames, not lines.
+    // ...then Settings › Voice › Test lip-sync, a line full of m / b / p: at least once, and again
+    // until 60 frames of speech were drawn. A sealed closure lasts ~0.1 s (about 1 frame in 7 of
+    // this line lands on one, 1 in 13 of the greeting) and software WebGL may draw only a frame or
+    // two a second, so judge enough frames, whatever the machine.
     await page.locator('#btn-settings').click();
-    for (let i = 0; i < 6 && (await page.evaluate(() => window.__mouth.length)) < 40; i++) {
+    for (let i = 0; i < 8 && (i === 0 || (await page.evaluate(() => window.__mouth.length)) < 60); i++) {
       const before = await page.evaluate(() => window.speechSynthesis.spoken.length);
       await page.getByRole('button', { name: 'Test lip-sync' }).click();
       await page.waitForFunction((n) => {

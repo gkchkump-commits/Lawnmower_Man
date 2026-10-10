@@ -134,7 +134,9 @@ body.tapo[data-env="browser"] { background: #0b0f14; }
   transition: background 0.15s, border-color 0.15s, box-shadow 0.2s;
 }
 .arm:hover:not(:disabled) { background: rgba(127, 227, 255, 0.13); }
-.arm:disabled { opacity: 0.45; cursor: default; }
+/* dimmed by colour, not opacity: bold text at 45% opacity renders with a fuzzy outline */
+.arm:disabled { cursor: default; background: transparent; border-color: rgba(127, 227, 255, 0.14); }
+.arm:disabled .arm-icon, .arm:disabled .arm-label, .arm:disabled .arm-action { color: rgba(170, 190, 205, 0.42); }
 .arm:focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 2px; }
 .arm-icon { width: 20px; height: 20px; color: var(--cyan-soft); }
 .arm-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.15; }
@@ -687,6 +689,7 @@ summary .sec-title { margin: 0; }
 .form-hint[hidden] { display: none; }
 .form-error { margin-top: 4px; color: #ffb3aa; font-size: 12px; }
 .form-error[hidden] { display: none; }
+.form-error.warn { color: var(--gold); }
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .form-actions .btn { min-width: 120px; padding: 6px 16px; }
 .setup .sub { margin: 4px 0 2px; }

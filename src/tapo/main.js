@@ -524,7 +524,7 @@ async function boot() {
     else if (st?.configured && setup.shown && setupAuto) closeSetup();
     refresh();
   });
-  /** @type {Map<string, string>} the kind each live event was last announced as */
+  /** @type {Map<string, { kind: string, key: string }>} how each live event was last announced */
   const toasted = new Map();
   tapo.onEvent?.((/** @type {any} */ m) => {
     events.onEvent(m);
@@ -534,11 +534,15 @@ async function boot() {
       toasted.delete(ev.id);
       return;
     }
-    // a new event, or one that turned out to be a person
-    if (toasted.get(ev.id) === ev.kind || (toasted.has(ev.id) && ev.kind !== 'person')) return;
-    toasted.set(ev.id, ev.kind);
+    // a new event, or one that turned out to be a person (that toast replaces the movement one)
+    const before = toasted.get(ev.id);
+    if (before?.kind === ev.kind || (before && ev.kind !== 'person')) return;
+    if (before) toasts.dismiss(before.key);
     const what = ev.kind === 'person' ? 'A person' : ev.kind === 'tamper' ? 'Tampering' : 'Movement';
-    toast(`${what} seen just now${status?.security?.recording ? ' — recording' : ''}.`, ev.kind === 'person' ? 'warn' : 'info');
+    const level = ev.kind === 'person' ? 'warn' : 'info';
+    const text = `${what} seen just now${status?.security?.recording ? ' — recording' : ''}.`;
+    toasted.set(ev.id, { kind: ev.kind, key: `${level}:${text}` });
+    toast(text, level);
   });
   tapo.onOpenEvent?.(async (/** @type {any} */ m) => {
     const id = m?.id;

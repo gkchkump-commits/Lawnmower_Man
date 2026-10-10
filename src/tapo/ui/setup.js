@@ -276,6 +276,7 @@ export class SetupPanel {
     if (e) {
       e.hidden = true;
       e.textContent = '';
+      e.classList.remove('warn');
     }
     this.inputs[/** @type {'host'} */ (k)]?.removeAttribute('aria-invalid');
   }
@@ -286,7 +287,17 @@ export class SetupPanel {
     if (!e) return;
     e.textContent = msg;
     e.hidden = false;
+    e.classList.remove('warn');
     this.inputs[/** @type {'host'} */ (k)]?.setAttribute('aria-invalid', 'true');
+  }
+
+  /** a note under the field that does not stop Test or Save. @param {string} k @param {string} msg */
+  _warn(k, msg) {
+    const e = this.errors[k];
+    if (!e) return;
+    e.textContent = msg;
+    e.hidden = false;
+    e.classList.add('warn');
   }
 
   /**
@@ -313,7 +324,7 @@ export class SetupPanel {
         ok = false;
       } else {
         password = p.value;
-        if (p.warning) this.o.toast(p.warning, 'warn');
+        if (p.warning) this._warn('password', p.warning);
       }
     }
     const op = checkPort(this.inputs.onvifPort.value || '2020');

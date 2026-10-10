@@ -135,7 +135,8 @@ export class EventsPanel {
     }
     this.empty.hidden = items.length > 0;
     this.more.hidden = this.events.length >= this.total || !this.events.length;
-    const unread = this.events.filter((e) => !e.acknowledged).length;
+    // the event happening now counts too (it has a dot like the others)
+    const unread = items.filter((e) => !e.acknowledged).length;
     this.count.textContent = unread ? `${unread} new` : '';
     this.count.hidden = !unread;
   }

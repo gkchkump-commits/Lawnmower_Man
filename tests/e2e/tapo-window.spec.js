@@ -165,7 +165,10 @@ test.describe('Home camera window', () => {
     await expect(page.locator('.live-box')).toBeVisible({ timeout: 8000 });
     await expect(page.locator('.live-box-label')).toContainText('Person 90%');
     await expect(page.locator('.event.live')).toBeVisible({ timeout: 8000 });
-    await expect(page.locator('.toast').first()).toContainText(/seen just now/);
+    // once it is a person, that toast replaces the movement one; the event happening now counts as new
+    await expect(page.locator('.toast.warn')).toContainText('A person seen just now', { timeout: 8000 });
+    await expect(page.locator('.toast', { hasText: 'Movement seen' })).toHaveCount(0);
+    await expect(page.locator('#events .side-count')).toHaveText('2 new');
     await expect(page.locator('.rec')).toBeVisible();
     await shot(page, testInfo, 'tapo-armed-person');
     // the person leaves: the event ends and is listed with its clip
@@ -221,7 +224,14 @@ test.describe('Home camera window', () => {
     await page.locator('.found-cam').click();
     await expect(page.locator('#tapo-set-host')).toHaveValue('192.168.1.50');
     await page.locator('#tapo-set-username').fill('camacct');
+    // an unusual password length is a note under the field, not a blocker
+    await page.locator('#tapo-set-password').fill('abc');
+    await page.getByRole('button', { name: 'Test connection' }).click();
+    await expect(page.locator('#tapo-set-password-error')).toHaveClass(/warn/);
+    await expect(page.locator('#tapo-set-password-error')).toContainText('6 to 32 characters');
+    await expect(page.locator('#tapo-set-password')).not.toHaveAttribute('aria-invalid', 'true');
     await page.locator('#tapo-set-password').fill('se&cret12');
+    await expect(page.locator('#tapo-set-password-error')).toBeHidden();
     // a scripted report: the events step fails with a hint
     await page.evaluate(() => window.__tapoMock.scriptTest({
       ok: false,

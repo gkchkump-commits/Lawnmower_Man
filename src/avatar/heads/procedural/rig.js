@@ -25,6 +25,7 @@ export const PROC_LIMITS = Object.freeze({
   tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)
   tuckRaiseFh: 0.004,      // the lower lip rises to the upper teeth...
   tuckBackFh: 0.012,       // ...and draws back under them
+  tuckShapeLift: 0.5,      // share of the neighbouring vowel's upper-lip lift kept under a full tuck (as the relief head)
   pressThinFh: 0.005,      // pressed lips thin toward the seam...
   pressInFh: 0.004,        // ...and flatten (the seam itself stays: the cavity must not show)
   jawLipK: 0.37,           // lower-lip drop per radian of jaw rotation (cancelled by a closure)
@@ -180,7 +181,7 @@ export function procRigUniforms(rig, a, u) {
   // the square of the press (as on the relief head: a half-released press still seals).
   const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth + L.jawUpperLipFh * jaw) * fh;
   const openK = (1 - press) * (1 - press);
-  u.lips[0] = lift0 * openK + L.tuckLiftFh * tuck * fh;      // upper lift
+  u.lips[0] = lift0 * openK * (1 - (1 - L.tuckShapeLift) * tuck) + L.tuckLiftFh * tuck * fh;      // upper lift
   u.lips[1] = L.wideLipFh * 1.2 * wide * fh * Math.max(0, openK - tuck)    // lower drop
     - (press + tuck) * L.jawLipK * u.jawAngle - L.tuckRaiseFh * tuck * fh;
   u.lips[2] = L.roundPushFh * round * fh;                         // push forward

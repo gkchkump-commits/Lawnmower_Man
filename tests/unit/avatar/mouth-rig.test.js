@@ -49,8 +49,15 @@ describe('relief rig: speech channels', () => {
 
   it('tuck lifts the upper lip a little and brings the lower lip up to the teeth', () => {
     const u = rigUniforms(rig, pose({ jawOpen: 0.07, mouthTuck: 1 }), {});
-    // (plus the little the upper lip rises with the jaw)
-    expect(u.upperLift).toBeCloseTo((RIG_LIMITS.tuckLiftFh + 0.07 * RIG_LIMITS.jawUpperLipFh) * fh, 9);
+    // (plus part of the little the upper lip rises with the jaw: under a tuck the shapes keep
+    // RIG_LIMITS.tuckShapeLift of their lift; it was all of it in v0.3)
+    expect(u.upperLift).toBeCloseTo((RIG_LIMITS.tuckLiftFh + RIG_LIMITS.tuckShapeLift * 0.07 * RIG_LIMITS.jawUpperLipFh) * fh, 9);
+    // f / v next to a spread vowel (ee-f): a narrow band of incisors, narrower than the vowel's
+    const vowel = rigUniforms(rig, pose({ jawOpen: 0.12, mouthWide: 0.35, mouthTeeth: 0.4 }), {});
+    const f = rigUniforms(rig, pose({ jawOpen: 0.12, mouthWide: 0.35, mouthTeeth: 0.4, mouthTuck: 1 }), {});
+    expect(f.upperLift).toBeCloseTo(RIG_LIMITS.tuckShapeLift * vowel.upperLift + RIG_LIMITS.tuckLiftFh * fh, 9);
+    expect(opening(f)).toBeLessThan(0.65 * opening(vowel));
+    expect(f.lens[0]).toBeCloseTo(vowel.lens[0] * (1 - RIG_LIMITS.tuckLensHw), 9);
     expect(u.lowerDrop).toBeLessThan(-u.jawDrop);    // the lower lip rises above its rest place
     expect(opening(u)).toBeGreaterThan(0);           // a small opening: the incisor edge shows
     expect(opening(u)).toBeLessThan(0.012 * fh);

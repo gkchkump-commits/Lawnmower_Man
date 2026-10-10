@@ -42,6 +42,8 @@ export const RIG_LIMITS = {
   teethDropFh: 0.004,     // lower lip drop for teeth = 1
   tuckLiftFh: 0.012,      // upper lip lift for tuck (the incisor edge shows over the lower lip)
   tuckRaiseFh: 0.003,     // the lower lip rises to the upper teeth
+  tuckShapeLift: 0.5,     // share of the neighbouring vowel's upper-lip lift kept under a full tuck (a narrow band of incisors)
+  tuckLensHw: 0.2,        // the opening of f / v is this much narrower (the lips stay close beside the incisors)
   pressThin: 0.28,        // lip thinning at press = 1 (texture compressed toward the seam)
   pressContactPx: 2.5,    // the lips meet: the dark rest gap closes (plate px)
   tuckThin: 0.32,         // lower lip rolled in under the teeth
@@ -193,7 +195,7 @@ export function rigUniforms(rig, a, u) {
   // parting the shapes add fades out with the square of the press: a press that is only half
   // released still holds the lips nearly together (short m / b / p stay sealed for their length).
   const openK = (1 - press) * (1 - press);
-  u.upperLift = lift0 * openK + L.tuckLiftFh * tuck * fh;
+  u.upperLift = lift0 * openK * (1 - (1 - L.tuckShapeLift) * tuck) + L.tuckLiftFh * tuck * fh;
   u.lowerDrop = drop0 * Math.max(0, openK - tuck) - (press + tuck) * u.jawDrop - L.tuckRaiseFh * tuck * fh;
   // (the part of it that closes the lips over the jaw: at the corners it cancels the jaw's share)
   u.lowerClose = (press + tuck) * u.jawDrop;
@@ -208,7 +210,7 @@ export function rigUniforms(rig, a, u) {
   u.cornerR[0] = out; u.cornerR[1] = up - tilt;
   // the lens of the opening spans the corners where they are now (narrow for O / U, wide for E)
   u.lens = u.lens || [1, L.cornerJawShare, 0.75, 0.55];
-  u.lens[0] = Math.max(0.35, 1 + out / hw);
+  u.lens[0] = Math.max(0.35, (1 + out / hw) * (1 - L.tuckLensHw * tuck));
   u.lens[1] = L.cornerJawShare;
   // the opening's outline: a slender almond for a small or rounded opening; an open vowel's and a
   // spread one's are fuller toward the corners (rounder ends, a flatter middle: a smaller

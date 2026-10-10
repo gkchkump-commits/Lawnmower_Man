@@ -13,6 +13,7 @@ export const STEP_TEXT = Object.freeze({
   tilt: 'Tilting up and down…',
   'min-step': 'Trying the smallest steps…',
   ask: 'Your help is needed',
+  cancelling: 'Turning the camera back…',
   done: 'Done',
   failed: 'Calibration did not finish',
 });
@@ -52,7 +53,7 @@ export class CalibrationDialog {
       className: 'dlg-calib',
       body: [this.body, this.actions],
       onClose: () => {
-        if (this.started && !['done', 'failed', 'idle'].includes(this.state.step)) this.o.calibrate({ action: 'cancel' }).catch(() => {});
+        if (this.started && !['done', 'failed', 'idle', 'cancelling'].includes(this.state.step)) this.o.calibrate({ action: 'cancel' }).catch(() => {});
         this.dlg = null;
       },
     });
@@ -93,7 +94,10 @@ export class CalibrationDialog {
   update(s) {
     if (!s || typeof s !== 'object') return;
     if (!this.dlg) return;
-    if (!this.started && s.step !== 'idle') this.started = true;
+    // a run stopped before this dialog opened, still turning the camera back: the intro (with
+    // Start, which main runs once the camera is back) stays
+    if (!this.started && (s.step === 'idle' || s.step === 'cancelling')) return;
+    if (!this.started) this.started = true;
     this.render(s);
   }
 

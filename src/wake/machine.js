@@ -38,8 +38,12 @@ export const WAKE = Object.freeze({
   logSize: 20,
   // not in the contract's table: the follow-up glow dims over the last 1.5 s (FUP-7); a mic
   // that delivers exact zeros this long gets one hint (WIN-4); a mic failure this soon after a
-  // voice interaction is said out loud once (A11Y-9)
-  dimMs: 1500, digitalSilenceMs: 10000, voiceRecentMs: 30000,
+  // voice interaction is said out loud once (A11Y-9); turned off this soon after the engine
+  // stopped (main's status first, then the setting), the mic still gets its "off" sound
+  dimMs: 1500, digitalSilenceMs: 10000, voiceRecentMs: 30000, offGraceMs: 1500,
+  // a watchdog: a capture whose window ended this long ago with no word and no end from the
+  // controller is over all the same (so a lost event never leaves her stuck "listening")
+  captureGraceMs: 2500,
 });
 
 /** @typedef {'off'|'unavailable'|'starting'|'paused'|'locked'|'blocked'|'muted'|'waiting'|'attention'|'listening'|'followup'|'look'|'busy'|'barge'} WakeUiState */
@@ -159,6 +163,8 @@ export class WakeMachine {
     this._reported = '';
     this._base = /** @type {{ state: WakeUiState, reason: string, code: string, fallback: boolean }} */ ({ state: 'off', reason: '', code: '', fallback: false });
     this._strictOn = false;
+    /** the last time the mic was open for her name (waiting or muted) */
+    this._runAt = -Infinity;
   }
 
   // ------------------------------------------------------------------------------------------
@@ -205,6 +211,7 @@ export class WakeMachine {
     let t = Infinity;
     const a = this.active;
     if (a && a.verdict === 'pending') t = Math.min(t, a.verifyDeadline);
+    if (a && a.phase === 'capture' && !a.speechStarted && Number.isFinite(a.windowEnd)) t = Math.min(t, a.windowEnd + WAKE.captureGraceMs);
     if (this._strictOn) t = Math.min(t, this.strictUntil);
     if (this.mic === 'blocked' && this._base.state === 'blocked') t = Math.min(t, this.micRetryAt);
     if (this.dimAt < Infinity && !this.dimOn) t = Math.min(t, this.dimAt);
@@ -227,7 +234,7 @@ export class WakeMachine {
     const out = [];
     const now = this._now();
     switch (input?.type) {
-      case 'settings': this._settings(input, out); break;
+      case 'settings': this._settings(input, out, now); break;
       case 'availability': this.avail = { ...this.avail, ...pick(input, ['stt', 'sttReason', 'engine', 'engineDetail', 'device']) }; break;
       case 'power':
         if (input.state === 'locked' || input.state === 'suspended') this.locked = true;
@@ -267,9 +274,11 @@ export class WakeMachine {
   // ------------------------------------------------------------------------------------------
   // inputs
 
-  _settings(input, out) {
+  _settings(input, out, now) {
     const prevOn = this.s.enabled;
-    const wasRunning = this._base.state === 'waiting' || this._base.state === 'muted';
+    // main stops the engine as the setting changes, and its status can arrive first: a mic that
+    // was listening a moment ago still gets its "off" sound
+    const wasRunning = this._base.state === 'waiting' || this._base.state === 'muted' || now - this._runAt < WAKE.offGraceMs;
     const w = input.wake || {};
     this.s = {
       ...this.s,
@@ -628,6 +637,12 @@ export class WakeMachine {
   _tick(out, now) {
     const a = this.active;
     if (a && a.verdict === 'pending' && now >= a.verifyDeadline) this._reject(a, 'timeout', out, now);
+    const w = this.active;
+    if (w && w.phase === 'capture' && !w.speechStarted && now >= w.windowEnd + WAKE.captureGraceMs) {
+      // the controller never said how the capture ended: end it here
+      if (w.kind === 'listening') this._log(now, 'no command', 'no-command');
+      this._endEpisode(out, 'watchdog');
+    }
     const p = this.presence;
     const cur = this.active;
     if (this.s.lookToTalk && p.camera && this._base.state === 'waiting' && !this._base.fallback) {
@@ -678,6 +693,8 @@ export class WakeMachine {
       out.push({ type: 'openMic', echo: 'all', retry: true });
     }
     this._base = this._computeBase();
+    if (this._base.state === 'waiting' || this._base.state === 'muted') this._runAt = now;
+    else if (this._base.state === 'off') this._runAt = -Infinity;
     if (this._base.state !== 'waiting' && this.active) this._endEpisode(out, this._base.state);
     if (this._base.state === 'waiting' && !this.muted && this.frozen && !this.active) {
       const f = this.frozen;

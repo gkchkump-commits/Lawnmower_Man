@@ -34,7 +34,7 @@ export const CONVERSATION_STATES = /** @type {const} */ (['idle', 'listening', '
 export const AVATAR_STATE = Object.freeze({ idle: 'idle', listening: 'listening', transcribing: 'thinking', thinking: 'thinking', speaking: 'speaking' });
 
 /** Whisper's classic outputs for noise/silence; ignored for short utterances. */
-const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watching!?|you\.?|bye\.?|\.+|okay\.?|so\.?|uh\.?|um\.?)$/i;
+export const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watching!?|you\.?|bye\.?|\.+|okay\.?|so\.?|uh\.?|um\.?)$/i; // wake: shared with src/wake/ (the command rules)
 
 /**
  * @typedef {object} ControllerView

@@ -90,6 +90,24 @@ describe('T1 enable: the state follows what is available (§2.4)', () => {
     expect(h.m.state).toBe('off');
     expect(of(h.step({ type: 'settings', wake: { enabled: false } }), 'earcon')).toEqual([]);
   });
+
+  it('main says the engine is off a moment before the setting arrives: the micOff earcon still plays', () => {
+    const h = harness();
+    h.ready();
+    const a = h.step({ type: 'availability', engine: 'off' });
+    expect(types(a)).toContain('releaseMic');
+    expect(h.m.state).toBe('starting');
+    h.advance(200);
+    const b = h.step({ type: 'settings', wake: { enabled: false } });
+    expect(one(b, 'earcon').name).toBe('micOff');
+    expect(h.m.state).toBe('off');
+    // but not when it had not been listening for a while
+    const k = harness();
+    k.ready();
+    k.step({ type: 'availability', engine: 'off' });
+    k.advance(5000);
+    expect(of(k.step({ type: 'settings', wake: { enabled: false } }), 'earcon')).toEqual([]);
+  });
 });
 
 describe('T2-T5 a wake: attention, then listening or back to waiting', () => {
@@ -145,6 +163,30 @@ describe('T2-T5 a wake: attention, then listening or back to waiting', () => {
     expect(of(a, 'earcon')).toEqual([{ type: 'earcon', name: 'wake' }]);
     expect(types(a)).toEqual(expect.arrayContaining(['noteActivity', 'showWindow', 'announce']));
     expect(h.m.log.at(-1)).toMatchObject({ outcome: 'woke', latencyMs: 280 });
+  });
+
+  it('a capture whose end never arrives is ended by the watchdog (never stuck "listening")', () => {
+    const h = harness();
+    h.ready();
+    h.hit();
+    h.step({ type: 'verified', id: 'w1', ok: true });
+    expect(h.m.state).toBe('listening');
+    // the mic's own 8 s no-speech end is lost (nothing calls captureNoSpeech)
+    expect(h.m.nextDeadline()).toBe(1000 + WAKE.commandWindowMs + WAKE.captureGraceMs);
+    h.advance(WAKE.commandWindowMs + WAKE.captureGraceMs - 1);
+    expect(h.m.state).toBe('listening');
+    const a = h.advance(1);
+    expect(h.m.state).toBe('waiting');
+    expect(one(a, 'cancelCapture')).toEqual({ type: 'cancelCapture', meta: { wakeId: 'w1' } });
+    expect(h.m.log.at(-1).text).toBe('no command after 8 s');
+    // a capture that heard speech is left to the controller
+    const k = harness();
+    k.ready();
+    k.hit();
+    k.step({ type: 'verified', id: 'w1', ok: true });
+    k.step({ type: 'speechStart' });
+    k.advance(WAKE.commandWindowMs + WAKE.captureGraceMs + 5000);
+    expect(k.m.state).toBe('listening');
   });
 
   it("T4: no earcon with sounds 'off'", () => {

@@ -637,7 +637,13 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   the last move ended) and the worker uses only frames that reached main later, naming the one it
   used; main ignores answers without that gate, never measures without a reference picture, and
   checks each axis on the way back (TAPO.md §10.1). A longer stall makes it ask the user, never
-  guess. The stall itself: one `getImageData` of the motion sample blocked the worker for 62.7 s
+  guess. A video that lags the motor before it reaches main (the camera, Wi-Fi, go2rtc on a busy
+  PC) passes that gate, so the worker also says whether the picture moved and settled, when it
+  first changed and how a new reference compares with the frame the last measurement ended on
+  (`vsLast`); the wizard uses a measurement only when the picture followed the move and settled,
+  takes the reference at the turned position only when it still shows that frame, waits out the
+  learnt lag, and otherwise asks and measures nothing more (simulated with the simulator's
+  `videoLagMs`: `tapo-e2e --video-lag`). The stall itself: one `getImageData` of the motion sample blocked the worker for 62.7 s
   in tapo-e2e under load (5 of 6 calibration runs then had to ask). The worker now reads decoded
   frames in a CPU format (I420, NV12, RGBA…) with `VideoFrame.copyTo()` (asynchronous, about a
   millisecond for 640×360; `src/tapo/worker/frame-pixels.js`) and box-downscales them itself;

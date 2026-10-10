@@ -368,28 +368,52 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
 * **Pan/tilt** (`ptz.js`): RelativeMove steps as fractions of the view (converted with the
   calibrated `viewUnitsX/Y`), press-and-hold as ContinuousMove with heartbeats, a watchdog `Stop`
   after every move and a Stop fallback chain (so a motor can never grind at its end stop),
-  presets, home. `calibration.js` turns the camera +0.2 units per axis and measures the picture
+  presets, home. `calibration.js` turns the camera 0.2 units per axis and measures the picture
   shift in the worker (`src/tapo/worker/shift.js`, block matching on 128×72 luma) for the axis
   signs and the units per view. The reference picture is a still one (the worker confirms it
-  before the camera moves), and when the camera reports that it moved (GetStatus position), the
-  worker waits for the picture to move too (up to 6 s), so a video that lags the motor by a second
-  or two is still measured. msPerUnit comes from the camera's reported travel time (not from the
-  picture, which lags); without GetStatus it keeps its previous value. Each measurement is
-  logged (`[tapo] calibration x +0.2: shift …`, `x -0.2 (back): …`).
+  before the camera moves), and when the camera reports that it moved (GetStatus position) — or
+  cannot report — the worker waits for the picture to move too (6 s, plus the picture's learnt
+  lag), so a video that lags the motor by a few seconds is still measured. msPerUnit comes from
+  the camera's reported travel time (not from the picture, which lags); without GetStatus it keeps
+  its previous value. Each measurement is logged (`[tapo] calibration x +0.2: shift …`,
+  `x -0.2 (back): …`). The view units use the travel the camera reported (GetStatus before and
+  after the move), so a move cut short at an end stop or one that overshoots is measured as it
+  went. An axis that starts within 0.45 of an end stop is measured away from it, one the camera
+  reports as blocked the other way; a move reported as not made is not undone, and at the end
+  (also on Stop or failure) the camera goes back to the position it reported at the start. While
+  it runs, every other camera move (the D-pad, the keys, click-to-center, Claude's `camera_look`)
+  answers `busy`; Stop drops a pending picture request and turns the camera back at once
+  ("Turning the camera back…").
   A wrong calibration turns the D-pad, the keys, click-to-center and Claude's `camera_look` the
-  wrong way, so the wizard concludes nothing from a picture that is not provably current. A
-  stalled worker (synchronous readback under software GL, a busy PC) keeps decoding frames that
-  left the camera *before* the last move, and a still picture is no proof of a current one, so:
-  main stamps every relayed sample with its own monotonic receive time (`rx`, kept per decoded
-  frame); `shift-ref` / `shift-measure` carry `after`, main's time when the last move ended (the
-  MoveStatus answer or the Stop), and the worker uses only frames that reached main later (the
-  stillness and settle checks run over those frames only) and names the frame it used (`at`,
-  `refAt`). An answer without that gate (an older camera window) is not used. No reference
-  picture → nothing is measured: it is asked for once more, then the user is asked. Every axis is
-  measured both ways (a new reference at the turned position, then the move back must shift the
-  picture the other way by 0.5×–2× as much); if not, the axis is measured once more, then the user
-  is asked, while the camera is turned, with the reason (too plain, lagging, disagreeing). The
-  min-step probe takes a step only when it went the way the pan did and its way back confirms it.
+  wrong way, so the wizard concludes nothing from a picture that is not provably current. Two
+  things make a picture old. A stalled worker (synchronous readback under software GL, a busy PC)
+  keeps decoding frames that left the camera *before* the last move, and a still picture is no
+  proof of a current one, so: main stamps every relayed sample with its own monotonic receive time
+  (`rx`, kept per decoded frame); `shift-ref` / `shift-measure` carry `after`, main's time when the
+  last move ended (the MoveStatus answer or the Stop), and the worker uses only frames that
+  reached main later (the stillness and settle checks run over those frames only) and names the
+  frame it used (`at`, `refAt`). An answer without that gate (an older camera window) is not used.
+  And the video can lag the motor *before* it reaches main (the camera's encoder, Wi-Fi, go2rtc on
+  a busy PC): those frames pass the gate and still show the camera before the move. So a
+  measurement counts only when the picture moved and then settled (`moved`, `settled`); the camera
+  reporting a move and the picture not following, a picture that hardly moved or never settled, or
+  a reference that never stood still after a move means the picture runs behind: that axis is
+  asked about and nothing more is measured in the run (a later reference could show the earlier
+  moves). There is no "barely moved, try 0.4" after a move that was made (0.4 follows only a move
+  the camera reported as not made). The picture's lag is learnt from when it first changed after a
+  move (`changedAt`: it cannot change before the motor starts), and later references wait it out.
+  No reference picture → nothing is measured: it is asked for once more, then the user is asked.
+  Every axis is measured both ways: a new reference at the turned position, which must show the
+  frame the measurement ended on (`vsLast`: a measurement that ended on a picture still catching
+  up does not), then the move back, which must shift the picture the other way by 0.75×–1.33× as
+  much per unit of travel; the units come from the larger of the two (a picture that had not
+  caught up shows less). If not, the axis is measured once more, then the user is asked, while
+  the camera is turned, with the reason (too plain, could not be matched, lagging, did not settle,
+  disagreeing). The min-step probe takes a step only when it went the way the pan did and its way
+  back confirms it, and calls a step "too small" only from a current, settled, still picture of a
+  step the camera did not report as made; anything else stops it, and minStep stays as it was.
+  `tapo-e2e --video-lag <ms>` runs it against the simulator's lagging picture (`videoLagMs`):
+  with 4 s it measures, with 7 s or 10 s it asks, and it never stores a wrong direction.
   (The worker reads decoded frames in a CPU format with `VideoFrame.copyTo()`, not a canvas
   readback, which under software GL once blocked it for a minute: `frame-pixels.js`.)
 * **Video:** the bundled **go2rtc 1.9.14** (`scripts/fetch-go2rtc.mjs`, SHA-256 pinned) pulls one
@@ -508,7 +532,10 @@ a Tapo C211 on loopback for tests and development:
 the real go2rtc and the fake Claude CLI, and checks: setup through the form → online, live video
 at ≥ 8 fps and not black; nothing leaves loopback, go2rtc listens on 127.0.0.1 only, the password
 is in no file and on no command line; calibration (mirrored pan and inverted tilt found, view
-units within ±40 % of the truth), D-pad, hold, click-to-center, a preset, home, never an end
+units within ±40 % of the truth, the camera back where it started; `--allow-ask` answers a
+question as the user watching the simulated lens would, `--video-lag <ms>` gives the simulator a
+picture that lags the motor, `--calibration-quirks '<json>'` and `--calibration-start x,y` other
+conditions, `--calibration-only` stops after calibration), D-pad, hold, click-to-center, a preset, home, never an end
 stop; arm → a person → event confirmed locally, notification, the avatar's line, a clip that
 parses with its `.jpg`/`.json`, the player over `app://…/__clips` with Range; the describe turn
 with one picture; the MCP approval card, *Always* and *Never*; privacy mode; the camera going

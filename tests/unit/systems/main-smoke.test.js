@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { defaultHotkeys } from '../../../electron/settings.js';
 import { windowLayout } from '../../../electron/window-manager.js';
+import { ADDON_FILES, LAYOUT, MODEL_FILES } from '../../../electron/wake/config.js';
+import { platformKey } from '../../../electron/wake/paths.js';
 
 const m = vi.hoisted(() => {
   const handlers = new Map();
@@ -17,11 +19,14 @@ const m = vi.hoisted(() => {
   const display = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 };
   const userData = { dir: '' };
   const cursor = { x: 0, y: 0 };
-  return { handlers, listeners, appEvents, windows, display, extraDisplays: [], userData, cursor, protocolHandler: null, sessionHandlers: {} };
+  // "Hey Jade": utilityProcess.fork calls (a fake child; electron/wake/host.js supervises it)
+  const forks = [];
+  return { handlers, listeners, appEvents, windows, display, extraDisplays: [], userData, cursor, protocolHandler: null, sessionHandlers: {}, forks };
 });
 
 vi.mock('electron', async () => {
   const { pickDisplay } = await import('../../../electron/window-manager.js');
+  const { EventEmitter: EE } = await import('node:events');
   const fn = () => vi.fn();
   class FakeWebContents {
     constructor() {
@@ -96,6 +101,9 @@ vi.mock('electron', async () => {
     ipcMain: {
       handle: vi.fn((ch, h) => m.handlers.set(ch, h)),
       on: vi.fn((ch, h) => m.listeners.set(ch, h)),
+      // the wake word's channels are unregistered when it stops (shutdown)
+      removeHandler: vi.fn((ch) => m.handlers.delete(ch)),
+      removeListener: vi.fn((ch, h) => { if (m.listeners.get(ch) === h) m.listeners.delete(ch); }),
     },
     nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })) },
     protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn((scheme, h) => { m.protocolHandler = h; }) },
@@ -125,6 +133,16 @@ vi.mock('electron', async () => {
     // an armed camera keeps the PC from sleeping and reconnects when it wakes
     powerSaveBlocker: { start: vi.fn(() => 1), stop: vi.fn() },
     powerMonitor: { on: vi.fn(), removeListener: vi.fn() },
+    // "Hey Jade" (electron/wake, off by default): the Windows microphone privacy state and the
+    // "Jade wake word" utility process (a fake child that never answers: the engine stays "starting")
+    systemPreferences: { getMediaAccessStatus: vi.fn(() => 'granted') },
+    utilityProcess: {
+      fork: vi.fn((entry, args, opts) => {
+        const child = Object.assign(new EE(), { pid: 90000 + m.forks.length, stdout: null, stderr: null, postMessage: vi.fn(), kill: vi.fn(() => { setTimeout(() => child.emit('exit', 0), 0); return true; }) });
+        m.forks.push({ entry, args, opts, child });
+        return child;
+      }),
+    },
   };
 });
 
@@ -151,6 +169,27 @@ const waitForSent = async (pred, timeout = 8000) => {
 const distDir = path.resolve('dist');
 const created = { dir: false, index: false };
 
+/**
+ * "Hey Jade": a stand-in wake-word engine folder (LAWNMOWER_WAKE_DIR) whose files have the sizes
+ * electron/wake/paths.js checks (sparse, empty): hermetic whether or not vendor/wake was fetched,
+ * and the utility process is the fake one of the electron mock.
+ */
+function fakeWakeDir(root) {
+  const key = platformKey();
+  const files = [
+    ...(ADDON_FILES[key] || []).map((f) => [`${LAYOUT.addonDir(key)}/${f.name}`, f.size]),
+    ...MODEL_FILES.giga.map((f) => [`${LAYOUT.gigaDir}/${f.name}`, f.size]),
+    [LAYOUT.vad, MODEL_FILES.vad.size],
+  ];
+  for (const [rel, size] of files) {
+    const file = path.join(root, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '');
+    fs.truncateSync(file, size);
+  }
+  return root;
+}
+
 beforeAll(async () => {
   if (!fs.existsSync(path.join(distDir, 'index.html'))) {
     created.dir = !fs.existsSync(distDir);
@@ -163,6 +202,7 @@ beforeAll(async () => {
   fs.writeFileSync(path.join(m.userData.dir, 'settings.json'), JSON.stringify({ voice: { enabled: false }, claude: { workdir: path.join(m.userData.dir, 'work') } }));
   process.env.LAWNMOWER_CLAUDE_CLI = path.resolve('tests/fixtures/fake-claude.mjs');
   process.env.LAWNMOWER_FORCE_CLICK_THROUGH = '1'; // forwarding is Windows/macOS-only; test the logic anywhere
+  process.env.LAWNMOWER_WAKE_DIR = fakeWakeDir(path.join(m.userData.dir, 'wake-engine'));
   electron = await import('electron');
   main = await import('../../../electron/main.js');
   await main.mainReady;
@@ -180,6 +220,7 @@ afterAll(async () => {
   await main?.__test.state.claude?.stop();
   delete process.env.LAWNMOWER_CLAUDE_CLI;
   delete process.env.LAWNMOWER_FORCE_CLICK_THROUGH;
+  delete process.env.LAWNMOWER_WAKE_DIR;
   fs.rmSync(m.userData.dir, { recursive: true, force: true });
   if (created.dir) fs.rmSync(distDir, { recursive: true, force: true });
   else if (created.index) fs.rmSync(path.join(distDir, 'index.html'), { force: true });
@@ -214,10 +255,17 @@ describe('electron/main.js wiring', () => {
     const preloads = ['electron/preload.cjs', 'electron/preload-camera.cjs'].map((f) => fs.readFileSync(path.resolve(f), 'utf8')).join('\n');
     const used = new Set([...preloads.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
     const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor', 'lm:window:visibility',
-      'lm:tapo:alert', 'lm:tapo:look', 'lm:tapo:event', 'lm:tapo:open-event', 'lm:tapo:calibration', 'lm:tapo:port'];
+      'lm:tapo:alert', 'lm:tapo:look', 'lm:tapo:event', 'lm:tapo:open-event', 'lm:tapo:calibration', 'lm:tapo:port',
+      // "Hey Jade" (electron/wake): engine status, the audio port to the utility, lock/sleep
+      'lm:wake:status', 'lm:wake:port', 'lm:wake:power'];
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
-    expect([...m.handlers.keys()].filter((ch) => !ch.startsWith('lm:tapo:')).sort()).toEqual([
+    // "Hey Jade": its invoke channels (electron/wake/ipc.js), the tray state, and main's window show
+    expect([...m.handlers.keys()].filter((ch) => ch.startsWith('lm:wake:')).sort()).toEqual([
+      'lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:save-clip', 'lm:wake:status',
+    ]);
+    expect([...m.listeners.keys()].filter((ch) => ch.startsWith('lm:wake:') || ch === 'lm:window:show').sort()).toEqual(['lm:wake:state', 'lm:window:show']);
+    expect([...m.handlers.keys()].filter((ch) => !ch.startsWith('lm:tapo:') && !ch.startsWith('lm:wake:')).sort()).toEqual([
       'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:retry', 'lm:claude:send', 'lm:claude:status',
       'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:open-setup-log', 'lm:voice:restart', 'lm:voice:setup',
     ]);
@@ -883,6 +931,91 @@ describe('electron/main.js wiring', () => {
       tapo.isArmed = was;
       electron.app.quit.mockClear();
     }
+  });
+
+  it('"Hey Jade": tray entry, lm:wake:* for the avatar only, the utility only while on, the persona section, lm:window:show', async () => {
+    const t = main.__test;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeout = 4000) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > timeout) throw new Error('timeout');
+        await sleep(10);
+      }
+    };
+    const wakeItem = () => t.state.tray.menu.template.find((i) => i.label === 'Listen for “Hey Jade”');
+    const tooltip = () => t.state.tray.setToolTip.mock.calls.at(-1)?.[0] || '';
+    // off by default: no utility process, status "off", the tray entry unchecked
+    expect(m.forks).toHaveLength(0);
+    expect(await invoke('lm:wake:status')).toMatchObject({ engine: 'off', version: '1.13.8', portGen: 0 });
+    expect(wakeItem()).toMatchObject({ type: 'checkbox', checked: false });
+    win.hide(); // (mock history is cleared between tests: show/hide rebuild the tray)
+    win.show();
+    expect(tooltip()).toMatch(/ · Jade: mic off$/);
+    expect(t.state.wake.personaContext()).toEqual({});
+    // only the avatar window may call them
+    await expect(m.handlers.get('lm:wake:status')({ sender: {}, senderFrame: { url: 'app://lawnmower/index.html' } })).rejects.toThrow(/untrusted/);
+    await expect(m.handlers.get('lm:wake:request-port')({ sender: win.webContents, senderFrame: { url: 'https://evil.example/' } })).rejects.toThrow(/untrusted/);
+    // the e2e hooks exist only with LAWNMOWER_E2E=1 (not set here)
+    expect(/** @type {any} */ (globalThis).__lawnmowerE2E).toBeUndefined();
+    const applied = vi.spyOn(t.state.claude, 'applySettings');
+    try {
+      wakeItem().click({ checked: true }); // the tray turns it on
+      expect((await invoke('lm:settings:get')).wake.enabled).toBe(true);
+      // the "Jade wake word" utility, forked from electron/wake/utility/main.js and initialised
+      await until(() => m.forks.length === 1 && m.forks[0].child.postMessage.mock.calls.length > 0);
+      const { entry, opts, child } = m.forks[0];
+      expect(entry).toBe(path.resolve('electron/wake/utility/main.js'));
+      expect(opts).toMatchObject({ serviceName: 'Jade wake word', stdio: 'pipe' });
+      expect(opts.env.LAWNMOWER_CLAUDE_CLI).toBe(process.env.LAWNMOWER_CLAUDE_CLI); // LAWNMOWER_* only
+      expect(Object.keys(opts.env).every((k) => /^(PATH|Path|SystemRoot|SYSTEMROOT|TEMP|TMP|TMPDIR|LAWNMOWER_\w+)$/.test(k))).toBe(true);
+      const init = child.postMessage.mock.calls[0][0];
+      expect(init).toMatchObject({ t: 'init', params: { sensitivity: 'normal', phrase: 'hey-jade' } });
+      expect(init.addon.startsWith(process.env.LAWNMOWER_WAKE_DIR)).toBe(true);
+      expect(await invoke('lm:wake:status')).toMatchObject({ engine: 'starting' });
+      // a port for the avatar: the channel's first end goes to the page, the second to the utility
+      // (MessageChannelMain is a stub here: the call itself must answer, not throw)
+      await invoke('lm:wake:request-port').catch(() => {});
+      // the persona's wake section: in the context, and the CLI is restarted (after its turn) once
+      expect(t.state.wake.personaContext()).toEqual({ wake: { enabled: true, followUp: true, bargeIn: true } });
+      expect(applied).toHaveBeenCalledTimes(1);
+      // a setting outside the persona (sounds) does not touch the CLI; the follow-up does
+      await invoke('lm:settings:set', { wake: { sounds: 'off' } });
+      expect(applied).toHaveBeenCalledTimes(1);
+      await invoke('lm:settings:set', { wake: { followUpSec: 0 } });
+      expect(applied).toHaveBeenCalledTimes(2);
+      expect(t.state.wake.personaContext()).toEqual({ wake: { enabled: true, followUp: false, bargeIn: true } });
+      // the renderer's listening state reaches the tray tooltip (coalesced), the entry is checked
+      m.listeners.get('lm:wake:state')(trusted(), { state: 'waiting' });
+      await until(() => tooltip().includes('Jade: listening for "Hey Jade"'));
+      expect(wakeItem().checked).toBe(true);
+      m.listeners.get('lm:wake:state')(trusted(), { state: 'nonsense' }); // refused (logged)
+      await sleep(600);
+      expect(tooltip()).toContain('Jade: listening for "Hey Jade"');
+      // a verified "Hey Jade" while hidden: the window comes back without the focus
+      win.hide();
+      const focus = vi.spyOn(win, 'focus');
+      const inactive = vi.spyOn(win, 'showInactive');
+      m.listeners.get('lm:window:show')(trusted(), 'x'); // takes no arguments
+      expect(inactive).not.toHaveBeenCalled();
+      m.listeners.get('lm:window:show')(trusted());
+      expect(win.visible).toBe(true);
+      expect(inactive).toHaveBeenCalledTimes(1);
+      expect(focus).not.toHaveBeenCalled();
+      focus.mockRestore();
+      inactive.mockRestore();
+    } finally {
+      await invoke('lm:settings:set', { wake: { enabled: false, sounds: 'start', followUpSec: 6 } });
+      applied.mockRestore();
+    }
+    // off again: the utility is told to stop (killed after 2 s at the latest), no restart
+    await until(() => m.forks[0].child.kill.mock.calls.length > 0, 4000);
+    expect(m.forks[0].child.postMessage).toHaveBeenCalledWith({ t: 'stop' });
+    await sleep(50);
+    expect(m.forks).toHaveLength(1);
+    expect(await invoke('lm:wake:status')).toMatchObject({ engine: 'off' });
+    expect(wakeItem().checked).toBe(false);
+    expect(t.state.wake.personaContext()).toEqual({});
   });
 
   it('shuts down child processes on will-quit, then quits', async () => {

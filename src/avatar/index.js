@@ -344,8 +344,11 @@ export async function createAvatar(canvas, options = {}) {
     /** What the head measured while loading (relief: the located irises, the refined mesh), for tools and tests. */
     headInfo() { return head?.info?.() ?? null; },
     get state() { return director.state; },
-    /** @param {import('./director.js').AvatarState} s */
-    setState(s) { director.setState(s); stage.requestRender(); },
+    /**
+     * @param {import('./director.js').AvatarState} s
+     * @param {{ fast?: boolean }} [o] fast: out of a doze within ≈ 400 ms ("Hey Jade", contract-wake §9.7)
+     */
+    setState(s, o) { director.setState(s, o); stage.requestRender(); }, // wake: o
     /**
      * Lip-sync target, 0..1 each; missing fields mean 0.
      * @param {{jaw?:number, wide?:number, round?:number, press?:number, tuck?:number, teeth?:number, tongue?:number}} m

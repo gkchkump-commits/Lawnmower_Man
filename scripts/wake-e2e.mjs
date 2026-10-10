@@ -31,7 +31,7 @@
 // clip plays from its start). Silence in the WAVs is seeded white noise at -60 dBFS.
 //
 //   npx vite build && xvfb-run -a node scripts/wake-e2e.mjs [--shots <dir>] [--report <file.json>]
-//        [--keep] [--verbose] [--only engine,positive,…] [--b-only]
+//        [--keep | --work <dir>] [--verbose] [--only engine,positive,…] [--b-only]
 //   ELECTRON_PATH=…  LAWNMOWER_WAKE_DIR=<wake dir> (default vendor/wake)
 //   LAWNMOWER_WAKE_ZHEN_DIR=<zh-en model dir> (default vendor/wake/dev-models/zh-en-3m)
 //   LAWNMOWER_E2E_PYTHON=<python with fastapi, uvicorn, numpy> (default: python3 / python on PATH)
@@ -252,7 +252,13 @@ function writeMicWav(file, parts) {
 // ---------------------------------------------------------------------------------------------
 // the app
 
-const work = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wake-e2e-'));
+// --work <dir>: put the run's folders there and keep them (CI uploads the app's logs from it)
+const workArg = argOf('--work') ? path.resolve(argOf('--work')) : '';
+if (workArg) {
+  fs.rmSync(workArg, { recursive: true, force: true });
+  fs.mkdirSync(workArg, { recursive: true });
+}
+const work = workArg || fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wake-e2e-'));
 const userData = path.join(work, 'user-data');
 fs.mkdirSync(userData);
 const noZhen = path.join(work, 'no-zh-en'); // --b-only: model A's folder, empty
@@ -772,7 +778,7 @@ try {
   }
   report.timings.total = Date.now() - t0;
   report.ok = !report.failed && !!app;
-  if (!keep) fs.rmSync(work, { recursive: true, force: true });
+  if (!keep && !workArg) fs.rmSync(work, { recursive: true, force: true });
   else report.workDir = work;
   const text = JSON.stringify(report, null, 2);
   if (reportFile) fs.writeFileSync(reportFile, text);

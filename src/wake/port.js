@@ -19,6 +19,7 @@ import { Emitter } from '../app/emitter.js';
 export const MAX_FRAME = 4096;
 export const PING_MS = 10000;
 export const MISSED_PINGS = 3;
+export const PCM_LIMIT = 1.5;
 const KEYWORDS = new Set(['HEY_JADE', 'HEY_JUDE', 'JADE']);
 const MODELS = new Set(['zhen', 'giga', 'name']);
 
@@ -165,6 +166,12 @@ export class WakePort extends Emitter {
     if (at < this._lastAt) return false; // indices only go forward
     for (let i = 0; i < x.length; i += MAX_FRAME) {
       const pcm = x.slice(i, Math.min(x.length, i + MAX_FRAME));
+      // the utility refuses a frame with a value outside [-1.5, 1.5] or not finite (§6.3): a
+      // broken driver's NaN or a resampler overshoot must not cost the whole frame
+      for (let j = 0; j < pcm.length; j++) {
+        const v = pcm[j];
+        if (!(v >= -PCM_LIMIT && v <= PCM_LIMIT)) pcm[j] = v > PCM_LIMIT ? PCM_LIMIT : v < -PCM_LIMIT ? -PCM_LIMIT : 0;
+      }
       try {
         this.port.postMessage({ t: 'pcm', at: at + i, pcm });
       } catch (err) {

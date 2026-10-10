@@ -146,7 +146,7 @@ describe('WakePort.post: 16 kHz copies in ≤ 4096-sample frames', () => {
   it('splits, numbers each frame by its first sample, never transfers', () => {
     const { port, p } = open();
     p.reply({ t: 'ready', models: ['giga'] });
-    const x = new Float32Array(MAX_FRAME * 2 + 100).map((_, i) => i);
+    const x = new Float32Array(MAX_FRAME * 2 + 100).map((_, i) => (i % 1000) / 1000);
     expect(port.post(x, 50_000)).toBe(true);
     expect(p.sent.map((s) => [s.m.t, s.m.at, s.m.pcm.length])).toEqual([
       ['pcm', 50_000, MAX_FRAME],
@@ -156,7 +156,8 @@ describe('WakePort.post: 16 kHz copies in ≤ 4096-sample frames', () => {
     for (const s of p.sent) expect(s.transfer).toBeUndefined();
     // copies: the caller's buffer is intact and not shared
     expect(x.length).toBe(MAX_FRAME * 2 + 100);
-    expect(p.sent[1].m.pcm[0]).toBe(MAX_FRAME);
+    expect(p.sent[1].m.pcm[0]).toBe(x[MAX_FRAME]);
+    expect(p.sent[2].m.pcm[99]).toBe(x[2 * MAX_FRAME + 99]);
     expect(p.sent[0].m.pcm.buffer).not.toBe(x.buffer);
     expect(port.sent).toBe(x.length);
   });
@@ -171,6 +172,15 @@ describe('WakePort.post: 16 kHz copies in ≤ 4096-sample frames', () => {
     expect(port.post(new Float32Array(683), 50_000)).toBe(true);
     expect(p.sent.map((s) => s.m.at)).toEqual([1000, 1683, 50_000]);
     expect(port.post(new Float32Array(683), Number.NaN)).toBe(false);
+  });
+
+  it('values the utility would refuse are mended, not sent (NaN → 0, clamped to ±1.5)', () => {
+    const { port, p } = open();
+    p.reply({ t: 'ready' });
+    const x = Float32Array.from([0.5, Number.NaN, 2, -3, Number.POSITIVE_INFINITY, -0.25]);
+    port.post(x, 0);
+    expect([...p.sent[0].m.pcm]).toEqual([0.5, 0, 1.5, -1.5, 1.5, -0.25]);
+    expect(Number.isNaN(x[1])).toBe(true); // the caller's samples are not touched
   });
 
   it('reset and strict go to the utility as they are', () => {

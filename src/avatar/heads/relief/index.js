@@ -194,7 +194,7 @@ export default class ReliefHead {
       uColEye: { value: palette.eye.clone() }, uColGrid: { value: palette.grid.clone() },
       // the light and the hologram's life: see FACE_FRAG ("light and life") and RELIEF_LIGHT
       uLight: { value: new THREE.Vector4(RELIEF_LIGHT.diffuse, RELIEF_LIGHT.glint, RELIEF_LIGHT.rim, RELIEF_LIGHT.sharpen) },
-      uPulseW: { value: new THREE.Vector2() }, uBreath: { value: 0.5 }, uPop: { value: 1 },
+      uPulseW: { value: new THREE.Vector2() }, uBreath: { value: 0.5 }, uPop: { value: 1 }, uPixelRatio: { value: 1 },
     };
     const mat = new THREE.ShaderMaterial({
       vertexShader: FACE_VERT, fragmentShader: FACE_FRAG, uniforms: this.faceUniforms,
@@ -286,6 +286,7 @@ export default class ReliefHead {
     f.uPop.value = fxk;
     f.uBreath.value = a.breath;
     f.uPulseW.value.set(...this._pulseWave(time, a.pulse ?? 0));
+    f.uPixelRatio.value = this.ctx.renderer?.getPixelRatio?.() || 1;
     f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
     f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
     f.uLens.value.set(u.lens[0], u.lens[1]);
@@ -403,7 +404,7 @@ export default class ReliefHead {
 
 /** The relief's light (FACE_FRAG "light and life"): the key light's change as the head turns,
  * the glint, the rim on the edges turning away, the plate's sharpening. */
-export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.5, glint: 0.6, rim: 0.8, sharpen: 0.5 });
+export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.7, glint: 0.6, rim: 0.5, sharpen: 0.5 });
 
 /**
  * Area-weighted vertex normals of a height-field mesh, every face turned toward +z (the viewer).

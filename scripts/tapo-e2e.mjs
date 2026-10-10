@@ -20,7 +20,10 @@
 //      offline mid-session (shown as offline, the tray does not say plain "Armed") and coming back
 //   8. quit: Unsubscribe, the RTSP session ends, go2rtc is gone
 //
-//   npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file.json>] [--keep] [--verbose]
+//   npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file.json>] [--keep] [--verbose] [--allow-ask]
+//   --allow-ask (or LAWNMOWER_E2E_ALLOW_ASK=1): on a heavily loaded PC calibration may ask the user
+//   rather than trust a lagging picture; answer as the user would. The stored result is checked
+//   all the same. The report lists the questions and the wizard's log lines (calibrationLog).
 //   ELECTRON_PATH=…  LAWNMOWER_GO2RTC=<go2rtc binary>  (default: vendor/go2rtc/<platform>-<arch>/)
 //
 // Needs the Electron binary, the go2rtc binary (`npm run fetch:go2rtc`), a renderer build (dist/)
@@ -44,6 +47,9 @@ const shotsIdx = argv.indexOf('--shots');
 const shotsDir = shotsIdx >= 0 ? path.resolve(argv[shotsIdx + 1]) : '';
 const reportIdx = argv.indexOf('--report');
 const reportFile = reportIdx >= 0 ? path.resolve(argv[reportIdx + 1]) : '';
+// a heavily loaded PC: calibration may ask instead of trusting a lagging picture; answer like the
+// user would (the result must still be right). Without it, a question fails the run, as before.
+const allowAsk = argv.includes('--allow-ask') || process.env.LAWNMOWER_E2E_ALLOW_ASK === '1';
 const PASSWORD = 'se&cret';
 
 /** @param {string} msg */
@@ -340,16 +346,34 @@ try {
     const dlg = cam.locator('dialog#calibrate');
     await dlg.waitFor({ state: 'visible', timeout: 10000 });
     await dlg.getByRole('button', { name: 'Start', exact: true }).click();
-    const done = await until(async () => {
-      const s = await dlg.getAttribute('data-step');
-      return s === 'done' || s === 'failed' || s === 'ask' ? s : null;
-    }, 120000, 500);
+    let done = null;
+    /** @type {string[]} */
+    const asked = [];
+    for (;;) {
+      done = await until(async () => {
+        const s = await dlg.getAttribute('data-step');
+        return s === 'done' || s === 'failed' || s === 'ask' ? s : null;
+      }, 120000, 500);
+      if (done !== 'ask' || !allowAsk || asked.length >= 4) break;
+      // --allow-ask (a heavily loaded PC: the wizard may ask rather than trust a lagging picture):
+      // answer as the user watching this camera would: raw +x turns the mirrored lens left, raw +y
+      // tilts the inverted one down
+      const left = dlg.locator('[data-answer="left"]');
+      const answer = (await left.count()) ? 'left' : 'down';
+      asked.push(`${answer}: ${(await dlg.locator('.calib-small').innerText().catch(() => '')).slice(0, 120)}`);
+      await dlg.locator(`[data-answer="${answer}"]`).click();
+      await sleep(1500);
+    }
     await shot(cam, '3-calibrated');
-    check('calibration finishes on its own (no question)', done === 'done', { step: done, text: await dlg.innerText().catch(() => '') });
+    if (allowAsk) check(`calibration finishes (${asked.length} question(s) answered as the user would; allowed with --allow-ask)`, done === 'done', { step: done, asked, text: await dlg.innerText().catch(() => '') });
+    else check('calibration finishes on its own (no question)', done === 'done', { step: done, text: await dlg.innerText().catch(() => '') });
     const t = (await settingsOf()).tapo;
     check('calibration found the mirrored pan and the inverted tilt', t.invertPan === true && t.invertTilt === true, { invertPan: t.invertPan, invertTilt: t.invertTilt });
     const within = (/** @type {number} */ v, /** @type {number} */ truth) => v > truth * 0.6 && v < truth * 1.4;
-    report.calibration = { invertPan: t.invertPan, invertTilt: t.invertTilt, viewUnitsX: t.viewUnitsX, viewUnitsY: t.viewUnitsY, minStep: t.minStep, msPerUnit: t.msPerUnit, truth: SIM_TRUTH };
+    report.calibration = { invertPan: t.invertPan, invertTilt: t.invertTilt, viewUnitsX: t.viewUnitsX, viewUnitsY: t.viewUnitsY, minStep: t.minStep, msPerUnit: t.msPerUnit, truth: SIM_TRUTH, asked };
+    // what the wizard measured (and why it asked), from main's log
+    const mainLog = path.join(userData, 'logs', 'main.log');
+    report.calibrationLog = fs.existsSync(mainLog) ? fs.readFileSync(mainLog, 'utf8').split('\n').filter((l) => /\[tapo\] calibration/.test(l)).map((l) => l.slice(0, 400)) : [];
     check(`view units within ±40 % of the truth (${SIM_TRUTH.viewUnitsX} / ${SIM_TRUTH.viewUnitsY.toFixed(1)})`, within(t.viewUnitsX, SIM_TRUTH.viewUnitsX) && within(t.viewUnitsY, SIM_TRUTH.viewUnitsY), report.calibration);
     check('calibratedAt is set', !!t.calibratedAt, t.calibratedAt);
     await dlg.getByRole('button', { name: 'Close', exact: true }).last().click().catch(() => {});

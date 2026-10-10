@@ -3,7 +3,10 @@
 A holographic desktop avatar for Claude. The "brain" is the user's locally installed
 **Claude CLI** (`claude -p` in persistent stream-json mode, using their existing login);
 the face is a real-time WebGL hologram rendered on the GPU; voice is local on the GPU
-(faster-whisper speech-to-text, Kokoro text-to-speech) via a Python sidecar.
+(faster-whisper speech-to-text, Kokoro text-to-speech) via a Python sidecar. The avatar is
+**Jade** (she runs on Claude; "Lawnmower Man" is the app), and **"Hey Jade"** wakes her
+hands-free: a keyword spotter in its own utility process plus a Whisper check (§10,
+[WAKE.md](WAKE.md)).
 
 Target machine: Windows 11 (primary) or Linux, NVIDIA RTX 5070 **Laptop** GPU with 8 GB
 VRAM (Blackwell, compute capability sm_120 → needs CUDA 12.8+ builds). Everything must
@@ -48,6 +51,8 @@ window (§9): all camera traffic is in main and its loopback-only video sidecar.
 │ electron/preload.cjs       contextBridge → window.lawnmower (see §3)                │
 │ electron/tapo/*            the Home camera (§9): ONVIF, PTZ, events, go2rtc, clips, │
 │                           security engine, notifications, camera MCP server         │
+│ electron/wake/*            "Hey Jade" (§10): supervises the "Jade wake word" utility│
+│                           process, lm:wake:* IPC, lock/sleep, the zh-en download    │
 └─────┬─────────────────────────────────────┬───────────────────────────────┬────────┬┘
       │ IPC (contextIsolation,              │ IPC + MessagePort             │ spawn, │ spawn;
       │ sandbox)                            │ (video frames)                │ stdio  │ HTTP 127.0.0.1
@@ -68,6 +73,17 @@ window (§9): all camera traffic is in main and its loopback-only video sidecar.
 └───────────────────────┘
 ```
 
+"Hey Jade" adds one process, only while `wake.enabled` is on (§10):
+
+```
+ avatar window (src/audio/mic.js tap, 16 kHz) ──MessagePort (direct; main is not in the path)──┐
+        ▲  hits                                                                                 ▼
+        └──────────────────────────── utilityProcess "Jade wake word" (electron/wake/utility/main.js):
+                                       Silero VAD → onset recipe → sherpa-onnx keyword spotters
+                                       (resources/wake/sherpa-onnx/<platform>/sherpa-onnx.node)
+ main (electron/wake/host.js): fork, init (model paths), settings, restarts; parentPort only
+```
+
 ## 2. Repository layout (and which build lane owns it)
 
 | Path | Owner lane | Contents |
@@ -84,6 +100,9 @@ window (§9): all camera traffic is in main and its loopback-only video sidecar.
 | `electron/tapo/`, `electron/preload-camera.cjs`, `scripts/fetch-go2rtc.mjs`, `tools/tapo-probe.mjs`, `tests/unit/tapo/` | **tapo-main** | the Home camera's main-process side (§9) |
 | `src/tapo/`, `src/bridge/mock-tapo.js`, `public/assets/security/`, `tests/unit/security/`, `tests/e2e/tapo-window.spec.js` | **tapo-renderer** | the Home camera window, its security worker, the avatar's side (§9) |
 | `tools/tapo-sim/`, `tests/fixtures/tapo/`, `tests/unit/tapo-sim/`, `scripts/tapo-e2e.mjs`, `docs/TAPO.md` | **tapo-sim** | camera simulator, integration and Electron end-to-end tests, the user guide; also the camera tools in `electron/claude-session.js` / `persona.js` |
+| `electron/wake/`, `scripts/fetch-wake.mjs`, `scripts/wake-smoke.mjs`, `tools/wake/`, `tests/fixtures/wake/`, `tests/unit/wake-engine/`, the `wake` blocks of `electron/settings.js` and `electron/tray-menu.js`, `voice/lawnmower_voice/download.py` (`--kws`) | **wake-engine** | "Hey Jade" in main: the utility process, the engine, shipping (§10) |
+| `src/wake/`, `src/bridge/mock-wake.js`, `tests/unit/wake/`, `tests/e2e/wake.spec.js`, and delimited blocks / `// wake:` lines in `src/audio/mic.js`, `player.js`, `src/app/controller.js`, the drawer, the status line, `src/main.js` | **wake-renderer** | "Hey Jade" in the renderer: the state machine, the check, the chip and the drawer (§10) |
+| `electron/persona.js`, `scripts/wake-e2e.mjs`, `docs/WAKE.md`, the Jade UI strings | **wake-jade** | Jade's persona, the real-app e2e, the user guide |
 | `voice/` | **voice** | Python package `lawnmower_voice`, pyproject, tests |
 | `scripts/` | **voice** (setup-voice.*) / **systems** (others) | setup scripts |
 | `src/dev/` | each lane its own file(s): `src/dev/avatar.html` (avatar-core), `src/dev/procedural.html` (procedural) | dev/visual harness pages served by Vite at `/dev/*.html` (add them to `build.rollupOptions.input` in vite.config.js if tests need them in `vite preview`) |
@@ -155,6 +174,7 @@ lawnmower = {
     onVisibility(cb: (v: { visible: boolean }) => void): () => void,
                                             // shown / hidden / minimized / restored (the camera pauses while hidden;
                                             // with backgroundThrottling off, document.visibilityState always says visible)
+    show(): void,                           // "Hey Jade" while hidden in the tray: show the window without the focus
   },
   onHotkey(cb: (name: 'toggleListen'|'stopSpeaking'|'toggleChat') => void): () => void,
   onCursor(cb: (p: { x: number, y: number }) => void): () => void,
@@ -174,8 +194,29 @@ lawnmower = {
     onAlert(cb: (a: AvatarAlert) => void): () => void,              // { id, kind, at, cameraName, line, quiet, describe, snapshot? }
     onLook(cb: (p: { x: number, y: number, holdMs: number }) => void): () => void,   // the camera window's centre (CSS px)
   },
+  wake: {                                  // "Hey Jade" (§10); the avatar window only, never the camera window
+    status(): Promise<WakeEngineStatus>,   // { engine: 'off'|'starting'|'ready'|'missing'|'error', detail,
+                                           //   models: { giga, zhen, vad }, version, platform, loadMs?, restarts, portGen }
+    onStatus(cb: (st: WakeEngineStatus) => void): () => void,       // on change, ≤ 4/s
+    requestPort(): Promise<{ ok: boolean, gen: number }>,            // the port itself arrives as a window message:
+                                           // { type: 'lm:wake:port', gen } + ports[0] (the preload forwards it)
+    report(st: { state: WakeUiState, reason?: string }): void,      // the listening state → the tray (≤ 2/s)
+    onPower(cb: (p: { state: 'locked'|'unlocked'|'suspended'|'resumed' }) => void): () => void,
+    micAccess(): Promise<'granted'|'denied'|'restricted'|'not-determined'|'unknown'>,   // Windows privacy switch
+    openMicSettings(): Promise<{ ok: boolean }>,                     // ms-settings:privacy-microphone (Windows)
+    saveClip(o: { wav: ArrayBuffer, hits: Array<{ atSec, keyword, outcome }> }): Promise<{ ok, path?, error? }>,
+                                           // "Record a test clip": PCM16 mono 16 kHz ≤ 60 s → Documents/Lawnmower Man/Hey Jade tests/
+    download(): Promise<{ ok: boolean, started: boolean }>,          // the zh-en model (through the voice package)
+  },
 }
 ```
+
+The wake word's audio port works like the camera's: main creates a `MessageChannelMain` per
+`requestPort()`, sends `port1` to the avatar window (`lm:wake:port` with `{ gen }`; the preload
+re-posts it with `window.postMessage({ type: 'lm:wake:port', gen }, '*', ports)`) and `port2` to the
+utility process. `src/wake/port.js` accepts it only from its own window and with a newer `gen`.
+Frames are posted as copies, never with a transfer list (a transferred ArrayBuffer arrives as
+`null` on a `MessagePortMain`). Channels and validators: `electron/wake/ipc.js`, `validate.js`.
 
 The Home camera window has its own preload, `electron/preload-camera.cjs`, which exposes exactly
 `window.lawnmowerCamera = { settings: { get, set, onChange }, tapo: { status, onStatus, onEvent,
@@ -397,7 +438,24 @@ command line — user text only ever travels over stdin; long prompts go in file
 ```
 The `tapo` and `security` groups need no migration (new groups get their defaults); the renderer
 mirrors them in `src/app/settings-defaults.js` and the mock camera bridge validates like main
-(`tests/unit/tapo/settings-tapo.test.js` checks both).
+(`tests/unit/tapo/settings-tapo.test.js` checks both). The `wake` group ("Hey Jade", §10; also
+mirrored, `tests/unit/wake-engine/settings-wake.test.js`) needs no migration either:
+
+```js
+  wake: {
+    enabled: false,              // listen for "Hey Jade" (the microphone stays open while the app runs)
+    phrase: 'hey-jade',          // 'hey-jade' | 'jade' ("Jade, …" at the very start of an utterance too)
+    sensitivity: 'normal',       // 'low' | 'normal' | 'high' (thresholds and the check's rule)
+    followUpSec: 6,              // 0 (off) or 4..15: talk again without her name after she answers
+    bargeIn: true,               // "Hey Jade" while she talks stops her
+    sounds: 'start',             // 'off' | 'start' | 'start-end'
+    whileHidden: true,           // keep listening while the window is hidden in the tray
+    transcriptFallback: false,   // only without the engine: Whisper checks speech for her name (GPU)
+    explained: false,            // the one-time card was shown (set by the renderer)
+  },
+```
+While `wake.enabled` is on and able to run, it takes precedence over `voice.handsFree`, and
+`camera.lookToTalk` means "look and talk" (looking at her replaces the name).
 Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key> global shortcut would swallow AltGr characters
 (Polish ć/ź, Hungarian/Czech & and #, …). settings.json carries a top-level `"version"`; loading a v1
 file on Windows moves hotkeys that still hold the old Ctrl+Alt defaults to the new ones (once).
@@ -509,6 +567,18 @@ Markdown and code are stripped for speech (`src/app/speech-text.js`); code block
 in the chat panel and replaced in speech by a short phrase. Permission requests (agent
 mode) show an approval card and the avatar says a short prompt; nothing is auto-approved.
 
+**Wake mode** ("Hey Jade", §10): the microphone stays open and its 16 kHz blocks go to the wake-word
+utility through a tap (nothing is transcribed while she waits). A stage-1 hit puts her in
+`attention` (listening pose, no sound) and starts the capture from the keyword's end; the wake
+segment from a 3 s ring goes to `/stt` and `src/wake/phrase.js` vetoes rivals ("Hey Jude"), her
+own voice and non-calls. Accepted: the chime, `listening`, and the command (the audio after the
+cut) goes through `_transcribe` → `sendText` like any voice turn (so the Home camera's local
+commands still work). After a voice reply a follow-up window (`wake.followUpSec`, 6 s) takes one
+more utterance without her name. While she speaks, "Hey Jade" ducks her voice by 15 dB, and after
+the check she stops speaking (barge-in); "Hey Jade, stop" interrupts the turn locally. The state
+machine (`src/wake/machine.js`) is pure; the controller has one delimited block plus `// wake:`
+hooks. With the wake word off, everything above behaves as before.
+
 ## 8. Testing
 
 * `npm test` — vitest unit tests (electron modules with fake `claude` CLI script; app logic;
@@ -542,6 +612,19 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   calibration, PTZ, an armed person event with notification, avatar line and clip, Claude's camera
   tools through the fake CLI, privacy mode, offline recovery and a clean quit
   ([TAPO.md §10](TAPO.md#10-how-it-works-technical)). CI job `tapo-e2e-linux` runs it.
+* "Hey Jade": `tests/unit/wake-engine/` (main-process modules with a fake `utilityProcess`, and the
+  real engine over the committed Kokoro fixtures in `tests/fixtures/wake/`: it skips without
+  `npm run fetch:wake -- --with-zhen` unless `WAKE_ENGINE_REQUIRED=1`, as in CI), `tests/unit/wake/`
+  (the renderer's pure state machine, transcript rules, self mask, earcons, port, feature),
+  `tests/e2e/wake.spec.js` (the browser with the mock engine, a scripted microphone and Chromium's
+  fake capture device), `node scripts/wake-smoke.mjs` (the addon under plain Node over the fixtures;
+  the Windows CI job's real DLL load) and `xvfb-run -a node scripts/wake-e2e.mjs`: the real app with
+  the real utility, addon and both models, Chromium's fake microphone playing the fixtures, the fake
+  voice server's scripted `/stt` (`LAWNMOWER_VOICE_FAKE_TEXTS`) and the fake CLI — the cascade, the
+  follow-up, "Hey Jude", her own voice, barge-in, a hidden window, the lock screen, a utility crash,
+  CPU in silence and in speech, no socket in the utility (CI job `wake-e2e-linux`, also `--b-only`).
+  `scripts/electron-e2e.mjs` checks the bridge's `wake` namespace and that the utility starts (ready
+  with model B and the VAD) and stops with the setting.
 * Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>
   node scripts/electron-e2e.mjs --packaged` (no app path) also checks `app.isPackaged`, the
   resources an installer must deliver, the per-user voice folder and — through the real launcher in
@@ -549,7 +632,12 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   the packaged app through `LAWNMOWER_CLAUDE_CLI` (honoured when packaged on purpose; threat model in
   `electron/main.js`), `LAWNMOWER_E2E=1` exposes a few main-process helpers to `app.evaluate()`.
   With the Home camera it also checks `resources/tapo/go2rtc(.exe)` (it runs and reports 1.9.14), its
-  license, the camera page, preload and the person detector model inside `app.asar`.
+  license, the camera page, preload and the person detector model inside `app.asar`. With "Hey
+  Jade" it checks `resources/wake/` against the pinned SHA-256 with an allowlist (this platform's
+  addon, model B, the VAD, the licences; no zh-en model, no other platform's addon), the utility's
+  entry in `app.asar`, and that the engine starts from the installed app (model B alone).
+  `release.yml` fetches the engine (`npm run fetch:wake -- --platform win32-x64`, never
+  `--with-zhen`) and runs `node scripts/wake-smoke.mjs --no-zhen` before `dist:win`.
   `.github/workflows/release.yml` fetches go2rtc (`npm run fetch:go2rtc -- --platform win32-x64`)
   before `dist:win`, checks the installed `go2rtc.exe` against the pinned SHA-256, and runs it against the silently installed NSIS build on windows-latest
   (`--software-webgl`: the runner has no GPU), then installs the same build over itself (the update
@@ -639,3 +727,58 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the
   app does not ship. Windows, the supported platform, passes only handles marked inheritable;
   not verified there.
+
+## 10. "Hey Jade" (wake word)
+
+Jade listens for her name hands-free; user guide and measured numbers in [WAKE.md](WAKE.md). Off by
+default (`wake.enabled`); the microphone and the utility process run only while it is on.
+
+* **Two stages.** Stage 1 is open-vocabulary keyword spotting with **sherpa-onnx 1.13.8**: two
+  tiny models on the same audio, OR-ed — model A `kws-zipformer-zh-en-3M` (when it is on the user's
+  PC) and model B `kws-zipformer-gigaspeech-3.3M` (always), both with a `HEY_JUDE` label that soaks
+  up the song — behind Silero VAD v4 and an onset recipe (a fresh stream at each speech onset after
+  ≥ 0.6 s of quiet, 0.4 s pre-roll, a 0.7 s hangover) and a level normaliser. Stage 2 is the app's
+  own `/stt` (faster-whisper on the GPU) on the wake segment only, with a veto rule
+  (`src/wake/phrase.js`); the command is cut from the audio at the keyword's end and transcribed on
+  its own.
+* **Main** (`electron/wake/`, composed by `createWake()` in `index.js`): `host.js` forks
+  `electron/wake/utility/main.js` as `utilityProcess` "Jade wake word" (inside `app.asar` when
+  packaged; a minimal environment), sends it the model paths and keywords (`config.js`,
+  `paths.js`), restarts it after 1 / 5 / 30 s (at most 5 in 10 min) and hands the renderer a new
+  port after each restart; `zhen.js` checks and downloads model A through the voice package
+  (`python -m lawnmower_voice.download --kws-only`, once per run, never while the local voice is
+  off) and restarts the utility with it; `power.js` forwards lock / unlock / suspend / resume
+  (`lm:wake:power`: the renderer releases the microphone while the PC is locked); `mic-access.js`
+  reads the Windows privacy switch; `clips.js` writes an explicit test clip (the only file the
+  feature ever writes). `ipc.js` registers the `lm:wake:*` channels for the avatar window only.
+* **Utility** (`electron/wake/utility/`): loads the raw N-API addon with `createRequire` (no
+  `node_modules`, no JS wrapper; `sherpa.js`), runs the recipe (`engine.js`, `../recipe.js`,
+  `../agc.js`) on the frames from the port, and posts hits (`{ t:'hit', keyword, model, startAt,
+  endAt, … }`), VAD edges and stats back. It opens no sockets and writes no files.
+* **Renderer** (`src/wake/`): `feature.js` (WakeFeature) connects the port (`port.js`), the mic tap
+  and 3 s ring (`src/audio/mic.js`), the pure `WakeMachine` (`machine.js`: off · unavailable ·
+  starting · paused · locked · blocked · muted · waiting · attention · listening · followup · look ·
+  busy · barge, mirrored in `body[data-wake]`), the self mask (`self-mask.js`: a hit during her own
+  sentence containing her name is ignored), earcons through the player's AudioContext
+  (`earcons.js`, `src/audio/player.js` `playCue`, master-gain duck), and the chip, drawer rows and
+  one-time card (`ui.js`). Without the local voice it is `unavailable` and the microphone stays
+  closed.
+* **main.js wiring:** `createWake()` runs after the voice sidecar (it needs `voiceDir` and the venv
+  dirs) and before `registerIpc()`; the tray gets *Listen for "Hey Jade"* and ` · Jade: …` in the
+  tooltip (`wake.trayState()`, `wake.trayActions`, rebuilt when that entry changes); the persona's
+  wake section (`wake.personaContext()`) is merged with the camera's into the CLI's context and its
+  spawn key, so turning the wake word on or off rewrites the persona after the running turn;
+  `onSettingsChanged` calls `wake.applySettings(next, prev)`; `lm:window:show` shows the window
+  without the focus after a verified wake; `shutdown()` waits for `wake.stop()` (≈ 2 s, then the
+  utility is killed); with `LAWNMOWER_E2E=1`, `globalThis.__lawnmowerE2E.wake` exposes `status`,
+  `utilityPid`, `metrics`, `emitPower`, `lastHits`, `stats`, `restartUtility`, `wakeDir`,
+  `addonPath`, `zhenDir`.
+* **Persona:** `electron/persona.js` (`PERSONA_VERSION` 2): she is Jade and runs on Claude
+  (Anthropic), never claims to be human, and never says a greeting or "say" right before her own
+  name (those words would wake her); the identity rules survive a custom persona.
+* **Packaging:** `npm run fetch:wake` downloads the pinned engine (SHA-256 checked) into
+  `vendor/wake/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy this
+  platform's addon, `models/gigaspeech-3.3m`, `models/silero_vad.onnx` and `LICENSES/` to
+  `resources/wake/` (≈ 30 MB on Windows). Model A has no stated licence: it is never packaged
+  (`--with-zhen` writes only to `vendor/wake/dev-models/`, which no rule copies); the voice setup
+  downloads it on the user's PC into `<voice models>/kws/zh-en-3m/`. Without it Jade runs on B alone.

@@ -2,6 +2,8 @@
 
 A holographic desktop avatar for Claude. A glowing wireframe head floats on your desktop, listens, thinks and talks back, with lip-sync, blinks and eyes that follow your cursor.
 
+**Meet Jade.** The face on your desktop is Jade, named after Jade from *Lawnmower Man 2*. She runs on Claude, the AI model made by Anthropic, and says so when you ask; *Lawnmower Man* is the app she appears in. Say **"Hey Jade"** and she listens, hands-free ([below](#hey-jade-talk-hands-free)).
+
 <p align="center"><img src="docs/screenshots/hero.jpg" width="390" alt="The avatar and its chat panel on a dark desktop, speaking a reply that is still streaming in"></p>
 
 <p align="center"><em>The real app (relief renderer) mid-reply, captured from Electron with its transparent window composited over a dark desktop.</em></p>
@@ -10,6 +12,7 @@ A holographic desktop avatar for Claude. A glowing wireframe head floats on your
 * **Face:** a real-time WebGL hologram on your GPU, built from the frames of the reference video (`docs/reference/`).
 * **Voice:** runs locally on an NVIDIA GPU. Speech to text is [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`large-v3-turbo`); text to speech is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Both are tuned for an **RTX 5070 Laptop GPU (8 GB, Blackwell)** and fall back to the CPU automatically.
 * **Eyes (optional):** your webcam. Turned on, the avatar makes eye contact, notices when you come and go and smiles back, with face tracking that runs on your PC; Claude sees a picture only when you let it. Off by default ([docs/CAMERA.md](docs/CAMERA.md)).
+* **"Hey Jade" (optional):** say her name and she listens, like a phone assistant: no key, no click. After she answers you can go on for a few seconds without her name, and saying "Hey Jade" while she talks stops her. The part that listens for her name runs on your PC, and nothing is recorded or sent anywhere before she hears it. Needs the local voice. Off by default ([docs/WAKE.md](docs/WAKE.md)).
 * **Home camera (optional):** a TP-Link **Tapo C211** pan/tilt camera on your home network becomes a simple home security camera. Watch and turn it in its own window (or say "camera left"), arm it when you leave, and when someone walks in you get a Windows notification, the avatar turns toward the camera window and tells you, and a short clip is saved on your PC. Claude can check the camera for you; it sees a picture only when you allow it. The video stays on your PC and your network. Off by default ([docs/TAPO.md](docs/TAPO.md)).
 
 ![Reference video frame vs. the relief renderer vs. the procedural renderer](docs/screenshots/compare_rest.jpg)
@@ -56,7 +59,7 @@ npm install          # also downloads the Electron runtime
 npm start            # builds the renderer and launches the avatar
 ```
 
-The avatar appears in a transparent, always-on-top window. Type in the chat panel to talk to Claude. Replies are spoken with your system's built-in voices until you install local voice:
+The avatar appears in a transparent, always-on-top window. Type in the chat panel to talk to Jade (Claude answers). Replies are spoken with your system's built-in voices until you install local voice:
 
 ```powershell
 # Windows: GPU voice (about 1.8 GB of CUDA wheels + 2 GB of models; no admin, no CUDA Toolkit)
@@ -89,11 +92,37 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | drag the head (or the chat's status bar) | move the window; near a screen edge or corner it snaps flush against it like a normal window, settles fully on the screen you drop it on (sized to fit that screen) and remembers the place |
 | drag a **corner** of the window (a bracket shows on hover) | resize it like a normal window; the opposite corner stays put and the face keeps its shape |
 | **Ctrl + mouse wheel** over the head | bigger / smaller in small steps |
-| tray icon | show/hide, always on top, click-through, lock / reset position, camera, home camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
+| **"Hey Jade"** (once turned on) | talk hands-free: "Hey Jade, what time is it?"; while she talks, "Hey Jade, stop" ([below](#hey-jade-talk-hands-free)) |
+| tray icon | show/hide, always on top, click-through, lock / reset position, camera, home camera, listen for "Hey Jade", Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
 Hotkeys, window size (small/medium/large presets or any *Width*), click-through, renderer, voice, speed, hands-free mode, the camera, the home camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves and resizes; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
 Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
+
+### "Hey Jade": talk hands-free
+
+Off by default. It needs the local voice (step 5 of *Install*), because Jade checks her name with the same speech recognition on your graphics card.
+
+1. **Turn it on** with the card *New: talk hands-free* (it appears once, when the local voice is ready: **Turn on**), the tray's **Listen for "Hey Jade"**, or *Settings › Voice › Hey Jade*. The microphone then stays on while the app runs, and Windows shows its microphone icon in the taskbar. The first time, the app also fetches its extra wake-word model through the voice setup (a one-time 33 MB download; she works without it, a little less reliably).
+2. **Windows, once:** *Settings › Privacy & security › Microphone* › **Let desktop apps access your microphone** must be **On**.
+3. **Talk to her:**
+
+   | You say | What happens |
+   |---|---|
+   | "Hey Jade, what's the weather?" | one breath: she takes the question and answers |
+   | "Hey Jade." *(a chime)* "Read me the last three commits." | a pause after her name is fine: after the chime she waits up to 8 seconds |
+   | *(after her answer)* "And tomorrow?" | the **follow-up**: for about 6 seconds after she has finished, no name needed |
+   | "Thanks." / "That's all." / "Never mind." | closes the follow-up without asking Claude anything |
+   | "Hey Jade." *(while she talks)* | she stops talking and listens; her answer stays in the chat panel |
+   | "Hey Jade, stop." *(while she talks or works)* | she stops and the answer is cancelled, without asking Claude |
+   | "Hey Jade, camera left." | the home camera's quick commands work after her name too |
+   | "Hey Jade, stop listening." | turns "Hey Jade" off (turning it on again always needs a click) |
+
+4. **What you see:** an ear in the status bar shows what she is doing (*Hey Jade* dim: waiting for her name; bright: listening; *Follow-up*: go on without her name). The ear is slashed whenever the microphone is not listening for her name (no local voice, the PC locked, the microphone blocked or muted), and its tooltip says why. Her own voice saying "Jade" and the song "Hey Jude" do not wake her.
+5. **Check the echo** with your speakers at their usual volume: **Test my echo** in *Settings › Voice*. If she hears herself, use headphones or turn off *Settings › Voice › Interrupt with her name*.
+6. **Tune it:** she misses you → *Settings › Voice › Sensitivity* › **More**; she wakes by mistake → **Less**. *Settings › Voice › Follow-up* sets the window (Off, 6 s, 10 s), *Settings › Voice › Wake phrase* also accepts "Jade, …" at the start of a sentence, and *Settings › Voice › Listen while hidden* keeps her listening while the window is in the tray ("Hey Jade" brings her back without taking the focus).
+
+**Privacy:** the wake-word engine runs on your PC in its own process ("Jade wake word" in Task Manager, about 2 % of one CPU core while it is quiet) and opens no network connection. Until she hears her name nothing is recorded, transcribed or sent; the app only keeps the last 3 seconds of sound in memory, so the question right after her name is not cut off. She stops listening while the PC is locked or asleep, and turning "Hey Jade" off releases the microphone within a second. **Record a test clip (30 s)…** in *Settings › Voice* is the only thing that ever saves audio, and only when you press it (to `Documents\Lawnmower Man\Hey Jade tests`, for tuning her on your voice). The whole guide, the settings, the Windows notes and a troubleshooting table: [docs/WAKE.md](docs/WAKE.md).
 
 ### The camera
 
@@ -191,6 +220,11 @@ npm run fetch:go2rtc   # the home camera's video component (pinned go2rtc 1.9.14
 npm run sim:tapo       # a simulated Tapo camera on 127.0.0.1 (ONVIF 12020, RTSP 10554, control 12021)
 npm run test:tapo-e2e  # the home camera end to end in the real app against the simulator (xvfb-run -a on Linux)
 npm run probe:tapo -- --host <ip> --user <camera account> [--move]   # a diagnostic report for a real camera (users: the camera window's "Copy diagnostic report")
+npm run fetch:wake     # the "Hey Jade" engine (sherpa-onnx 1.13.8, the GigaSpeech keyword model, Silero VAD; SHA-256 checked) into vendor/wake/
+                       #   (-- --platform win32-x64 | linux-x64 | all; -- --with-zhen also the zh-en model, for tests only: it is never packaged)
+npm run wake:smoke     # the engine under plain Node over the committed "Hey Jade" fixtures (tests/fixtures/wake/)
+npm run wake:eval -- <folder of 16 kHz WAVs with manifest.tsv>   # the runtime recipe over your own recordings ("Record a test clip")
+npm run test:wake-e2e  # "Hey Jade" end to end in the real app with the real engine (after vite build; xvfb-run -a on Linux)
 ```
 
 To try the camera window with the simulator, start the app with `LAWNMOWER_TAPO_ALLOW_LOOPBACK=1` (the app otherwise refuses non-home-network addresses, including `127.0.0.1`) and enter `127.0.0.1` with the simulator's ports under the camera window's *Ports and stream*; the simulator's Camera Account is `camacct` / `se&cret`. In a browser, `http://127.0.0.1:4173/tapo/index.html?mock=1` shows the camera window with a mock camera.
@@ -208,6 +242,9 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `electron/tapo/`, `electron/preload-camera.cjs` | the home camera's main-process side: ONVIF client, pan/tilt with motor watchdogs, camera events, the go2rtc video component, clips, the security engine, notifications, Claude's camera tools ([docs/TAPO.md](docs/TAPO.md)) |
 | `src/tapo/` | the home camera window (live view, controls, events, setup, calibration), its security worker (WebCodecs decoding, motion, the person detector), and the avatar's side (alerts, quick commands) |
 | `tools/tapo-sim/`, `tools/tapo-probe.mjs` | a Tapo camera simulator (ONVIF, RTSP, pan/tilt, events) for tests and development; the diagnostic report for a real camera |
+| `electron/wake/` | "Hey Jade" in main: the "Jade wake word" utility process (sherpa-onnx keyword spotting behind a VAD), its supervision, the extra model's download, IPC ([docs/WAKE.md](docs/WAKE.md)) |
+| `src/wake/` | "Hey Jade" in the window: the listening state machine, the Whisper check of her name, her own voice, earcons, the chip and the drawer rows |
+| `electron/persona.js` | Jade's persona: her name, that she runs on Claude, how she speaks |
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
 | `tools/voicefx/` | renders the voice characters offline with the app's own DSP (demos, tuning) |
@@ -234,6 +271,8 @@ Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawn
 * **The mouth is ahead of or behind the voice** (common with Bluetooth headphones): *Settings → Voice → Lip-sync timing*, + moves the mouth later; **Test lip-sync** says a line to check it by.
 * **Voice is slow the first time**: on RTX 50-series GPUs, the first Whisper GPU run compiles kernels once (30–90 s). After that it is fast.
 * **More voice issues** (driver, "no kernel image", cuDNN, CPU fallback): see [docs/VOICE.md § Troubleshooting](docs/VOICE.md#5-troubleshooting).
+* **"Hey Jade" does not wake her**: the ear in the status bar says why. *Hey Jade needs the local voice*: set it up (*Settings › Voice*, **Set up local voice…**). *Microphone blocked*: Windows *Settings › Privacy & security › Microphone*, turn on **Let desktop apps access your microphone** (the drawer has a button for it). Otherwise try *Settings › Voice › Sensitivity* › **More**, check the input device in Windows *Sound* settings, or speak a little closer. Push-to-talk and the hotkey always work.
+* **"Hey Jade" wakes by mistake, or she stops when she says her own name**: *Settings › Voice › Sensitivity* › **Less**; run **Test my echo**, use headphones or turn off *Interrupt with her name*. Music getting quieter while she listens is Windows' communications ducking: *Sound › More sound settings › Communications › Do nothing*. More in [docs/WAKE.md](docs/WAKE.md#9-windows-notes-and-troubleshooting).
 * **Home camera: "Sign-in failed", offline, turns the wrong way, no notifications**: see the table in [docs/TAPO.md § Troubleshooting](docs/TAPO.md#7-troubleshooting). The app never retries a wrong camera password by itself (so the camera does not lock you out): fix it in the camera window's setup and press **Test connection**.
 * **"The camera is blocked"**: in Windows *Settings › Privacy & security › Camera*, turn on **Camera access** and **Let desktop apps access your camera**, then press **Try again** on the card. "In use": close Teams, Zoom, the Camera app or a video call in the browser. More in [docs/CAMERA.md](docs/CAMERA.md#when-the-camera-does-not-start).
 

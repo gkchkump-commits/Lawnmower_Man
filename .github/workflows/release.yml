@@ -53,6 +53,18 @@ jobs:
       - name: Fetch go2rtc for the home camera (pinned release, SHA-256 checked)
         # vendor/go2rtc/win32-x64/go2rtc.exe + LICENSE → resources/tapo/ (package.json build.win.extraResources)
         run: npm run fetch:go2rtc -- --platform win32-x64
+      # ---- "Hey Jade" (docs/WAKE.md): the wake-word engine the installer carries ----
+      - name: Fetch the wake-word engine for Windows (pinned SHA-256; never the zh-en model)
+        # vendor/wake/{sherpa-onnx/win32-x64, models/gigaspeech-3.3m, models/silero_vad.onnx,
+        # LICENSES} → resources/wake/ (package.json build.win.extraResources). Without --with-zhen:
+        # the zh-en model (no stated licence) is not even on the build machine; the voice setup
+        # downloads it on the user's PC.
+        run: npm run fetch:wake -- --platform win32-x64
+      - name: The wake-word engine loads on Windows and hears "Hey Jade" (GigaSpeech alone)
+        # plain Node, N-API: the real Windows load of sherpa-onnx.node and its DLLs, over the
+        # committed fixtures (tests/fixtures/wake)
+        run: node scripts/wake-smoke.mjs --no-zhen
+      # ---- end "Hey Jade" ----
       - name: Build renderer + package (NSIS installer and portable exe)
         run: npm run dist:win
       - name: List build output
@@ -90,9 +102,33 @@ jobs:
             'resources\THIRD_PARTY_NOTICES.md',
             'resources\tapo\go2rtc.exe',
             'resources\tapo\go2rtc-LICENSE.txt',
+            # ---- "Hey Jade": the wake-word engine (addon, model B, the VAD, licences) ----
+            'resources\wake\sherpa-onnx\win32-x64\sherpa-onnx.node',
+            'resources\wake\sherpa-onnx\win32-x64\sherpa-onnx-c-api.dll',
+            'resources\wake\sherpa-onnx\win32-x64\sherpa-onnx-cxx-api.dll',
+            'resources\wake\sherpa-onnx\win32-x64\onnxruntime.dll',
+            'resources\wake\sherpa-onnx\win32-x64\onnxruntime_providers_shared.dll',
+            'resources\wake\models\gigaspeech-3.3m\encoder.int8.onnx',
+            'resources\wake\models\gigaspeech-3.3m\decoder.onnx',
+            'resources\wake\models\gigaspeech-3.3m\joiner.int8.onnx',
+            'resources\wake\models\gigaspeech-3.3m\tokens.txt',
+            'resources\wake\models\gigaspeech-3.3m\MODEL_CARD.md',
+            'resources\wake\models\silero_vad.onnx',
+            'resources\wake\LICENSES\sherpa-onnx-LICENSE.txt',
+            'resources\wake\LICENSES\onnxruntime-LICENSE.txt',
+            'resources\wake\LICENSES\silero-vad-LICENSE.txt',
+            # ---- end "Hey Jade" ----
             'Uninstall Lawnmower Man.exe'
           )
           foreach ($f in $need) { if (-not (Test-Path -LiteralPath (Join-Path $dest $f))) { throw "missing in install: $f" } }
+          # ---- "Hey Jade": the shipped addon is the pinned one; the zh-en model is never installed ----
+          $want = node --input-type=module -e "import('./electron/wake/config.js').then((m) => console.log(m.ADDON_FILES['win32-x64'].find((f) => f.name === 'sherpa-onnx.node').sha256))"
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dest 'resources\wake\sherpa-onnx\win32-x64\sherpa-onnx.node')).Hash.ToLowerInvariant()
+          if ($got -ne $want) { throw "resources\wake\...\sherpa-onnx.node is not the pinned sherpa-onnx 1.13.8 (sha256 $got, want $want)" }
+          Write-Host "sherpa-onnx.node sha256 $got (pinned)"
+          $zhen = @(Get-ChildItem -Recurse -File -LiteralPath (Join-Path $dest 'resources\wake') | Where-Object { $_.FullName -match 'zh-en|dev-models|epoch-13' })
+          if ($zhen.Count -gt 0) { throw "the zh-en wake-word model must not be installed: $($zhen.FullName -join ', ')" }
+          # ---- end "Hey Jade" ----
           # the home camera's video component is the pinned go2rtc release, byte for byte
           $want = node --input-type=module -e "import('./scripts/fetch-go2rtc.mjs').then((m) => console.log(m.ASSETS['win32-x64'].binSha256))"
           $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dest 'resources\tapo\go2rtc.exe')).Hash.ToLowerInvariant()

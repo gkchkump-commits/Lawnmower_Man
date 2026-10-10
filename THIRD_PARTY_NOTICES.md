@@ -40,6 +40,26 @@ model.
 |---|---|---|
 | **go2rtc** 1.9.14 — Copyright (c) 2022 Alexey Khit (<https://github.com/AlexxIT/go2rtc>) | the home camera's video component ([docs/TAPO.md](docs/TAPO.md)): `scripts/fetch-go2rtc.mjs` downloads the official release binaries (`go2rtc_win64.zip`, `go2rtc_linux_amd64`), checks their pinned SHA-256 and puts them in `vendor/go2rtc/`; the installer ships them unmodified as `resources/tapo/go2rtc(.exe)`, with go2rtc's license as `resources/tapo/go2rtc-LICENSE.txt` | [MIT](#mit-license) |
 
+### "Hey Jade": the wake-word engine (`resources/wake/`)
+
+`scripts/fetch-wake.mjs` downloads these at build time, checks each file against the SHA-256
+pinned in `electron/wake/config.js` and `scripts/fetch-wake.mjs`, and puts them in `vendor/wake/`;
+the installer ships them unmodified in `resources/wake/` ([docs/WAKE.md](docs/WAKE.md)). The
+licence texts travel with them in `resources/wake/LICENSES/`.
+
+| Work | Where | License |
+|---|---|---|
+| **sherpa-onnx** 1.13.8 — Copyright (c) the Next-gen Kaldi team (k2-fsa, Xiaomi Corp.) and the sherpa-onnx contributors (<https://github.com/k2-fsa/sherpa-onnx>) | the raw Node-API addon of the npm packages `sherpa-onnx-win-x64` / `sherpa-onnx-linux-x64` 1.13.8 (`sherpa-onnx.node`, `sherpa-onnx-c-api`, `sherpa-onnx-cxx-api`), in `resources/wake/sherpa-onnx/<platform>/`; it runs in the "Jade wake word" utility process; licence text: `resources/wake/LICENSES/sherpa-onnx-LICENSE.txt` | [Apache-2.0](#apache-license-20) |
+| **ONNX Runtime** 1.28.2 — Copyright (c) Microsoft Corporation | inside the sherpa-onnx addon packages (`onnxruntime.dll`, `onnxruntime_providers_shared.dll` / `libonnxruntime.so`), next to the addon; licence text: `resources/wake/LICENSES/onnxruntime-LICENSE.txt` | [MIT](#mit-license) |
+| **sherpa-onnx GigaSpeech keyword-spotting model** (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`), trained with icefall on GigaSpeech XL by the k2-fsa project | `resources/wake/models/gigaspeech-3.3m/` (int8 encoder and joiner, decoder, tokens), from the `kws-models` release of k2-fsa/sherpa-onnx; its model card (the tarball's `README.md`, "license: Apache License 2.0") is shipped as `MODEL_CARD.md` | [Apache-2.0](#apache-license-20) (per its model card) |
+| **Silero VAD** v4 (`silero_vad.onnx`, the k2-fsa export) — Copyright (c) 2020-present Silero Team | `resources/wake/models/silero_vad.onnx`, from the `asr-models` release of k2-fsa/sherpa-onnx; licence text: `resources/wake/LICENSES/silero-vad-LICENSE.txt` | [MIT](#mit-license) |
+
+Not shipped: the more accurate **sherpa-onnx zh-en keyword-spotting model**
+(`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`) states no licence, so the installer does not
+carry it. The voice setup (`python -m lawnmower_voice.download --kws`) downloads it on the user's
+PC from k2-fsa's own GitHub release (`kws-models`), checks its pinned SHA-256 and keeps it in the
+user's voice models folder; Jade works without it (GigaSpeech alone). See the table below.
+
 ### Statically linked into go2rtc 1.9.14
 
 go2rtc is a Go program: the release binary contains the Go standard library and these Go modules
@@ -73,13 +93,15 @@ license was checked in the module's repository at that version):
 | **Kokoro-82M** (hexgrad) model and voices | `voice/` text to speech | Apache-2.0 |
 | **kokoro-onnx** | `voice/` text to speech | MIT |
 | **ONNX Runtime** (`onnxruntime-gpu`) | `voice/` text to speech | MIT |
+| **sherpa-onnx zh-en keyword-spotting model** (`sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`), k2-fsa | "Hey Jade" ([docs/WAKE.md](docs/WAKE.md)): downloaded on the user's PC by the voice setup (`voice/lawnmower_voice/download.py --kws`) from <https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models>, SHA-256 checked, into the user's voice models folder (`kws/zh-en-3m/`); never redistributed with the app. Developers and CI fetch it with `npm run fetch:wake -- --with-zhen` into `vendor/wake/dev-models/`, which no build rule packages | none stated by its authors |
+| **Kokoro-82M** voices as test audio | `tests/fixtures/wake/*.wav` ("Hey Jade" fixtures made with `tools/wake/make-fixtures.py`; tests only, not shipped) | Apache-2.0 |
 | **espeak-ng** (via `espeakng-loader` / phonemizer) | `voice/` grapheme-to-phoneme fallback | GPL-3.0 (a separate program; it is loaded dynamically and not modified) |
 | **NVIDIA CUDA runtime, cuBLAS, cuDNN, cuFFT** (pip wheels) | `voice/` GPU inference | NVIDIA Software License Agreement / CUDA EULA |
 | **FastAPI**, **Starlette**, **Uvicorn**, **NumPy**, **SciPy** | `voice/` server | MIT / BSD-3-Clause |
 
 ## Apache License 2.0
 
-The MediaPipe works above (including the EfficientDet-Lite0 model), and the Apache-2.0 libraries in its WebAssembly runtime (TensorFlow Lite, Abseil, ruy, FlatBuffers: Google LLC and their authors; OpenCV: the OpenCV authors), are distributed under the Apache License, Version 2.0; they are used unmodified. So are the Apache-2.0 parts of go2rtc's Go modules (`gopkg.in/yaml.v3`: Copyright 2011-2016 Canonical Ltd.; `github.com/tadglines/go-pkgs`: Copyright 2013 Tad Glines). The full text of the license:
+The MediaPipe works above (including the EfficientDet-Lite0 model), and the Apache-2.0 libraries in its WebAssembly runtime (TensorFlow Lite, Abseil, ruy, FlatBuffers: Google LLC and their authors; OpenCV: the OpenCV authors), are distributed under the Apache License, Version 2.0; they are used unmodified. So are the Apache-2.0 parts of go2rtc's Go modules (`gopkg.in/yaml.v3`: Copyright 2011-2016 Canonical Ltd.; `github.com/tadglines/go-pkgs`: Copyright 2013 Tad Glines), and the wake-word engine's sherpa-onnx addon and its GigaSpeech keyword-spotting model (k2-fsa; the addon's own copy of the license is `resources/wake/LICENSES/sherpa-onnx-LICENSE.txt`). The full text of the license:
 
 ```text
                               Apache License
@@ -319,7 +341,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## MIT License
 
-Applies to go2rtc (Copyright (c) 2022 Alexey Khit) and to its MIT-licensed Go modules, with their copyright notices as listed above:
+Applies to go2rtc (Copyright (c) 2022 Alexey Khit) and to its MIT-licensed Go modules, with their copyright notices as listed above, and to the wake-word engine's ONNX Runtime (Copyright (c) Microsoft Corporation) and Silero VAD (Copyright (c) 2020-present Silero Team), whose own copies are in `resources/wake/LICENSES/`:
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy

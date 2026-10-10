@@ -139,6 +139,22 @@
         {
           "from": "vendor/go2rtc/LICENSE",
           "to": "tapo/go2rtc-LICENSE.txt"
+        },
+        {
+          "from": "vendor/wake/sherpa-onnx/win32-x64",
+          "to": "wake/sherpa-onnx/win32-x64"
+        },
+        {
+          "from": "vendor/wake/models",
+          "to": "wake/models",
+          "filter": [
+            "gigaspeech-3.3m/**",
+            "silero_vad.onnx"
+          ]
+        },
+        {
+          "from": "vendor/wake/LICENSES",
+          "to": "wake/LICENSES"
         }
       ]
     },
@@ -179,6 +195,22 @@
         {
           "from": "vendor/go2rtc/LICENSE",
           "to": "tapo/go2rtc-LICENSE.txt"
+        },
+        {
+          "from": "vendor/wake/sherpa-onnx/linux-x64",
+          "to": "wake/sherpa-onnx/linux-x64"
+        },
+        {
+          "from": "vendor/wake/models",
+          "to": "wake/models",
+          "filter": [
+            "gigaspeech-3.3m/**",
+            "silero_vad.onnx"
+          ]
+        },
+        {
+          "from": "vendor/wake/LICENSES",
+          "to": "wake/LICENSES"
         }
       ]
     }

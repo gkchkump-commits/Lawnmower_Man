@@ -18,6 +18,9 @@ body.tapo[data-env="browser"] { background: #0b0f14; }
 .cam {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* one column, never wider than the window (a long status line in the footer once pushed the
+     arm button and the sidebar out of view) */
+  grid-template-columns: minmax(0, 1fr);
   height: 100vh;
   width: 100vw;
 }

@@ -433,10 +433,16 @@ try {
       return w ? w.isFullScreen() : null;
     });
     await cam.keyboard.press('f');
-    const full = await until(async () => (await cam.evaluate(() => !!document.fullscreenElement)) || (await camFull()), 5000);
+    // (the page's own state: the window reports full screen a moment before the page does, and
+    // an F pressed in between would ask again instead of leaving)
+    const full = await until(() => cam.evaluate(() => !!document.fullscreenElement || document.body.dataset.full === '1'), 5000);
     check('key F: the live view goes full screen', full, { page: await cam.evaluate(() => !!document.fullscreenElement), window: await camFull() });
     await cam.keyboard.press('f');
-    await until(async () => !(await cam.evaluate(() => !!document.fullscreenElement)), 5000);
+    const left = await until(async () => {
+      const p = await cam.evaluate(() => ({ page: !!document.fullscreenElement, filled: document.body.dataset.full === '1' }));
+      return !p.page && !p.filled && !(await camFull());
+    }, 5000);
+    check('…and F again leaves it (the window too, no window-filling fallback left over)', left, { page: await cam.evaluate(() => ({ full: !!document.fullscreenElement, filled: document.body.dataset.full })), window: await camFull() });
   });
 
   // ---- 4. arm, a person, the clip --------------------------------------------------------------
@@ -673,6 +679,8 @@ try {
     check('…and the tray does not say plain "Armed"', !tray?.armed || tapoLabel(tray) === 'Armed · camera offline', { tray, label: tray && tapoLabel(tray) });
     const badge = await cam.locator('.badge-text').innerText().catch(() => '');
     check('…nor the camera window ("Offline")', badge === 'Offline', badge);
+    const armBox = await cam.evaluate(() => ({ arm: document.querySelector('.arm')?.getBoundingClientRect().right ?? 1e9, inner: window.innerWidth, label: document.querySelector('.arm')?.textContent || '' }));
+    check('…its arm button (to disarm) stays in the window, saying "Armed · camera offline"', armBox.arm <= armBox.inner && /camera offline/.test(armBox.label), armBox);
     await shot(cam, '7-offline');
     sim.set({ offline: false });
     const back = await until(async () => {

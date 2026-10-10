@@ -361,27 +361,46 @@ async function boot() {
   }
 
   let pseudoFull = false;
+  /** the user wants full screen (a late answer to an old request must not bring it back) */
+  let wantFull = false;
+  function setPseudoFull(on) {
+    pseudoFull = on;
+    body.dataset.full = on ? '1' : '';
+  }
+  let requesting = false;
   async function toggleFullscreen() {
-    if (document.fullscreenElement) {
-      await document.exitFullscreen().catch(() => {});
+    if (requesting) {
+      // F again while the window is still going full screen: leave it once it gets there
+      wantFull = false;
       return;
     }
-    if (pseudoFull) {
-      pseudoFull = false;
-      body.dataset.full = '';
+    if (document.fullscreenElement || pseudoFull) {
+      // out of both: the real one and the window-filling fallback
+      wantFull = false;
+      setPseudoFull(false);
+      if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
       return;
     }
+    wantFull = true;
+    requesting = true;
     try {
-      // a refusal can also be silence (a permission handler that never answers): 1 s at most
+      // a refusal can also be silence (a permission handler that never answers), or a slow
+      // "yes" (the window manager animating): 1 s at most, then fill the window instead
       await Promise.race([$('live').requestFullscreen(), new Promise((_r, reject) => setTimeout(() => reject(new Error('no answer')), 1000))]);
       if (!document.fullscreenElement) throw new Error('not in full screen');
+      if (!wantFull) await document.exitFullscreen().catch(() => {});
     } catch {
-      // full screen refused: fill the window instead
-      if (document.fullscreenElement) return;
-      pseudoFull = true;
-      body.dataset.full = '1';
+      if (!document.fullscreenElement && wantFull) setPseudoFull(true);
+    } finally {
+      requesting = false;
     }
   }
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) return;
+    // a late "yes" after the fallback: the real full screen replaces it; after "leave": leave
+    if (!wantFull) document.exitFullscreen().catch(() => {});
+    else if (pseudoFull) setPseudoFull(false);
+  });
 
   let lastVisible = /** @type {boolean|null} */ (null);
   /** Tell main and the worker whether the live view can be seen (the stream runs only then, unless armed). */

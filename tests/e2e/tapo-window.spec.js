@@ -2,7 +2,7 @@
 // src/bridge/mock-tapo.js: real security worker, real stub detector, real shift estimator. Plus
 // the avatar window's side: the drawer section, an alert, a local "camera left".
 // Every test fails on console errors (helpers.js) and on any request that leaves 127.0.0.1.
-/* global Image, URLSearchParams, VideoDecoder */
+/* global Element, Image, URLSearchParams, VideoDecoder */
 
 import { appUrl, boot, expect, send, shot, test as base } from './helpers.js';
 
@@ -346,6 +346,13 @@ test.describe('Home camera window', () => {
     await expect(page.locator('.live-placeholder')).toContainText('The camera is offline');
     await expect(page.locator('.dpad')).toBeHidden();
     await expect(page.locator('.retry')).toBeVisible();
+    // a long status line in the footer does not push the arm button (disarm!) out of the window
+    await page.setViewportSize({ width: 640, height: 600 });
+    await page.evaluate(() => { document.getElementById('foot-stream').textContent = 'x'.repeat(40) + ' The camera stopped answering. '.repeat(6); });
+    const fit = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth, arm: document.querySelector('.arm').getBoundingClientRect().right }));
+    expect(fit.scroll).toBeLessThanOrEqual(fit.inner);
+    expect(fit.arm).toBeLessThanOrEqual(fit.inner);
+    await page.setViewportSize({ width: 1100, height: 680 });
     await openCamera(page, { scenario: 'auth' });
     await expect(page.locator('.badge')).toHaveText('Sign-in failed');
     await expect(page.locator('.live-placeholder')).toContainText('does not keep retrying');
@@ -375,6 +382,30 @@ test.describe('Home camera window', () => {
     await expect.poll(() => page.evaluate(() => !!document.fullscreenElement || document.body.dataset.full === '1')).toBe(true);
     // the double-click did not also turn the camera
     expect((await calls(page)).filter((c) => c.op === 'center')).toHaveLength(0);
+    // F leaves it again
+    await page.keyboard.press('f');
+    await expect.poll(() => page.evaluate(() => !document.fullscreenElement && document.body.dataset.full !== '1')).toBe(true);
+  });
+
+  test('full screen that answers late (after the 1 s fallback) is left completely by F', async ({ page }) => {
+    await openCamera(page);
+    await waitLive(page);
+    // the window manager takes 1.5 s to say yes (Electron on a slow desktop)
+    await page.evaluate(() => {
+      const real = Element.prototype.requestFullscreen;
+      Element.prototype.requestFullscreen = function slow(...a) {
+        return new Promise((resolve, reject) => setTimeout(() => real.apply(this, a).then(resolve, reject), 1500));
+      };
+    });
+    await page.locator('.cam-name').click();
+    await page.keyboard.press('f');
+    await expect.poll(() => page.evaluate(() => !!document.fullscreenElement), { timeout: 5000 }).toBe(true);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => document.body.dataset.full)).not.toBe('1'); // the fallback gave way
+    await page.keyboard.press('f');
+    await expect.poll(() => page.evaluate(() => !document.fullscreenElement && document.body.dataset.full !== '1')).toBe(true);
+    await expect(page.locator('.arm')).toBeVisible();
+    await page.locator('.arm').click({ trial: true }); // nothing covers the header
   });
 });
 

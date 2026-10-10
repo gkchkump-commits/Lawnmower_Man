@@ -25,6 +25,8 @@ export default defineConfig({
       input: {
         main: resolve(here, 'src/index.html'),
         avatar: resolve(here, 'src/dev/avatar.html'),
+        // the Home camera window (src/tapo/, docs/TAPO.md) → dist/tapo/index.html
+        tapo: resolve(here, 'src/tapo/index.html'),
       },
     },
   },

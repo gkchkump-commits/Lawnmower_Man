@@ -7,11 +7,15 @@
 // a key frame after a config or a reset; a backlog of more than 30 chunks (a slow PC) drops
 // everything up to the next key frame; a decoder error closes the decoder, which is re-created
 // at the next key frame. Every decoded VideoFrame goes to `onFrame`, which owns it (it must
-// close it).
+// close it), with its arrival stamp: the `rx` main put on the chunk (main's monotonic receive
+// time), matched by the frame's timestamp (B-frames come out in another order), or undefined
+// for a chunk without one (an older main).
 //
 // VideoDecoder and EncodedVideoChunk are injected so this is unit-tested with fakes.
 
 export const MAX_DECODE_QUEUE = 30;
+/** Arrival stamps kept for chunks not decoded yet (a decoder that drops frames must not leak). */
+const MAX_PENDING_STAMPS = 120;
 const FPS_WINDOW_MS = 2000;
 
 /**
@@ -25,7 +29,7 @@ export class StreamDecoder {
    * @param {object} o
    * @param {any} o.VideoDecoder
    * @param {any} o.EncodedVideoChunk
-   * @param {(frame: any) => void} o.onFrame
+   * @param {(frame: any, rx?: number) => void} o.onFrame  rx: the chunk's arrival stamp (main's clock)
    * @param {(e: { message: string, fatal: boolean }) => void} [o.onError]
    * @param {() => number} [o.now]  ms clock
    */
@@ -51,6 +55,8 @@ export class StreamDecoder {
     /** @type {number[]} output times within the last FPS_WINDOW_MS */
     this._outputs = [];
     this.frames = 0;
+    /** chunk timestamp (µs) → main's arrival stamp, until the frame is decoded @type {Map<number, number>} */
+    this._stamps = new Map();
   }
 
   get available() {
@@ -65,6 +71,7 @@ export class StreamDecoder {
   async configure(msg) {
     const seq = ++this._seq;
     this._close();
+    this._stamps.clear();
     this.gen = msg.gen;
     this.waitKey = true;
     this.codec = String(msg.codec || '');
@@ -100,7 +107,7 @@ export class StreamDecoder {
 
   /**
    * One encoded sample.
-   * @param {{ gen: number, key: boolean, ts: number, dur?: number, data: ArrayBuffer|Uint8Array }} msg
+   * @param {{ gen: number, key: boolean, ts: number, dur?: number, rx?: number, data: ArrayBuffer|Uint8Array }} msg
    */
   chunk(msg) {
     if (msg.gen !== this.gen || !this.config) return;
@@ -117,6 +124,10 @@ export class StreamDecoder {
       return;
     }
     if (msg.key) this.waitKey = false;
+    if (typeof msg.rx === 'number' && Number.isFinite(msg.rx)) {
+      this._stamps.set(msg.ts, msg.rx);
+      if (this._stamps.size > MAX_PENDING_STAMPS) this._stamps.delete(this._stamps.keys().next().value);
+    }
     try {
       this.decoder.decode(new this.EncodedVideoChunk({
         type: msg.key ? 'key' : 'delta',
@@ -133,6 +144,7 @@ export class StreamDecoder {
   reset(gen) {
     this._seq++;
     this._close();
+    this._stamps.clear();
     this.gen = gen;
     this.config = null;
     this.waitKey = true;
@@ -174,8 +186,11 @@ export class StreamDecoder {
           this.frames++;
           this._outputs.push(this._now());
           if (this._outputs.length > 120) this._outputs.shift();
+          const ts = Number(frame.timestamp);
+          const rx = this._stamps.get(ts);
+          this._stamps.delete(ts);
           try {
-            this.onFrame(frame);
+            this.onFrame(frame, rx);
           } catch (err) {
             frame.close();
             this.onError({ message: `frame handling failed: ${/** @type {Error} */ (err)?.message || err}`, fatal: false });

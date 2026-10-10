@@ -31,9 +31,9 @@ function fakeCodecs({ hardware = true, software = true } = {}) {
       this.state = 'closed';
     }
 
-    /** test: the decoder produced a frame */
-    emit() {
-      const frame = { closed: false, close() { this.closed = true; }, displayWidth: 640, displayHeight: 360, timestamp: 0 };
+    /** test: the decoder produced a frame (of the chunk with this timestamp) */
+    emit(timestamp = 0) {
+      const frame = { closed: false, close() { this.closed = true; }, displayWidth: 640, displayHeight: 360, timestamp };
       this.init.output(frame);
       return frame;
     }
@@ -146,6 +146,27 @@ describe('StreamDecoder', () => {
     expect(c.made[0].state).toBe('closed');
     d.chunk(chunk(true, { gen: 2 }));
     expect(c.made).toHaveLength(1);
+  });
+
+  it('hands each frame its chunk\'s arrival stamp (main\'s rx), matched by timestamp, also out of order', async () => {
+    const c = fakeCodecs();
+    const got = [];
+    const d = new StreamDecoder({ ...c, onFrame: (f, rx) => got.push([f.timestamp, rx]) });
+    await d.configure(CONFIG);
+    d.chunk(chunk(true, { ts: 0, rx: 1000.5 }));
+    d.chunk(chunk(false, { ts: 133_333, rx: 1066 })); // a P-frame sent before the B-frame it anchors
+    d.chunk(chunk(false, { ts: 66_666, rx: 1070 }));
+    d.chunk(chunk(false, { ts: 200_000 })); // no stamp (an older main)
+    for (const ts of [0, 66_666, 133_333, 200_000]) c.made[0].emit(ts); // presentation order
+    expect(got).toEqual([[0, 1000.5], [66_666, 1070], [133_333, 1066], [200_000, undefined]]);
+    // a reconnect forgets the stamps of chunks that were never decoded
+    d.chunk(chunk(false, { ts: 266_666, rx: 1200 }));
+    d.reset(1);
+    await d.configure(CONFIG);
+    d.chunk(chunk(true, { ts: 300_000, rx: 1300 }));
+    c.made[1].emit(266_666);
+    c.made[1].emit(300_000);
+    expect(got.slice(-2)).toEqual([[266_666, undefined], [300_000, 1300]]);
   });
 
   it('without WebCodecs it says so', async () => {

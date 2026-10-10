@@ -278,12 +278,23 @@ export function validateWorkerMessage(m) {
     case 'snap-err':
       if (typeof m.id !== 'string' || m.id.length > 64) return null;
       return { t: 'snap-err', id: m.id, message: shortText(m.message, 300) };
-    case 'shift-ref-ok':
+    // shift-ref-ok / shift: the gated calibration fields (the worker used only frames that reached
+    // main after the request's `after`) are kept only when well-formed; a reply without them (an
+    // older worker or page) says nothing about how current its picture is, and main treats it so
+    case 'shift-ref-ok': {
       if (typeof m.id !== 'string' || m.id.length > 64) return null;
-      return { t: 'shift-ref-ok', id: m.id };
-    case 'shift':
+      if (m.gated !== true) return { t: 'shift-ref-ok', id: m.id };
+      return { t: 'shift-ref-ok', id: m.id, gated: true, ok: m.ok === true, still: m.still === true, ...(num(m.at) ? { at: m.at } : {}) };
+    }
+    case 'shift': {
       if (typeof m.id !== 'string' || m.id.length > 64 || !num(m.dx, -2, 2) || !num(m.dy, -2, 2) || !num(m.score, -1, 1)) return null;
-      return { t: 'shift', id: m.id, dx: m.dx, dy: m.dy, score: m.score, settledMs: num(m.settledMs, 0, 1e6) ? m.settledMs : 0 };
+      const base = { t: 'shift', id: m.id, dx: m.dx, dy: m.dy, score: m.score, settledMs: num(m.settledMs, 0, 1e6) ? m.settledMs : 0 };
+      if (m.gated !== true) return base;
+      return {
+        ...base, gated: true, moved: m.moved === true, frames: Number.isSafeInteger(m.frames) && m.frames >= 0 ? m.frames : 0,
+        ...(num(m.at) ? { at: m.at } : {}), ...(num(m.refAt) ? { refAt: m.refAt } : {}),
+      };
+    }
     case 'stats':
       if (!num(m.fps ?? 0, 0, 1000)) return null;
       return {

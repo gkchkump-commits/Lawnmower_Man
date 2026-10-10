@@ -19,7 +19,16 @@
 // count detector samples (contract §8.8 "≥ 2 of the last 3 detector samples").
 //
 // Clocks: `at`, `boost.untilMs` and `ptz.settleUntil` are wall-clock milliseconds (Date.now(),
-// shared by main and the renderer); rates and timeouts use the monotonic `now`.
+// shared by main and the renderer); rates and timeouts use the monotonic `now`. Each frame also
+// keeps its arrival stamp `rx`: main's own monotonic receive time of its chunk (main's clock, not
+// this worker's), which the calibration's shift-ref / shift-measure `after` is compared with.
+//
+// Calibration (`after` set: the "gated" protocol): a worker that stalls (synchronous readback
+// under software GL, a busy PC) keeps decoding frames that left the camera BEFORE the last move,
+// so a still picture is no proof of a current one. Only frames that reached main after `after`
+// (the end of the previous move, main's clock) are used, the stillness/settle checks run over
+// those frames only, and the answers say which frame was used (`at`, `refAt`) so main can check.
+// Without `after` (an older main) everything works as before.
 
 import { StreamDecoder } from './decoder.js';
 import { LiveCanvas } from './draw.js';
@@ -53,17 +62,26 @@ export const DETECT_INPUT_WIDTH = 640;
 export const SHIFT_MIN_WAIT_MS = 1500;
 /** The calibration's reference picture waits at most this long for a still picture. */
 export const SHIFT_REF_MAX_WAIT_MS = 4000;
+/** Gated: no frame that arrived after the last move within this long → no reference (`ok: false`). */
+export const SHIFT_REF_GIVE_UP_MS = 12_000;
 /** Changed fraction between frames that shows the camera is turning. */
 export const SHIFT_MOVING_FRACTION = 0.03;
 
+/** A finite number, else null (an `after` / `rx` that is missing or not a number). @param {unknown} v */
+const stampOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
 /** A decoded frame shared by several consumers: closed when the last one lets go. */
 export class FrameRef {
-  /** @param {any} image VideoFrame | ImageBitmap @param {number} width @param {number} height @param {number} ts ms */
-  constructor(image, width, height, ts) {
+  /**
+   * @param {any} image VideoFrame | ImageBitmap @param {number} width @param {number} height @param {number} ts ms
+   * @param {number|null} [rx] arrival stamp: main's monotonic receive time of the frame (null: unknown)
+   */
+  constructor(image, width, height, ts, rx = null) {
     this.image = image;
     this.width = width;
     this.height = height;
     this.ts = ts;
+    this.rx = stampOf(rx);
     this.refs = 1;
   }
 
@@ -114,7 +132,7 @@ export class SecurityPipeline {
     this.decoder = new StreamDecoder({
       VideoDecoder: d.VideoDecoder,
       EncodedVideoChunk: d.EncodedVideoChunk,
-      onFrame: (f) => this._onVideoFrame(f),
+      onFrame: (f, rx) => this._onVideoFrame(f, rx),
       onError: (e) => this.postMain({ t: 'error', fatal: !!e.fatal, message: e.message }),
       now: this.now,
     });
@@ -158,7 +176,12 @@ export class SecurityPipeline {
     this._detTimes = [];
     /** @type {number[]} when frames arrived (fps) */
     this._frameTimes = [];
-    this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null) };
+    /**
+     * Calibration: `ref` is the reference luma and `refAt` its frame's arrival stamp (null: unknown);
+     * `refReq` / `measure` the requests in progress (`refSeq` counts the reference requests);
+     * `busy` while a frame is being sampled.
+     */
+    this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), refAt: /** @type {number|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null), refSeq: 0 };
     this._canvases = /** @type {Record<string, any>} */ ({});
     const si = d.setInterval || ((fn, ms) => setInterval(fn, ms));
     this._statsTimer = si(() => this.postStats(), STATS_MS);
@@ -224,7 +247,7 @@ export class SecurityPipeline {
         this.lastFrame = null;
         return undefined;
       case 'idle': return this._idle();
-      case 'bitmap': return this._onImage(msg.image, msg.image?.width || 0, msg.image?.height || 0, Number(msg.ts) || this.now());
+      case 'bitmap': return this._onImage(msg.image, msg.image?.width || 0, msg.image?.height || 0, Number(msg.ts) || this.now(), stampOf(msg.rx));
       case 'armed':
         this.armed = { on: !!msg.on, people: msg.people !== false, sensitivity: String(msg.sensitivity || 'medium') };
         this.motion.setSensitivity(this.armed.sensitivity);
@@ -385,20 +408,23 @@ export class SecurityPipeline {
   // ------------------------------------------------------------------------------------------
   // frames
 
-  /** @param {any} frame VideoFrame */
-  _onVideoFrame(frame) {
+  /** @param {any} frame VideoFrame @param {number} [rx] its chunk's arrival stamp */
+  _onVideoFrame(frame, rx) {
     const ts = Number(frame.timestamp) / 1000; // µs → ms
-    this._onImage(frame, frame.displayWidth || frame.codedWidth || 0, frame.displayHeight || frame.codedHeight || 0, Number.isFinite(ts) ? ts : this.now());
+    this._onImage(frame, frame.displayWidth || frame.codedWidth || 0, frame.displayHeight || frame.codedHeight || 0, Number.isFinite(ts) ? ts : this.now(), stampOf(rx));
   }
 
-  /** A new picture (decoded VideoFrame, or an ImageBitmap from the mock). @param {any} image @param {number} w @param {number} h @param {number} ts */
-  _onImage(image, w, h, ts) {
+  /**
+   * A new picture (decoded VideoFrame, or an ImageBitmap from the mock).
+   * @param {any} image @param {number} w @param {number} h @param {number} ts @param {number|null} [rx] arrival stamp
+   */
+  _onImage(image, w, h, ts, rx = null) {
     if (!image) return;
     if (!(w > 0) || !(h > 0)) {
       image.close?.();
       return;
     }
-    const ref = new FrameRef(image, w, h, ts);
+    const ref = new FrameRef(image, w, h, ts, rx);
     const prev = this.lastFrame;
     this.lastFrame = ref;
     prev?.release();
@@ -567,41 +593,66 @@ export class SecurityPipeline {
    * Take the calibration's reference picture: with an id, the next still one (≤
    * SHIFT_REF_MAX_WAIT_MS), and main is told when it is taken ({ t: 'shift-ref-ok' }) and moves
    * the camera only then: on a lagging video the reference would otherwise show the camera still
-   * settling, or already moving. @param {{ id?: unknown }} msg
+   * settling, or already moving.
+   *
+   * With `after` (gated): only frames that reached main after it count, the wait for a still
+   * picture starts at the first of them, and the answer says whether there is a reference
+   * (`ok`), the arrival stamp of its frame (`at`) and whether it was still. No such frame within
+   * SHIFT_REF_GIVE_UP_MS → `ok: false`: main must not measure against nothing.
+   * @param {{ id?: unknown, after?: unknown }} msg
    */
   _shiftRef(msg) {
     const s = this.shift;
     this._clearTimeout(s.refReq?.timer);
     s.wantRef = true;
     s.ref = null;
+    s.refAt = null;
     s.refReq = null;
+    s.refSeq++;
     // (without an id — an older main — the next frame is the reference, as before)
     if (typeof msg.id !== 'string') return;
-    const rr = { id: msg.id, startedAt: this.now(), prev: /** @type {Uint8Array|null} */ (null), stable: 0, timer: /** @type {any} */ (null) };
-    // no frames at all: answer anyway (the measurement then says "not measurable")
-    rr.timer = this._setTimeout(() => {
+    const gate = stampOf(msg.after);
+    const rr = {
+      id: msg.id, gate, startedAt: this.now(), firstAt: /** @type {number|null} */ (null),
+      prev: /** @type {Uint8Array|null} */ (null), prevAt: /** @type {number|null} */ (null), stable: 0, timer: /** @type {any} */ (null),
+    };
+    const expire = () => {
       if (s.refReq !== rr) return;
-      s.refReq = null;
       if (rr.prev) {
-        s.ref = rr.prev;
-        s.wantRef = false;
+        // frames came but the picture never stood still: the newest one (scene motion)
+        this._refTaken(rr.prev, rr.prevAt, false);
+        return;
       }
-      this.postMain({ t: 'shift-ref-ok', id: rr.id });
-    }, SHIFT_REF_MAX_WAIT_MS + 1000);
+      if (gate !== null && this.now() - rr.startedAt < SHIFT_REF_GIVE_UP_MS) {
+        // nothing current yet (a stalled worker working off its backlog): wait a little longer
+        rr.timer = this._setTimeout(expire, SHIFT_REF_GIVE_UP_MS - (this.now() - rr.startedAt));
+        return;
+      }
+      s.refReq = null;
+      if (gate === null) {
+        // no frames at all: answer anyway (an older main's measurement then says "not measurable")
+        this.postMain({ t: 'shift-ref-ok', id: rr.id });
+        return;
+      }
+      s.wantRef = false;
+      this.postMain({ t: 'shift-ref-ok', id: rr.id, gated: true, ok: false, still: false });
+    };
+    rr.timer = this._setTimeout(expire, SHIFT_REF_MAX_WAIT_MS + 1000);
     s.refReq = rr;
   }
 
-  /** @param {Uint8Array} luma */
-  _refTaken(luma) {
+  /** @param {Uint8Array} luma @param {number|null} at its frame's arrival stamp @param {boolean} still */
+  _refTaken(luma, at, still) {
     const s = this.shift;
     const rr = s.refReq;
     s.wantRef = false;
     s.ref = luma;
+    s.refAt = at;
     s.refReq = null;
-    if (rr) {
-      this._clearTimeout(rr.timer);
-      this.postMain({ t: 'shift-ref-ok', id: rr.id });
-    }
+    if (!rr) return;
+    this._clearTimeout(rr.timer);
+    if (rr.gate === null) this.postMain({ t: 'shift-ref-ok', id: rr.id });
+    else this.postMain({ t: 'shift-ref-ok', id: rr.id, gated: true, ok: true, still, ...(at !== null ? { at } : {}) });
   }
 
   /**
@@ -623,40 +674,84 @@ export class SecurityPipeline {
   /**
    * expectMove: the camera reported that it moved, so wait for the picture to move (the video lags
    * the motor, by more than SHIFT_MIN_WAIT_MS on a real camera over Wi-Fi), up to the timeout.
-   * @param {{ id: any, timeoutMs?: number, expectMove?: boolean }} msg
+   *
+   * With `after` (gated): only frames that reached main after it are looked at (the minimum wait
+   * starts at the first of them; a timeout before any such frame waits on, up to
+   * MAX_SHIFT_TIMEOUT_MS), and the answer carries `gated: true`, the measured frame's arrival
+   * stamp `at`, the reference's `refAt`, how many current frames were looked at (`frames`) and
+   * whether the picture moved.
+   * @param {{ id: any, timeoutMs?: number, expectMove?: boolean, after?: unknown }} msg
    */
   _shiftMeasure(msg) {
     this._clearTimeout(this.shift.measure?.timer);
     const timeout = Math.min(MAX_SHIFT_TIMEOUT_MS, Math.max(200, Number(msg.timeoutMs) || 6000));
-    const m = { id: msg.id, startedAt: this.now(), prev: /** @type {Uint8Array|null} */ (null), latest: /** @type {Uint8Array|null} */ (null), stable: 0, moved: false, expectMove: msg.expectMove === true, timer: null };
-    m.timer = this._setTimeout(() => {
-      if (this.shift.measure === m) this._finishShift(m, m.latest);
-    }, timeout);
+    const m = {
+      id: msg.id, gate: stampOf(msg.after), startedAt: this.now(), firstAt: /** @type {number|null} */ (null),
+      prev: /** @type {Uint8Array|null} */ (null), latest: /** @type {Uint8Array|null} */ (null), latestAt: /** @type {number|null} */ (null),
+      stable: 0, frames: 0, moved: false, expectMove: msg.expectMove === true, timer: /** @type {any} */ (null),
+    };
+    const expire = () => {
+      if (this.shift.measure !== m) return;
+      const left = MAX_SHIFT_TIMEOUT_MS - (this.now() - m.startedAt);
+      if (m.gate !== null && !m.frames && left > 0) {
+        m.timer = this._setTimeout(expire, left);
+        return;
+      }
+      this._finishShift(m, m.latest, m.latestAt);
+    };
+    m.timer = this._setTimeout(expire, timeout);
     this.shift.measure = m;
+  }
+
+  /**
+   * May this frame serve the request? Gated: only a frame that reached main after `after`
+   * (an unstamped frame never does). @param {FrameRef} ref @param {number|null} gate
+   */
+  _current(ref, gate) {
+    return gate === null || (ref.rx !== null && ref.rx > gate);
   }
 
   /** @param {FrameRef} ref */
   _maybeShift(ref) {
     const s = this.shift;
     if ((!s.wantRef && !s.measure) || s.busy) return;
+    // the request this frame is sampled for (an answer is only ever made from frames that were
+    // picked for that same request)
+    const forRef = s.wantRef;
+    const refSeq = s.refSeq;
+    const rr = forRef ? s.refReq : null;
+    const m = forRef ? null : s.measure;
+    // a frame from before the last move: not even sampled (saves a stalled worker's time too)
+    if (rr && !this._current(ref, rr.gate)) return;
+    if (m && !this._current(ref, m.gate)) return;
     s.busy = true;
     ref.retain();
+    const at = ref.rx;
     this._sample(ref, SHIFT_WIDTH, SHIFT_HEIGHT, 'shift')
       .then((rgba) => {
         const luma = lumaFromRgba(rgba, SHIFT_WIDTH * SHIFT_HEIGHT);
-        if (s.wantRef) {
-          const rr = s.refReq;
+        if (forRef || s.wantRef) {
+          // a frame picked for a measurement, or for an older reference request, is not this one's
+          if (!forRef || !s.wantRef || s.refSeq !== refSeq) return;
           if (rr) {
+            const now = this.now();
+            if (rr.firstAt === null) rr.firstAt = now;
             // the reference is a still picture (the last move may still be reaching the video)
             rr.stable = rr.prev && changedFraction(rr.prev, luma) < SETTLE_FRACTION ? rr.stable + 1 : 0;
             rr.prev = luma;
-            if (rr.stable < SETTLE_FRAMES && this.now() - rr.startedAt < SHIFT_REF_MAX_WAIT_MS) return;
+            rr.prevAt = at;
+            const still = rr.stable >= SETTLE_FRAMES;
+            if (!still && now - (rr.gate === null ? rr.startedAt : rr.firstAt) < SHIFT_REF_MAX_WAIT_MS) return;
+            this._refTaken(luma, at, still);
+            return;
           }
-          this._refTaken(luma);
+          this._refTaken(luma, at, false);
           return;
         }
-        const m = s.measure;
-        if (!m) return;
+        if (!m || s.measure !== m) return; // finished meanwhile, or a newer measurement
+        const now = this.now();
+        if (m.firstAt === null) m.firstAt = now;
+        m.frames++;
         const change = m.prev ? changedFraction(m.prev, luma) : 1;
         // the camera turned: the picture changed between frames, or differs from the reference
         if ((m.prev && change >= SHIFT_MOVING_FRACTION) || (s.ref && changedFraction(s.ref, luma) >= SHIFT_MOVING_FRACTION)) m.moved = true;
@@ -664,9 +759,11 @@ export class SecurityPipeline {
         else m.stable = 0;
         m.prev = luma;
         m.latest = luma;
+        m.latestAt = at;
         // settled: still for SETTLE_FRAMES comparisons, after the picture moved (or long enough
         // that a camera which did not move at all is not waited for until the timeout)
-        if (m.stable >= SETTLE_FRAMES && (m.moved || (!m.expectMove && this.now() - m.startedAt >= SHIFT_MIN_WAIT_MS))) this._finishShift(m, luma);
+        const since = m.gate === null ? m.startedAt : m.firstAt;
+        if (m.stable >= SETTLE_FRAMES && (m.moved || (!m.expectMove && now - since >= SHIFT_MIN_WAIT_MS))) this._finishShift(m, luma, at);
       })
       .catch((err) => console.warn('[tapo-worker] shift sample failed', err?.message || err))
       .finally(() => {
@@ -675,17 +772,23 @@ export class SecurityPipeline {
       });
   }
 
-  /** @param {any} m @param {Uint8Array|null} luma */
-  _finishShift(m, luma) {
+  /** @param {any} m @param {Uint8Array|null} luma @param {number|null} at its frame's arrival stamp */
+  _finishShift(m, luma, at) {
     this._clearTimeout(m.timer);
     if (this.shift.measure === m) this.shift.measure = null;
     const settledMs = Math.round(this.now() - m.startedAt);
+    // gated: what main needs to check that the picture is current and the reference the one it
+    // was told about
+    const gated = m.gate === null ? {} : {
+      gated: true, frames: m.frames, moved: m.moved,
+      ...(luma && at !== null ? { at } : {}), ...(this.shift.ref && this.shift.refAt !== null ? { refAt: this.shift.refAt } : {}),
+    };
     if (!this.shift.ref || !luma) {
-      this.postMain({ t: 'shift', id: m.id, dx: 0, dy: 0, score: 0, settledMs });
+      this.postMain({ t: 'shift', id: m.id, dx: 0, dy: 0, score: 0, settledMs, ...gated });
       return;
     }
     const r = estimateShift(this.shift.ref, luma);
-    this.postMain({ t: 'shift', id: m.id, dx: round4(r.dx), dy: round4(r.dy), score: round3(r.score), settledMs });
+    this.postMain({ t: 'shift', id: m.id, dx: round4(r.dx), dy: round4(r.dy), score: round3(r.score), settledMs, ...gated });
   }
 
   // ------------------------------------------------------------------------------------------

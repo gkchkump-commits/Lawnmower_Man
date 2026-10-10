@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyseAcoustics } from '../../../src/audio/acoustics.js';
 import {
-  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, findDip, fuseTimeline, landmarks, priorNorms, vowelAmounts, warmUpFusion, warpTime,
+  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, bandClosure, findDip, fuseTimeline, landmarks, monotone, priorNorms, vowelAmounts,
+  warmUpFusion, warpTime,
 } from '../../../src/audio/fusion.js';
 import { visemeTarget } from '../../../src/audio/articulation.js';
 import { decodeWav } from '../../../src/audio/wav.js';
@@ -101,6 +102,71 @@ describe('landmarks', () => {
   });
 });
 
+/**
+ * A synthetic track with the 0.8-5 kHz band: loudness, low band and that band from functions of t.
+ * @param {number} dur @param {(t: number) => number} e @param {(t: number) => number} lo @param {(t: number) => number} mid
+ */
+function track3(dur, e, lo, mid) {
+  const tr = track(dur, e);
+  tr.mid = new Float32Array(tr.n);
+  for (let i = 0; i < tr.n; i++) { const t = i * HOP; tr.lo[i] = lo(t); tr.mid[i] = mid(t); }
+  return tr;
+}
+
+describe('landmarks: releases after a consonant, phrase-initial m / b / p (0.8-5 kHz band)', () => {
+  // "and Pam": a vowel, an n (voiced, low band strong, the upper formants gone), the p's silent
+  // closure from 0.40, its burst at 0.50 into the vowel. Kokoro puts the p at 0.43-0.53: its
+  // release 30 ms late, as it does after consonants (median +23-41 ms on 36 clips)
+  const seg = (t, a, b) => t >= a && t < b;
+  const e = (t) => (seg(t, 0.1, 0.3) ? -20 : seg(t, 0.3, 0.4) ? -26 : seg(t, 0.5, 0.8) ? -19 : -75);
+  const lo = (t) => (seg(t, 0.1, 0.3) ? -22 : seg(t, 0.3, 0.4) ? -27 : seg(t, 0.5, 0.8) ? -21 : -76);
+  const mid = (t) => (seg(t, 0.1, 0.3) ? -35 : seg(t, 0.3, 0.4) ? -55 : seg(t, 0.5, 0.8) ? -34 : -80);
+  const ac = track3(1, e, lo, mid);
+  const tl = [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.32, viseme: 'aa' }, { start: 0.32, end: 0.43, viseme: 'DD' },
+    { start: 0.43, end: 0.53, viseme: 'PP' }, { start: 0.53, end: 0.8, viseme: 'aa' }, { start: 0.8, end: 1, viseme: 'sil' }];
+
+  it('bandClosure: the steepest fall into and rise out of the closure', () => {
+    const c = bandClosure(ac, 0.43, 0.53, 6);
+    expect(c.off).toBeGreaterThan(0.49);
+    expect(c.off).toBeLessThan(0.505);
+    expect(bandClosure({ ...ac, mid: undefined }, 0.43, 0.53)).toBe(null);   // no band: none
+  });
+
+  it('a b / p / m after a consonant ends at its release (the C#CV of "and Pam", "it back"), its start stays free', () => {
+    const { exactStart, exactEnd } = landmarks(tl, ac);
+    expect(exactEnd.has(3)).toBe(true);
+    expect(exactStart.has(3)).toBe(false);
+    const { tl: out } = alignTimeline(tl, ac);
+    expect(Math.abs(out[3].end - 0.5)).toBeLessThan(0.015);
+    expect(out[3].exactEnd).toBe(true);
+    // (a closure lasts 50 ms at least: its start moves back with its release)
+    expect(out[3].end - out[3].start).toBeGreaterThan(0.045);
+  });
+
+  it('a phrase-initial p releases at its burst, not where the voice comes in after the aspiration', () => {
+    // burst at 0.10, aspiration (-46 dB) until 0.17, then the voice
+    const e2 = (t) => (t < 0.1 ? -80 : t < 0.17 ? -46 : t < 0.6 ? -19 : -80);
+    const ac2 = track3(0.8, e2, (t) => e2(t) - 3, (t) => (t < 0.1 ? -80 : t < 0.17 ? -55 : t < 0.6 ? -35 : -80));
+    const t2 = [{ start: 0, end: 0.06, viseme: 'sil' }, { start: 0.06, end: 0.11, viseme: 'PP' }, { start: 0.11, end: 0.6, viseme: 'aa' }, { start: 0.6, end: 0.8, viseme: 'sil' }];
+    const { tl: out } = alignTimeline(t2, ac2);
+    expect(Math.abs(out[1].end - 0.1)).toBeLessThan(0.012);
+    // ... and a phrase-initial m where the murmur gives way to the vowel's upper formants (the
+    // murmur is nearly as loud as the vowel)
+    const e3 = (t) => (t < 0.1 ? -80 : t < 0.6 ? (t < 0.18 ? -23 : -19) : -80);
+    const ac3 = track3(0.8, e3, (t) => e3(t) - 1, (t) => (t < 0.1 ? -80 : t < 0.18 ? -55 : t < 0.6 ? -34 : -80));
+    const t3 = [{ start: 0, end: 0.12, viseme: 'sil' }, { start: 0.12, end: 0.2, viseme: 'PP' }, { start: 0.2, end: 0.6, viseme: 'aa' }, { start: 0.6, end: 0.8, viseme: 'sil' }];
+    const { tl: o3 } = alignTimeline(t3, ac3);
+    expect(Math.abs(o3[1].end - 0.18)).toBeLessThan(0.012);
+    expect(o3[1].start).toBeLessThan(0.1);                    // closed before the murmur
+  });
+
+  it('the two edges of one closure may stretch it well beyond the warp\'s usual 250 % (Kokoro\'s 25 ms m, a 70 ms closure)', () => {
+    const k = monotone([[0.5, 0.48, 1.5, 3], [0.525, 0.55, 1.5, 3]]);
+    expect(k).toEqual([[0.5, 0.48], [0.525, 0.55]]);
+    expect(monotone([[0.5, 0.48, 1.5], [0.525, 0.55, 1.5]]).length).toBe(1);   // not between two unrelated landmarks
+  });
+});
+
 describe('vowel amounts', () => {
   const n = priorNorms(200);
   const clip = { e: -24, dur: 0.1 };
@@ -117,6 +183,9 @@ describe('vowel amounts', () => {
     expect(vowelAmounts('U', va(800), n, clip, visemeTarget('U')).jaw).toBeLessThanOrEqual(JAW_RANGE.U[1] * 1.2);
     // no formants: the viseme's own target
     expect(vowelAmounts('aa', { ...va(0), q: 0 }, n, clip, visemeTarget('aa')).jaw).toBeCloseTo(visemeTarget('aa')[0] * 0.92, 2);
+    // an open vowel whose "F1" reads as low as a close one's is a nasal pole (the æ of "Pam"
+    // before its m), not a closed jaw: the viseme's own opening
+    expect(vowelAmounts('aa', va(n.f1lo), n, clip, visemeTarget('aa')).jaw).toBeCloseTo(visemeTarget('aa')[0] * 0.92, 2);
   });
 
   it('stressed (louder, longer) vowels open more; a reduced one less, and it is not spread', () => {

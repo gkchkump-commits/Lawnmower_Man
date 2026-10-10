@@ -4,10 +4,12 @@
 //
 //   timing   the timeline is warped (monotonic, piecewise linear) onto acoustic landmarks: a
 //            phrase starts where its sound starts (Kokoro's first phone often begins 50-200 ms
-//            before the audio), an m / b / p spans its acoustic closure (the level dip between the
-//            half-level crossings: the lips seal when the dip starts and part at the release), an
-//            f / v spans its low-band dip. Kokoro's durations come on a 25 ms grid and drift, so the
-//            boundaries between landmarks move with them.
+//            before the audio), an m / b / p between vowels spans its acoustic closure (the level
+//            dip between the half-level crossings: the lips seal when the dip starts and part at
+//            the release), an f / v spans its low-band dip, and an m / b / p after a consonant
+//            ("and Pam", "it back") ends at its release (the steepest rise of the 0.8-5 kHz band:
+//            the burst, or the end of the murmur). Kokoro's durations come on a 25 ms grid and
+//            drift, so the boundaries between landmarks move with them.
 //   amounts  each vowel's jaw follows its first formant (F1 rises as the jaw opens: open vowels
 //            ~2-3 times the opening of close ones), normalised for the speaker; spread follows F2;
 //            loud, long (stressed) vowels open more, quiet short ones (reduced vowels) less and stay
@@ -124,6 +126,64 @@ export function findDip(ac, arr, t0, t1, o = {}) {
   return { t0: d0, t1: d1, tMin: k * h, depth };
 }
 
+/** A closure's 0.8-5 kHz minimum must lie this much (dB) under the sound after it (its release). */
+export const RELEASE_RISE = 10;
+
+/**
+ * A closure segment [t0, t1] (m / b / p) in the 0.8-5 kHz band: its minimum (within 30 ms of the
+ * segment), where the band falls into it fastest (the lips meet: the vowel's upper formants go)
+ * and where it rises out of it fastest (they part: the burst of a b / p — the broadband level
+ * lags it at a p, whose burst and aspiration are quiet — or the end of an m's murmur, whose low
+ * band keeps the level up). The minimum must lie `minRight` dB under the sound after it and
+ * `minLeft` dB under the sound before it (within 120 ms); the fall / rise are looked for up to
+ * 90 ms before / after the segment, sub-frame (a parabola through the slope's peak). null when
+ * there is none, the track has no 0.8-5 kHz band or does not reach that far yet; `off` NaN when
+ * nothing rises after it (a closure before a pause), `on` NaN when nothing falls into it.
+ * `from` / `to` bound the fall / rise further (the vowels beside the closure must keep part of
+ * their length: in "probably" the schwa between the two b's is so short that the band only
+ * comes back after the second one).
+ * @param {AcousticTrack} ac @param {number} t0 @param {number} t1 @param {number} [minLeft]
+ * @param {number} [minRight] @param {number} [from] @param {number} [to]
+ * @returns {{ on: number, off: number, tMin: number }|null} times (s)
+ */
+export function bandClosure(ac, t0, t1, minLeft = RELEASE_RISE, minRight = RELEASE_RISE, from = -Infinity, to = Infinity) {
+  const arr = ac.mid;
+  if (!arr) return null;
+  const h = ac.hop, n = ac.n;
+  const a = trackFrame(ac, t0 - 0.03), b = trackFrame(ac, t1 + 0.03);
+  const end = trackFrame(ac, Math.min(t1 + 0.09, to)), begin = trackFrame(ac, Math.max(t0 - 0.09, from));
+  const flank = Math.round(0.12 / h);
+  const done = ac.done ?? n;
+  if (end + flank >= done && done < n) return null;
+  let k = -1, m = Infinity;
+  for (let i = a; i <= b; i++) if (arr[i] < m) { m = arr[i]; k = i; }
+  if (k < 2 || k >= n - 2) return null;
+  let left = -Infinity, right = -Infinity;
+  for (let i = Math.max(0, k - flank); i < k; i++) if (arr[i] > left) left = arr[i];
+  for (let i = k + 1; i <= Math.min(n - 1, k + flank); i++) if (arr[i] > right) right = arr[i];
+  if (!(right - m >= minRight) || !(left - m >= minLeft) || Math.max(left, right) < -60) return null;
+  const slope = (i) => arr[i + 1] - arr[i - 1];
+  // the steepest slope of sign `sg` over frames [i0, i1], refined to a fraction of a frame
+  const steepest = (i0, i1, sg) => {
+    let best = 0, r = -1;
+    for (let i = Math.max(1, i0); i <= Math.min(i1, n - 2); i++) {
+      const d = sg * slope(i);
+      if (d > best) { best = d; r = i; }
+    }
+    if (r < 0) return NaN;
+    let off = 0;
+    if (r > 1 && r < n - 2) {
+      const y0 = sg * slope(r - 1), y2 = sg * slope(r + 1);
+      const den = y0 - 2 * best + y2;
+      if (den < 0) off = clamp((0.5 * (y0 - y2)) / den, -0.5, 0.5);
+    }
+    return (r + off) * h;
+  };
+  const on = steepest(begin, k, -1), off = steepest(k, end, 1);
+  if (!Number.isFinite(on) && !Number.isFinite(off)) return null;
+  return { on, off, tMin: k * h };
+}
+
 /**
  * Where a phrase's sound starts: the first frame from `from` on that is within 22 dB of the
  * phrase's loudest frame in the next 0.4 s and stays there for 10 ms. NaN when not found.
@@ -141,13 +201,15 @@ export function acousticOnset(ac, from, to = from + 0.4) {
 
 /**
  * Landmarks of a timeline in its clip's audio, as anchors [timeline time, audio time]: phrase
- * onsets, the closure of each m / b / p and the low-band dip of each f / v.
+ * onsets, the closure of each m / b / p and the low-band dip of each f / v between vowels, and the
+ * release of an m / b / p after a consonant.
  * @param {VisemeSegment[]} tl @param {AcousticTrack} ac
- * @returns {{ anchors: Array<[number, number]>, exact: Set<number> }} anchors sorted, strictly
- *   increasing in both; exact: the closures / tucks whose two edges both became anchors
+ * @returns {{ anchors: Array<[number, number]>, exact: Set<number>, exactStart: Set<number>, exactEnd: Set<number> }}
+ *   anchors sorted, strictly increasing in both; exactStart / exactEnd: the closures / tucks whose
+ *   start / end became an anchor (the lips close / part right there); exact: both
  */
 export function landmarks(tl, ac) {
-  /** @type {Array<[number, number, number, number?]>} [old, new, weight, closure segment] */
+  /** @type {Array<[number, number, number, number?, number?]>} [old, new, weight, closure segment, edge 0 start 1 end] */
   const raw = [];
   for (let i = 0; i < tl.length; i++) {
     const s = tl[i];
@@ -158,21 +220,52 @@ export function landmarks(tl, ac) {
       continue;
     }
     const prev = tl[i - 1];
-    const phraseStart = !prev || (prev.viseme === 'sil' && prev.end - prev.start >= 0.1);
+    // (the clip's own leading rest counts however short it is: Kokoro often gives it 20-60 ms)
+    const phraseStart = !prev || (prev.viseme === 'sil' && (i === 1 || prev.end - prev.start >= 0.1));
+    const next = tl[i + 1];
     if (phraseStart) {
       const on = acousticOnset(ac, s.start - 0.08, s.start + 0.35);
       if (Number.isFinite(on)) {
         if (s.viseme === 'PP') {
-          // a b / p releases into the sound; an m hums first (low band strong), then releases into
-          // the vowel: where the level rises within 8 dB of the vowel's
+          // a b / p releases into the sound (a p with its burst, out of the silence); an m hums
+          // first (low band strong), then releases into the vowel: where the vowel's upper formants come in (the 0.8-5 kHz band's share of the
+          // level rises fastest; the murmur itself can be nearly as loud as the vowel), else (no
+          // such band) where the level rises within 8 dB of the vowel's
           let rel = on;
           const i0 = trackFrame(ac, on);
-          if (ac.lo[i0] > ac.e[i0] - 6) {
-            let ref = -Infinity;
-            for (let j = i0; j <= trackFrame(ac, on + 0.3); j++) if (ac.e[j] > ref) ref = ac.e[j];
-            for (let j = i0; j <= trackFrame(ac, on + 0.3); j++) if (ac.e[j] > ref - 8) { rel = j * ac.hop; break; }
+          // (a p's burst comes out of the silence well before the voice: its aspiration is too quiet
+          // to count as the phrase's sound, and the voiced l / r after it can look like a hum)
+          let burst = NaN;
+          for (let j = Math.max(2, trackFrame(ac, on - 0.12)); j <= trackFrame(ac, on - 0.02); j++) {
+            if (ac.e[j] - ac.e[j - 2] >= 15 && ac.e[j] > -60) { burst = (j - 1) * ac.hop; break; }
           }
-          raw.push([s.end, rel, 2]);
+          // (a hum: the voice comes in with little of the vowels' upper formants — 25 dB or more
+          // under the level for 30 ms; any voiced sound has a strong low band)
+          let hum = ac.lo[i0] > ac.e[i0] - 6;
+          if (ac.mid) {
+            let acc = 0, n = 0;
+            for (let j = trackFrame(ac, on + 0.01); j <= trackFrame(ac, on + 0.04); j++) { acc += ac.mid[j] - ac.e[j]; n++; }
+            hum = n > 0 && acc / n < -25;
+          }
+          if (Number.isFinite(burst)) rel = burst;
+          else if (hum) {
+            const i1 = trackFrame(ac, on + 0.3);
+            if (ac.mid) {
+              let best = 0;
+              const tilt = (j) => ac.mid[j] - ac.e[j];
+              // (within reach of the timeline's own release: not the next closure's)
+              const j1 = Math.min(i1, trackFrame(ac, s.end + MAX_SHIFT), ac.n - 2);
+              for (let j = Math.max(1, trackFrame(ac, on + 0.02)); j <= j1; j++) {
+                const d = tilt(j + 1) - tilt(j - 1);
+                if (d > best) { best = d; rel = j * ac.hop; }
+              }
+            } else {
+              let ref = -Infinity;
+              for (let j = i0; j <= i1; j++) if (ac.e[j] > ref) ref = ac.e[j];
+              for (let j = i0; j <= i1; j++) if (ac.e[j] > ref - 8) { rel = j * ac.hop; break; }
+            }
+          }
+          raw.push([s.end, rel, 2, i, 1]);
           raw.push([s.start, Math.min(rel - 0.06, on - 0.02), 1]);
         } else {
           raw.push([s.start, on - ONSET_PRE, 2]);
@@ -180,49 +273,88 @@ export function landmarks(tl, ac) {
       }
       continue;
     }
-    // (only between vowels: in a cluster — "should move", "move the" — the dip is shared with the
-    // neighbouring consonant and says nothing about where this one is)
-    const next = tl[i + 1];
-    if ((s.viseme === 'PP' || s.viseme === 'FF') && prev && next && VOCALIC.has(prev.viseme) && VOCALIC.has(next.viseme)) {
-      const d = findDip(ac, s.viseme === 'PP' ? ac.e : ac.lo, s.start, s.end);
-      if (!d) continue;
-      const dur = d.t1 - d.t0;
-      if (dur < 0.025 || dur > 0.25) continue;
-      raw.push([s.start, d.t0, 1.5, i]);
-      raw.push([s.end, d.t1, 1.5, i]);
+    const vPrev = !!prev && VOCALIC.has(prev.viseme), vNext = !!next && VOCALIC.has(next.viseme);
+    if (s.viseme === 'PP' && (vPrev || vNext)) {
+      // m / b / p: where the vowels' upper formants go and come back (0.8-5 kHz band, steepest
+      // fall / rise). Between vowels both edges; after a consonant ("and Pam", "it back") only the
+      // release — the silence is shared with that consonant and says nothing about where this
+      // closure starts; before one ("stopped", "bumpy") only the closing.
+      // (a closure must clearly rise into the vowel after it, 6 dB between vowels — an m before a
+      // rounded vowel, "should move", brings back little of the band — 10 after a consonant; one
+      // before a consonant must clearly fall)
+      const c = bandClosure(ac, s.start, s.end, vNext ? 6 : RELEASE_RISE, !vNext ? 0 : vPrev ? 6 : RELEASE_RISE,
+        prev.start + 0.4 * (prev.end - prev.start), next ? next.end - 0.4 * (next.end - next.start) : Infinity);
+      const span = c ? c.off - c.on : NaN;
+      if (vPrev && vNext) {
+        if (span >= 0.025 && span <= 0.25) {
+          raw.push([s.start, c.on, 1.5, i, 0]);
+          raw.push([s.end, c.off, 1.5, i, 1]);
+        } else {
+          // no band landmarks (a quiet or a noisy closure): the level's own dip
+          const d = findDip(ac, ac.e, s.start, s.end);
+          if (d && d.t1 - d.t0 >= 0.025 && d.t1 - d.t0 <= 0.25) {
+            raw.push([s.start, d.t0, 1.5, i, 0]);
+            raw.push([s.end, d.t1, 1.5, i, 1]);
+          }
+        }
+      } else if (vNext) {
+        if (c && Number.isFinite(c.off) && Math.abs(c.off - s.end) <= MAX_SHIFT) {
+          raw.push([s.end, c.off, 1.5, i, 1]);
+          // (a closure lasts 50 ms at least: if the timeline starts it later, it starts then)
+          if (s.start > c.off - 0.05) raw.push([s.start, c.off - 0.06, 0.8]);
+        }
+      } else if (c && Number.isFinite(c.on) && Math.abs(c.on - s.start) <= MAX_SHIFT && c.on < s.end) {
+        // before a consonant or a pause ("stopped", "Bob,"): only the closing
+        raw.push([s.start, c.on, 1.5, i, 0]);
+      }
+    } else if (s.viseme === 'FF' && vPrev && vNext) {
+      // f / v between vowels: the low band's dip (the voicing / the vowel goes, the frication is high)
+      const d = findDip(ac, ac.lo, s.start, s.end);
+      if (d && d.t1 - d.t0 >= 0.025 && d.t1 - d.t0 <= 0.25) {
+        raw.push([s.start, d.t0, 1.5, i, 0]);
+        raw.push([s.end, d.t1, 1.5, i, 1]);
+      }
     }
   }
   const anchors = monotone(raw);
   const kept = new Set(anchors.map((a) => a[0]));
-  const exact = new Set();
-  for (const r of raw) if (r[3] !== undefined && kept.has(tl[r[3]].start) && kept.has(tl[r[3]].end)) exact.add(r[3]);
-  return { anchors, exact };
+  const exactStart = new Set(), exactEnd = new Set();
+  for (const r of raw) {
+    if (r[3] === undefined) continue;
+    const seg = tl[r[3]];
+    if (r[4] === 0 && kept.has(seg.start)) exactStart.add(r[3]);
+    if (r[4] === 1 && kept.has(seg.end)) exactEnd.add(r[3]);
+  }
+  const exact = new Set([...exactStart].filter((k) => exactEnd.has(k)));
+  return { anchors, exact, exactStart, exactEnd };
 }
 
 /**
  * Anchors that keep the warp monotonic: sorted by timeline time; an anchor that would make audio
  * time go backwards (or squeeze a span below 40 % / stretch it beyond 250 %) is dropped, the
- * lighter of two conflicting ones first.
- * @param {Array<[number, number, number, number?]>} raw @returns {Array<[number, number]>}
+ * lighter of two conflicting ones first. The span between the two edges of one closure may
+ * stretch or shrink further (20 %-600 %): Kokoro gives an m 25 ms whose acoustic closure lasts 70.
+ * @param {Array<[number, number, number, number?, number?]>} raw @returns {Array<[number, number]>}
  */
 export function monotone(raw) {
   const byWeight = raw.map((r, i) => ({ r, i })).sort((x, y) => y.r[2] - x.r[2] || x.i - y.i);
-  /** @type {Array<[number, number]>} */
+  /** @type {Array<[number, number, number|undefined]>} */
   let kept = [];
   for (const { r } of byWeight) {
     if (Math.abs(r[1] - r[0]) > MAX_SHIFT + 0.1) continue;
-    const cand = [...kept, [r[0], r[1]]].sort((x, y) => x[0] - y[0]);
+    const cand = [...kept, /** @type {[number, number, number|undefined]} */ ([r[0], r[1], r[3]])].sort((x, y) => x[0] - y[0]);
     let ok = true;
     for (let k = 1; k < cand.length && ok; k++) {
       const dOld = cand[k][0] - cand[k - 1][0], dNew = cand[k][1] - cand[k - 1][1];
       if (dOld < 1e-6) { ok = false; break; }
       const slope = dNew / dOld;
-      if (!(slope >= 0.4 && slope <= 2.5) && dOld > 0.02) ok = false;
+      const own = cand[k][2] !== undefined && cand[k][2] === cand[k - 1][2];
+      if (!(own ? slope >= 0.2 && slope <= 6 : slope >= 0.4 && slope <= 2.5) && dOld > 0.02) ok = false;
       if (dNew < 0.005) ok = false;
     }
-    if (ok) kept = /** @type {Array<[number, number]>} */ (cand);
+    if (ok) kept = cand;
   }
-  return kept;
+  return kept.map((a) => /** @type {[number, number]} */ ([a[0], a[1]]));
 }
 
 /**
@@ -246,12 +378,13 @@ export function warpTime(anchors, t) {
 
 /**
  * The timeline warped onto the audio's landmarks (a new array; contiguous like the input, every
- * segment at least 10 ms; a closure / tuck matched to its acoustic closure is marked `exact`).
+ * segment at least 10 ms). A closure / tuck whose start / end is an acoustic landmark is marked
+ * `exactStart` / `exactEnd` (the lips close / part right there), `exact` when both are.
  * @param {VisemeSegment[]} tl @param {AcousticTrack} ac
- * @returns {{ tl: Array<VisemeSegment & { exact?: boolean }>, anchors: Array<[number, number]> }}
+ * @returns {{ tl: Array<VisemeSegment & { exact?: boolean, exactStart?: boolean, exactEnd?: boolean }>, anchors: Array<[number, number]> }}
  */
 export function alignTimeline(tl, ac) {
-  const { anchors, exact } = landmarks(tl, ac);
+  const { anchors, exact, exactStart, exactEnd } = landmarks(tl, ac);
   if (!anchors.length) return { tl: tl.map((s) => ({ ...s })), anchors };
   const out = [];
   let prevEnd = -Infinity;
@@ -260,8 +393,11 @@ export function alignTimeline(tl, ac) {
     let b = warpTime(anchors, s.end);
     if (Number.isFinite(prevEnd)) a = prevEnd;
     if (b < a + 0.01) b = a + 0.01;
-    // (exact: its edges are the acoustic closure's: the lips may close and part right there)
-    out.push(exact.has(i) ? { ...s, start: a, end: b, exact: true } : { ...s, start: a, end: b });
+    const o = { ...s, start: a, end: b };
+    if (exactStart.has(i)) o.exactStart = true;
+    if (exactEnd.has(i)) o.exactEnd = true;
+    if (exact.has(i)) o.exact = true;
+    out.push(o);
     prevEnd = b;
   });
   return { tl: out, anchors };
@@ -302,9 +438,12 @@ export function vowelAmounts(viseme, va, n, clipNorm, T) {
   const durRel = va.dur / Math.max(0.03, clipNorm.dur);
   // prominence: a stressed syllable is louder and longer; a reduced one quieter and shorter
   const stress = clamp(0.92 + 0.03 * eRel + 0.14 * (durRel - 1), 0.62, 1.18);
-  const q = va.f1 > 0 ? clamp((va.q - 0.2) / 0.4, 0, 1) : 0;
+  let q = va.f1 > 0 ? clamp((va.q - 0.2) / 0.4, 0, 1) : 0;
   // F1 -> openness: close vowels ~0.07, open ones ~0.9 of the jaw's range
   const x = va.f1 > 0 ? clamp((va.f1 - n.f1lo) / (n.f1hi - n.f1lo), -0.1, 1.15) : NaN;
+  // (an open vowel whose "F1" reads as low as the speaker's closest ones is a nasal pole the
+  // tracker took for it — the æ of "Pam" before its m — not a closed jaw: it gets no say)
+  if (viseme === 'aa' && Number.isFinite(x)) q *= clamp((x - 0.05) / 0.2, 0, 1);
   // (the category bounds what the sound may say: a U is a close vowel whatever the tracker claims
   // — the weak F1 of a back rounded vowel lets F2 pass for it — and an open vowel is open)
   const [jlo, jhi] = JAW_RANGE[viseme] || [0.03, 0.95];

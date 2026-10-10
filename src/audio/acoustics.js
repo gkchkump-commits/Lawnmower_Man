@@ -4,6 +4,9 @@
 //   e         loudness (dBFS): syllable nuclei, closures, pauses
 //   lo / hi   loudness below 400 Hz / above 3 kHz (dBFS): a nasal murmur
 //             (m n) keeps its low band while the rest falls away; frication (s f sh) lives up high
+//   mid       loudness of 0.8-5 kHz (dBFS): the vowel's upper formants. It falls away in any closure,
+//             a nasal murmur's too, and its steepest rise is where the lips part (the burst of a
+//             b / p, the end of an m's murmur)
 //   f1 f2 f3  formants (Hz, 0 = none) from LPC: F1 rises as the jaw opens, F2 rises with spread /
 //             front vowels and falls with rounding, F3 falls with rounding and r
 //   voiced    periodicity 0..1 (normalised autocorrelation at the pitch period)
@@ -147,9 +150,11 @@ export class AcousticAnalysis {
     // the low band (a nasal murmur, the voicing bar of a voiced closure) and the high band (frication)
     this._lo = filter(samples, [biquad('lp', 400, sampleRate), biquad('lp', 400, sampleRate)]);
     this._hi = filter(samples, [biquad('hp', 3000, sampleRate), biquad('hp', 3000, sampleRate)]);
+    this._mid = filter(samples, [biquad('hp', 800, sampleRate), biquad('hp', 800, sampleRate), biquad('lp', 5000, sampleRate), biquad('lp', 5000, sampleRate)]);
     this.e = new Float32Array(n).fill(FLOOR_DB);
     this.lo = new Float32Array(n).fill(FLOOR_DB);
     this.hi = new Float32Array(n).fill(FLOOR_DB);
+    this.mid = new Float32Array(n).fill(FLOOR_DB);
     this.f1 = new Float32Array(n);
     this.f2 = new Float32Array(n);
     this.f3 = new Float32Array(n);
@@ -203,6 +208,7 @@ export class AcousticAnalysis {
       this.e[i] = rmsDb(this._x, a0, b0);
       this.lo[i] = rmsDb(this._lo, a0, b0);
       this.hi[i] = rmsDb(this._hi, a0, b0);
+      this.mid[i] = rmsDb(this._mid, a0, b0);
       this.voiced[i] = this._voicing(i);
       if (this.e[i] < FORMANT_GATE_DB) { this._warm = false; continue; }
       const s = Math.round(i * AC_HOP * fs - N / 2);
@@ -299,16 +305,16 @@ export class AcousticAnalysis {
     const c = (a) => (copy ? a.slice() : a);
     return {
       hop: AC_HOP, n: this.n, done: this.done, duration: this.duration,
-      e: c(this.e), lo: c(this.lo), hi: c(this.hi), f1: c(this.f1), f2: c(this.f2), f3: c(this.f3), voiced: c(this.voiced),
+      e: c(this.e), lo: c(this.lo), hi: c(this.hi), mid: c(this.mid), f1: c(this.f1), f2: c(this.f2), f3: c(this.f3), voiced: c(this.voiced),
     };
   }
 }
 
 /**
  * @typedef {{ hop: number, n: number, done: number, duration: number, e: Float32Array, lo: Float32Array,
- *   hi: Float32Array, f1: Float32Array, f2: Float32Array, f3: Float32Array, voiced: Float32Array }} AcousticTrack
- *   e / lo / hi in dBFS (floored at -80), f1-f3 in Hz (0 = none), voiced 0..1; frames >= done are
- *   not analysed yet
+ *   hi: Float32Array, mid?: Float32Array, f1: Float32Array, f2: Float32Array, f3: Float32Array, voiced: Float32Array }} AcousticTrack
+ *   e / lo / hi / mid in dBFS (floored at -80), f1-f3 in Hz (0 = none), voiced 0..1; frames >= done
+ *   are not analysed yet (mid: absent in tracks made without it, e.g. synthetic test tracks)
  */
 
 /** The whole analysis at once (worker, tests). @param {Float32Array} samples @param {number} sampleRate */

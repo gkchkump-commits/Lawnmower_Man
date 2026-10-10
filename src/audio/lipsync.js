@@ -17,7 +17,7 @@
 // The mapping functions are pure and unit-tested; LipSync wires them to the player.
 
 import {
-  CHANNELS, LEAD_IN, REST, TAIL, VISEME_SHAPES, closureCentreIn, planSpeech, sampleSegments, segmentsFromVisemes,
+  CHANNELS, LEAD_IN, REST, TAIL, VISEME_SHAPES, closureCentreIn, nextLipClosure, planSpeech, sampleSegments, segmentsFromVisemes,
   toShape, visemeTarget,
 } from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
@@ -91,7 +91,7 @@ export const VISEME_LEAD = 0.058;
  * a vowel's opening peaks with its sound. Calibrated on 36 real Kokoro clips
  * (tools/visual/lipsync-align.mjs and docs/VOICE.md).
  */
-export const FUSED_LEAD = Object.freeze({ lips: 0.04, jaw: 0.06 });
+export const FUSED_LEAD = Object.freeze({ lips: 0.026, jaw: 0.06 });
 /** How far a closure's / tuck's lip gesture reaches beyond its (acoustic) segment, re the timeline's. */
 export const FUSED_LIP_EDGE = 0.6;
 /**
@@ -100,12 +100,14 @@ export const FUSED_LIP_EDGE = 0.6;
  * are the larger of their value now and LIP_CLOSE_EARLY ahead, so the approach starts sooner and
  * the contact lands where it did with a fast spring, while the release keeps its time.
  */
-export const LIP_CLOSE_EARLY = 0.028;
+export const LIP_CLOSE_EARLY = 0.016;
 
 /**
  * Sample the segments at t with the lips' closing anticipated (LIP_CLOSE_EARLY): press and tuck
- * are the larger of t's and t + early's. A closure whose centre lies between prevT and t (or
- * between their early counterparts) is sampled at its centre, never skipped.
+ * are the larger of t's and t + early's, `early` scaled by the coming closure's own share
+ * (earlyK: a closure after a short vowel takes less of it, so the lips part for the vowel). A
+ * closure whose centre lies between prevT and t (or between their early counterparts) is sampled
+ * at its centre, never skipped.
  * @param {import('./articulation.js').Segment[]} segs @param {number} t @param {number} [prevT]
  * @param {number} [early] @returns {number[]} CHANNELS order
  */
@@ -118,12 +120,51 @@ export function sampleLips(segs, t, prevT, early = LIP_CLOSE_EARLY) {
     return sampleSegments(segs, x);
   };
   const v = at(t, prevT);
+  if (early > 0) early *= nextLipClosure(segs, t)?.earlyK ?? 1;
   if (!(early > 0)) return v;
   const e = at(t + early, Number.isFinite(prevT) ? /** @type {number} */ (prevT) + early : prevT);
   v[3] = Math.max(v[3], e[3]);
   v[4] = Math.max(v[4], e[4]);
   return v;
 }
+
+/**
+ * The lips' timeline of a clip aligned with its sound (fusion.js). A closure / tuck edge that is
+ * an acoustic landmark (exactStart / exactEnd) is sampled at the lips' fused lead
+ * (FUSED_LEAD.lips). One that is not ("and Pam": the closure's start after the n; an f before a
+ * consonant) keeps the timeline's timing as warped between the landmarks around it; where the
+ * warp has not moved it, Kokoro's own timing is late by about as much as the plain lead
+ * (VISEME_LEAD) makes up for, so it moves earlier by up to the difference: by what the warp has
+ * not already moved it. The segment beside it gives way. Only the press / tuck are sampled from it.
+ * @param {Array<VisemeSegment & { exact?: boolean, exactStart?: boolean, exactEnd?: boolean }>} tl
+ *   the aligned timeline @param {VisemeSegment[]} [orig] the timeline before alignment (same
+ *   segments; without it every free edge moves the whole difference) @param {number} [shift]
+ * @returns {VisemeSegment[]}
+ */
+export function lipTimeline(tl, orig, shift = VISEME_LEAD - FUSED_LEAD.lips) {
+  const out = tl.map((s) => ({ ...s }));
+  const by = (t, o) => (o && Number.isFinite(o) ? clamp(shift + (t - o), 0, shift) : shift);
+  for (let i = 0; i < out.length; i++) {
+    const s = out[i];
+    if (s.viseme !== 'PP' && s.viseme !== 'FF') continue;
+    const o = orig && orig.length === tl.length ? orig[i] : null;
+    if (!s.exact && !s.exactStart) {
+      const prev = out[i - 1];
+      const a = Math.max(prev ? prev.start + 0.01 : -Infinity, s.start - by(tl[i].start, o?.start));
+      if (prev) prev.end = a;
+      s.start = a;
+    }
+    if (!s.exact && !s.exactEnd) {
+      const b = Math.max(s.start + 0.015, s.end - by(tl[i].end, o?.end));
+      if (out[i + 1]) out[i + 1].start = b;
+      s.end = b;
+    }
+  }
+  return out;
+}
+
+/** How long (s) a clip's segments crossfade when they are rebuilt while it plays (LipSync._refuse). */
+export const XFADE = 0.08;
 
 /** The user's lip-sync offset (settings voice.lipSyncOffsetMs, s): + moves the mouth later. */
 export const OFFSET_MAX = 0.2;
@@ -260,12 +301,14 @@ function hashText(s) {
  * Mouth shape at playback time t from a viseme timeline, with coarticulation.
  * @param {VisemeSegment[]} tl
  * @param {number} t seconds into the clip
- * @param {{ lead?: number, leadLips?: number, prevT?: number, closeEarly?: number, segs?: import('./articulation.js').Segment[] }} [opts]
+ * @param {{ lead?: number, leadLips?: number, prevT?: number, closeEarly?: number, segs?: import('./articulation.js').Segment[],
+ *   segsLips?: import('./articulation.js').Segment[] }} [opts]
  *   lead: the mouth leads the sound (default VISEME_LEAD); leadLips: the lips' own lead (press,
  *   tuck: default the same); prevT: the previous sample time — a closure whose centre lies in
  *   between is sampled at its centre (never skipped); segs: the timeline's segments when the
- *   caller built them itself (measured prominence, variation); closeEarly: how much sooner the
- *   lips start closing than they part (default LIP_CLOSE_EARLY; 0: not)
+ *   caller built them itself (measured prominence, variation); segsLips: the segments the press
+ *   and tuck are sampled from (default segs; lipTimeline); closeEarly: how much sooner the lips
+ *   start closing than they part (default LIP_CLOSE_EARLY; 0: not)
  * @returns {MouthShape}
  */
 export function mouthFromVisemes(tl, t, opts = {}) {
@@ -274,8 +317,8 @@ export function mouthFromVisemes(tl, t, opts = {}) {
   const leadLips = opts.leadLips ?? lead;
   const segs = opts.segs || segmentsFor(tl);
   const pt = Number.isFinite(opts.prevT) ? /** @type {number} */ (opts.prevT) + leadLips : undefined;
-  const lips = toShape(sampleLips(segs, t + leadLips, pt, opts.closeEarly));
-  if (leadLips === lead) return lips;
+  const lips = toShape(sampleLips(opts.segsLips || segs, t + leadLips, pt, opts.closeEarly));
+  if (leadLips === lead && !opts.segsLips) return lips;
   // the jaw, spread, rounding, teeth and tongue at their own lead; the lips' closures at theirs
   const m = toShape(sampleSegments(segs, t + lead));
   m.press = lips.press;
@@ -829,9 +872,14 @@ export class LipSync {
     const tr = st.job?.track;
     if (!tr || tr.done === st.acDone) return;
     st.acDone = tr.done;
+    // (a rebuild while the clip plays — its analysis arriving late, or the rest of it after the
+    // first 0.8 s — crossfades from the old segments, XFADE: no jump in the mouth)
+    if (st.playing) st.xf = { segs: st.segs, segsLips: st.segsLips, fused: !!st.fused, t0: NaN };
     const f = fuseTimeline(st.tl, tr, this._formants, st.ref(), visemeTarget);
     st.fused = f;
-    st.segs = segmentsFromVisemes(f.tl, { amounts: (_s, i) => f.amounts[i], vary: st.vary, lipEdge: FUSED_LIP_EDGE });
+    const o = { amounts: (_s, i) => f.amounts[i], vary: st.vary, lipEdge: FUSED_LIP_EDGE };
+    st.segs = segmentsFromVisemes(f.tl, o);
+    st.segsLips = segmentsFromVisemes(lipTimeline(f.tl, st.tl), o);
     if (st.job.final && !st.formantsLearned) {
       st.formantsLearned = true;
       this._formants.add(f.vowels);
@@ -871,13 +919,24 @@ export class LipSync {
           st.learned = true;
           this._learnPitch(st.a);
         }
-        const m = st.fused
-          ? mouthFromVisemes(st.tl, time, { prevT, segs: st.segs, lead: FUSED_LEAD.jaw, leadLips: FUSED_LEAD.lips })
-          : mouthFromVisemes(st.tl, time, { prevT, segs: st.segs });
         // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it;
         // a smooth max, so the jaw target has no corner where the two taps cross)
         const e = smoothMax(st.a.energyAt(tt - 0.005), st.a.energyAt(tt + 0.015));
-        m.jaw = clamp01(m.jaw * (st.fused ? energyJawFused(e) : energyJaw(e)));
+        const shape = (o) => {
+          const mm = o.fused
+            ? mouthFromVisemes(st.tl, time, { prevT, segs: o.segs, segsLips: o.segsLips, lead: FUSED_LEAD.jaw, leadLips: FUSED_LEAD.lips })
+            : mouthFromVisemes(st.tl, time, { prevT, segs: o.segs });
+          mm.jaw = clamp01(mm.jaw * (o.fused ? energyJawFused(e) : energyJaw(e)));
+          return mm;
+        };
+        let m = shape({ segs: st.segs, segsLips: st.segsLips, fused: !!st.fused });
+        if (st.xf) {
+          if (!Number.isFinite(st.xf.t0)) st.xf.t0 = time;
+          const x = (time - st.xf.t0) / XFADE;
+          if (x >= 1 || x < 0) st.xf = null;
+          else m = mixShapes(shape(st.xf), m, x * x * (3 - 2 * x));
+        }
+        st.playing = true;
         target = { ...m, level: clamp01((st.a.energyAt(tt) + 38) / 30) };
         source = 'visemes';
         cues = st.prosody.take(tt);

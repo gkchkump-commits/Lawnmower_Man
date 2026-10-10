@@ -37,7 +37,7 @@ self.onmessage = (ev) => {
     if (!a.complete) self.postMessage({ id: m.id, track: a.toTrack(true), final: false });
     a.advance();
     const track = a.toTrack();
-    self.postMessage({ id: m.id, track, final: true }, [track.e.buffer, track.lo.buffer, track.hi.buffer, track.f1.buffer, track.f2.buffer, track.f3.buffer, track.voiced.buffer]);
+    self.postMessage({ id: m.id, track, final: true }, [track.e.buffer, track.lo.buffer, track.hi.buffer, track.mid.buffer, track.f1.buffer, track.f2.buffer, track.f3.buffer, track.voiced.buffer]);
   } catch (err) {
     self.postMessage({ id: m.id, error: String(err?.message || err), final: true });
   }

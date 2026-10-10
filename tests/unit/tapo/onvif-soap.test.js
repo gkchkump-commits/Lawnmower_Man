@@ -133,6 +133,7 @@ describe('faults', () => {
     expect(isBenignPullError(new OnvifError('reset', 'x'))).toBe(true);
     expect(isBenignPullError(new OnvifError('timeout', 'x'))).toBe(true);
     expect(isBenignPullError(transportError(Object.assign(new Error('Parse Error: Data after `Connection: close`'), { code: 'HPE_CLOSED_CONNECTION' })))).toBe(true);
+    expect(isBenignPullError(catchErr(() => parseSoapResponse({ status: 200, body: '' })))).toBe(true);
     expect(isBenignPullError(new OnvifError('auth', 'x'))).toBe(false);
     expect(isBenignPullError(new OnvifError('fault', 'x'))).toBe(false);
   });

@@ -204,6 +204,7 @@ export function isBenignPullError(err) {
   if (!e) return false;
   const msg = String(e.message || '') + ' ' + String(e.cause?.message || '');
   if (e.kind === 'reset' || e.kind === 'timeout') return true;
+  if (e.kind === 'malformed' && e.code === 'EMPTY' && e.status === 200) return true; // an empty 200: nothing to report
   if (/ECONNRESET|socket hang up|Data after .?Connection: close.?/i.test(msg)) return true;
   if (e.code === 'HPE_CLOSED_CONNECTION' || e.cause?.code === 'HPE_CLOSED_CONNECTION') return true;
   return false;
@@ -261,7 +262,7 @@ export function parseSoapResponse(res) {
   }
   if (res.status === 401) throw new OnvifError('auth', 'The camera refused the sign-in.', { status: 401 });
   if (res.status < 200 || res.status >= 300) throw new OnvifError('http', `The camera answered HTTP ${res.status}.`, { status: res.status });
-  if (!doc) throw new OnvifError('malformed', 'The camera sent an empty answer.', { status: res.status });
+  if (!doc) throw new OnvifError('malformed', 'The camera sent an empty answer.', { status: res.status, code: 'EMPTY' });
   if (!body) throw new OnvifError('malformed', 'The camera sent an answer that is not SOAP.', { status: res.status });
   const first = body.children[0];
   if (!first) throw new OnvifError('malformed', 'The camera sent an empty SOAP body.', { status: res.status });

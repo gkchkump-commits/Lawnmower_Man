@@ -183,7 +183,9 @@ describe('calibration without GetStatus', () => {
       const settings = { ...calibrated(), invertPan: false, invertTilt: false, viewUnitsX: 0.5, viewUnitsY: 1.4, minStep: 0.05 };
       const ptz = new PtzController({ client, getSettings: () => settings, log: () => {} });
       await ptz.probe();
+      expect(ptz.idleMs).toBe(Infinity); // no move since the connection
       const r = await ptz.rawMove(0.2, 0);
+      expect(ptz.idleMs).toBeLessThan(1000); // (calibration waits for a fresh move's picture)
       expect(r.measured).toBe(true);
       expect(r.moved).toBe(true); // the reported position changed: the picture will move too
       expect(r.travel).toEqual({ x: 0.2, y: 0 }); // …by this much (the calibration's view units)

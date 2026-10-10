@@ -263,6 +263,7 @@ function laggingCamera(lagMs, o = {}) {
   const TRUTH = { viewUnitsX: 0.8, viewUnitsY: 1.2 };
   const FRAME = 1000 / 15;
   const yMax = o.yMax ?? 1;
+  const xMax = o.xMax ?? 1;
   let T = 0;
   /** motor segments: from t0 to t1 the lens goes from → to */
   const segs = [{ t0: -1e9, t1: -1e9, from: { x: o.x0 ?? 0, y: o.y0 ?? 0 }, to: { x: o.x0 ?? 0, y: o.y0 ?? 0 } }];
@@ -296,7 +297,7 @@ function laggingCamera(lagMs, o = {}) {
         const p0 = lens(T);
         const k = o.runaway ?? 1;
         const to = {
-          x: Math.max(-1, Math.min(1, p0.x + (Math.abs(x) >= 0.05 ? x * k : 0))),
+          x: Math.max(-1, Math.min(xMax, p0.x + (Math.abs(x) >= 0.05 ? x * k : 0))),
           y: Math.max(-1, Math.min(yMax, p0.y + (Math.abs(y) >= 0.05 ? y * k : 0))),
         };
         const dur = Math.max(Math.abs(to.x - p0.x) / 0.35, Math.abs(to.y - p0.y) / 0.25) * 1000;
@@ -467,6 +468,17 @@ describe('CalibrationWizard: end stops and moves that do not travel as commanded
     expect(Math.abs(st.result.viewUnitsY / 1.2 - 1)).toBeLessThan(0.05);
     expect(cam.log.some((l) => /y: the camera turned only \+0\.05 of \+0\.2 \(an end stop\); measuring the other way/.test(l))).toBe(true);
   });
+
+  for (const lag of [0, 1500, 3000, 5000, 8000]) {
+    it(`an end stop it did not expect on the very first move, with a picture ${lag} ms behind: never wrong`, async () => {
+      // (a pan range smaller than the generic ±1: the first +0.2 turns only 0.05; its undo must
+      // reach the picture before the next reference, though the lag is not known yet)
+      const cam = laggingCamera(lag, { x0: 0.25, xMax: 0.3 });
+      const st = await cam.run();
+      expectNeverWrong(st, cam, cam.log.join('\n'));
+      if (lag <= 3000) expect(Math.abs(st.result.viewUnitsX / 0.8 - 1), cam.log.join('\n')).toBeLessThan(0.05);
+    });
+  }
 
   it('a move cut short at the stop (half the command): the view units come from the travel the camera reported', async () => {
     const cam = laggingCamera(0, { y0: 0.1, yMax: 0.2 });
@@ -864,6 +876,29 @@ describe('CalibrationWizard', () => {
     const r = rig({ why: 'The live picture is needed for calibration. Wait until the camera is online.' });
     expect(r.wiz.start()).toMatchObject({ step: 'failed', error: /live picture/ });
     expect(r.moves).toEqual([]);
+  });
+});
+
+describe('CalibrationWizard: the start', () => {
+  it('a move just before the start (the user\'s): its picture is waited for before the first reference', async () => {
+    const r = rig({ ...C211 });
+    r.wiz._o.ptz.idleMs = () => 500;
+    let t0 = null;
+    const clock = r.wiz._clock;
+    r.wiz._clock = () => {
+      const t = clock();
+      if (t0 === null) t0 = t;
+      return t;
+    };
+    r.wiz.start();
+    expect((await r.finished()).step).toBe('done');
+    expect(r.refs[0].after - t0).toBeGreaterThanOrEqual(2500);
+    expect(r.log.some((l) => /the camera moved 500 ms ago; waiting for its picture/.test(l))).toBe(true);
+    const still = rig({ ...C211 });
+    still.wiz._o.ptz.idleMs = () => 60_000;
+    still.wiz.start();
+    await still.finished();
+    expect(still.log.some((l) => /waiting for its picture/.test(l))).toBe(false);
   });
 });
 

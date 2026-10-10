@@ -207,6 +207,7 @@ export class TapoService extends EventEmitter {
         rawMove: (x, y) => this._ptzOrThrow().rawMove(x, y),
         stopAll: (r) => this.ptzCtl?.stopAll(r) || Promise.resolve(),
         position: () => (this.ptzCtl ? this.ptzCtl.readPosition() : Promise.resolve(null)),
+        idleMs: () => (this.ptzCtl ? this.ptzCtl.idleMs : Infinity),
       },
       vision: { ref: (r) => this._shiftRef(r.after, r.signal), measure: (m) => this._shiftMeasure(m.timeoutMs, !!m.expectMove, m.after, m.signal) },
       clock: () => this._mono(),

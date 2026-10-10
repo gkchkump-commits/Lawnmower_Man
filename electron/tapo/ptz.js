@@ -221,6 +221,8 @@ export class PtzController extends EventEmitter {
     this._moveSeq = 0;
     /** how the last move ended: MoveStatus IDLE or a Stop @type {{ seq: number, by: 'idle'|'stop' }|null} */
     this._lastEnd = null;
+    /** when the last move ended (the `now` clock; null: none since the connection) @type {number|null} */
+    this._lastEndAt = null;
     /** press-and-hold @type {{ dir: Dir, lastBeat: number, resend: any, beat: any, mode: 'continuous'|'relative' }|null} */
     this._hold = null;
     /** the "still MOVING 600 ms after Stop?" check @type {{ timer: any, resolve: () => void, done: Promise<void> }|null} */
@@ -583,6 +585,12 @@ export class PtzController extends EventEmitter {
     return { settledMs: this._now() - t0, measured, ...(travel ? { moved, travel } : {}) };
   }
 
+  /** How long the camera has been still (ms; Infinity: no move since the connection, 0 while moving or held). */
+  get idleMs() {
+    if (this.moving || this._hold) return 0;
+    return this._lastEndAt === null ? Infinity : Math.max(0, this._now() - this._lastEndAt);
+  }
+
   /**
    * The camera's position, read fresh with GetStatus (null without it, during suspected privacy
    * mode, or when the read fails). Never moves it. Calibration puts the camera back there.
@@ -677,6 +685,7 @@ export class PtzController extends EventEmitter {
   _endMove(why, by = 'stop') {
     this._cancelWatchdog();
     this._lastEnd = { seq: this._moveSeq, by };
+    this._lastEndAt = this._now();
     this.settleUntil = this._now() + SETTLE_MS;
     if (this.moving) {
       this.moving = false;

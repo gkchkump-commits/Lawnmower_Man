@@ -83,6 +83,9 @@ export const SHORT_TRAVEL = 0.5;
 export const END_ROOM = 0.45;
 /** Waited for before each reference (and longer when the picture is known to lag more). */
 export const REF_DELAY_MS = 1000;
+/** The camera still for this long before the first reference (a move just before the start, by
+ * the user, may still be on its way to the picture: a real camera's video lags by 1–2 s). */
+export const START_IDLE_MS = 3000;
 export const MEASURE_MS = 6000;
 /** The worker's longest measurement (pipeline.js MAX_SHIFT_TIMEOUT_MS). */
 export const MAX_MEASURE_MS = 15_000;
@@ -136,10 +139,11 @@ class Cancelled extends Error {}
 /**
  * @typedef {object} CalibrationOptions
  * @property {{ rawMove: (x: number, y: number) => Promise<MoveResult>, stopAll: (reason: string) => Promise<void>,
- *   position?: () => Promise<{ x: number, y: number }|null> }} ptz
+ *   position?: () => Promise<{ x: number, y: number }|null>, idleMs?: () => number }} ptz
  *   `measured: false`: the move ended with the app's timed Stop (no GetStatus), so `settledMs` is
  *   the app's own estimate, not the camera's travel time; `travel`: the position change the camera
- *   reported; `position`: a fresh GetStatus position (null when it cannot tell)
+ *   reported; `position`: a fresh GetStatus position (null when it cannot tell); `idleMs`: how
+ *   long the camera has been still
  * @property {{ ref: (o: { after: number, signal?: AbortSignal }) => Promise<RefAnswer>,
  *   measure: (o: { timeoutMs: number, expectMove?: boolean, after: number, signal?: AbortSignal }) => Promise<Shift> }} vision
  *   `after`: when the camera's last move ended (`clock`): only pictures that arrived later count.
@@ -558,6 +562,14 @@ export class CalibrationWizard extends EventEmitter {
         continue;
       }
       if (mv.travel && Math.abs(turned) < SHORT_TRAVEL * size) {
+        if (this._lagMs === null) {
+          // how far the picture runs behind is not known yet: this short turn (and its undo) must
+          // reach the picture before the next reference, or that reference shows it late, and the
+          // next measurement takes it for its own move. Wait for the picture to show it (which
+          // also tells the lag: it was current before this turn); if it does not, it runs behind.
+          const seen = await this._measure(run, axis, ref, mv, `${axis} ${sig(amount)} (cut short)`);
+          if (!seen.current || seen.m.moved !== true || seen.m.settled !== true) this._distrust = ASK_NOTES.lagging;
+        }
         await this._undo(run, mv);
         return { blocked: `the camera turned only ${sig(turned)} of ${sig(amount)} (an end stop)` };
       }
@@ -675,6 +687,13 @@ export class CalibrationWizard extends EventEmitter {
       this._start = await this._race(run, this._position());
       this._check(run);
       if (this._start) this._log('info', `[tapo] calibration: the camera reports ${sig(this._start.x)}, ${sig(this._start.y)}; it goes back there at the end`);
+      // a move just before the start (the user's) may still be on its way to the picture
+      const idle = this._o.ptz.idleMs ? Number(this._o.ptz.idleMs()) : Infinity;
+      if (idle < START_IDLE_MS) {
+        this._log('info', `[tapo] calibration: the camera moved ${Math.round(idle)} ms ago; waiting for its picture`);
+        await this._sleep(run, START_IDLE_MS - idle);
+        this._after = this._clock();
+      }
       // 1. pan
       const pan = await this._axis(run, 'x', 0.1, this._dirFor(this._start?.x));
       if (pan.k !== null) {

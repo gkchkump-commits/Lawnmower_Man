@@ -70,6 +70,9 @@ body[data-wake-dim="1"] #stage { opacity: 0.8; transition: opacity 1.5s linear; 
   body[data-wake-dim="1"] #stage { transition: none; }
 }
 
+/* the empty chat's hint while she waits for her name (the default one is in src/styles/app.css) */
+body[data-wake="waiting"] .transcript:empty::before { content: "Say \201CHey Jade\201D, type below, or hold Space to talk."; }
+
 /* the drawer: Settings › Voice › Hey Jade */
 .field-info .wake-line { color: var(--text); }
 .field-info .wake-line.warn { color: #d9b37a; }

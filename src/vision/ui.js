@@ -85,10 +85,10 @@ export class CameraUi {
     accept.addEventListener('click', () => o.onAccept());
     decline.addEventListener('click', () => o.onDecline());
     const card = h('section', { class: 'setup-card camera-card kind-camera', role: 'region', 'aria-labelledby': 'camera-consent-title', dataset: { camera: 'consent' } },
-      h('div', { class: 'setup-head' }, icon('camera', 'icon'), h('h3', { class: 'setup-title', id: 'camera-consent-title' }, 'Let the avatar see you?')),
+      h('div', { class: 'setup-head' }, icon('camera', 'icon'), h('h3', { class: 'setup-title', id: 'camera-consent-title' }, 'Let Jade see you?')),
       h('ul', { class: 'setup-steps camera-points' },
         h('li', null, 'The camera runs only on this PC. Face tracking happens here, offline; no video is recorded or uploaded.'),
-        h('li', null, 'It lets the avatar make eye contact, notice when you come and go, and smile back.'),
+        h('li', null, 'It lets Jade make eye contact, notice when you come and go, and smile back.'),
         h('li', null, 'Jade sees a picture only when you turn on "Let Jade see me" (Settings › Camera) or press 📷 for one message; the picture goes to Claude with it.')),
       h('p', { class: 'setup-note' }, 'A light in the corner shows while the camera is on. Turn it off any time with the camera button, the tray menu or Settings › Camera.'),
       h('div', { class: 'setup-actions camera-actions' }, decline, accept));

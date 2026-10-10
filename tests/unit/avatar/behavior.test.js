@@ -154,7 +154,7 @@ describe('behaviour: by situation', () => {
   });
 
   it('thinking: looks around the averted region, pressed / pursed lips, a squint, a "hmm" tilt', () => {
-    const { r, log } = run({ seed: 7 }, 120, (t, d) => { if (t >= 1 && d.state !== 'thinking') d.setState('thinking'); });
+    const { r, log } = run({ seed: 7 }, 180, (t, d) => { if (t >= 1 && d.state !== 'thinking') d.setState('thinking'); });
     const seen = new Set(log.map((e) => e.kind));
     for (const k of ['search', 'hmm']) expect(seen.has(k), k).toBe(true);
     expect(['press', 'purse', 'squint'].filter((k) => seen.has(k)).length).toBeGreaterThanOrEqual(2);

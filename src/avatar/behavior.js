@@ -4,7 +4,7 @@
 // sideways shift), a gaze target of its own, and face channels outside speech.
 //
 //   scheduler  a semi-Markov process per track (gaze, head, face, breath): a track that is free
-//              waits an exponential time drawn from the total rate of the gestures that fit the
+//              waits a random (gamma) time drawn from the total rate of the gestures that fit the
 //              situation (state, typing, the camera's view of the user, boredom), then starts one
 //              of them, picked by its rate; each kind has a refractory period, so nothing comes
 //              twice in a row, and every instance draws its own durations, amplitudes and
@@ -98,8 +98,8 @@ const KINDS = {
     tracks: ['gaze'], refr: 3,
     rate: (c) => {
       if (c.look || c.typing) return 0;
-      if (c.state === 'idle') return 3.2 * (c.present && c.looking ? 0.35 : 1) * (1 + 0.6 * c.bored);
-      if (c.state === 'listening') return 0.35;
+      if (c.state === 'idle') return 4.5 * (c.present && c.looking ? 0.35 : 1) * (1 + 0.4 * c.bored);
+      if (c.state === 'listening') return 0.4;
       return 0;
     },
     make: (r, c) => {
@@ -125,7 +125,7 @@ const KINDS = {
   chatGlance: {
     // the user types: the eyes go down to the chat below the face now and then
     tracks: ['gaze'], refr: 1.4,
-    rate: (c) => (c.typing && (c.state === 'idle' || c.state === 'listening') ? 14 : 0),
+    rate: (c) => (c.typing && (c.state === 'idle' || c.state === 'listening') ? 16 : 0),
     make: (r) => {
       const d = logNormal(r, 0.8, 0.35, 0.4, 1.8);
       // (the head dips with the eyes, more than its usual vertical share)
@@ -136,7 +136,7 @@ const KINDS = {
   search: {
     // thinking: the eyes wander within the averted region ("searching memory")
     tracks: ['gaze'], refr: 1.8,
-    rate: (c) => (c.state === 'thinking' ? 2.6 : 0),
+    rate: (c) => (c.state === 'thinking' ? 8 : 0),
     make: (r, c) => {
       const n = 1 + (r() < 0.45 ? 1 : 0) + (r() < 0.15 ? 1 : 0);
       const fix = [];
@@ -152,7 +152,7 @@ const KINDS = {
   // ---- head ------------------------------------------------------------------------------------
   tilt: {
     tracks: ['head'], refr: 6,
-    rate: (c) => (c.state === 'idle' && !c.typing ? 1.3 * (1 - 0.3 * c.bored) : c.state === 'listening' ? 1.5 : c.typing ? 0.3 : 0),
+    rate: (c) => (c.state === 'idle' && !c.typing ? 2.0 * (1 - 0.3 * c.bored) : c.state === 'listening' ? 2.2 : c.typing ? 0.5 : 0),
     make: (r, c) => {
       const a = 0.5 + 0.4 * r(), h = logNormal(r, 2.2, 0.5, 0.8, 6), rel = 0.7 + 0.5 * r();
       return {
@@ -170,7 +170,7 @@ const KINDS = {
   nod: {
     // listening: backchannel nods ("mm-hm"), one or two, with a brow / lip micro-movement
     tracks: ['head'], refr: 1.7,
-    rate: (c) => (c.state === 'listening' ? 5.5 : 0),
+    rate: (c) => (c.state === 'listening' ? 8 : 0),
     make: (r) => {
       const amp = 1.1 + 1.5 * r(), k = 0.85 + 0.35 * r(), two = r() < 0.38;
       return { dur: (two ? 0.95 : 0.55) * k, amp, k, two, brow: 0.12 + 0.15 * r(), press: r() < 0.5 ? 0.2 + 0.2 * r() : 0, yaw: (r() - 0.5) * 0.6 };
@@ -188,7 +188,7 @@ const KINDS = {
   neckRoll: {
     // a slow, stretch-like roll of the head: to one side, down, to the other side, back up
     tracks: ['head'], refr: 50,
-    rate: (c) => (c.state === 'idle' && !c.typing ? 0.12 * (1 + 3 * c.bored) : 0),
+    rate: (c) => (c.state === 'idle' && !c.typing ? 0.15 * (1 + 3 * c.bored) : 0),
     make: (r) => ({ dur: 3.2 + 1.6 * r(), R: 3.5 + 2.5 * r(), P: 2.5 + 2 * r(), dir: r() < 0.5 ? -1 : 1, eyes: r() < 0.5 }),
     apply: (g, x, o, k) => {
       const u = minJerk(x / g.dur), ph = 2 * Math.PI * u;
@@ -201,7 +201,7 @@ const KINDS = {
   hmm: {
     // thinking: a "hmm" — the head tilts (toward the side it looks to), lips pressed, a squint
     tracks: ['head', 'face'], refr: 5,
-    rate: (c) => (c.state === 'thinking' ? 1.9 : 0),
+    rate: (c) => (c.state === 'thinking' ? 3 : 0),
     make: (r, c) => {
       const a = 0.45 + 0.3 * r(), h = logNormal(r, 1.6, 0.4, 0.7, 4), rel = 0.7 + 0.4 * r();
       return { dur: a + h + rel, a, h, rel, roll: (2.5 + 2.5 * r()) * (r() < 0.75 ? c.thinkSide : -c.thinkSide), press: 0.35 + 0.35 * r(), squint: r() < 0.6 ? 0.25 + 0.2 * r() : 0, pitch: 0.5 + r() };
@@ -219,7 +219,7 @@ const KINDS = {
   // ---- face ------------------------------------------------------------------------------------
   browFlash: {
     tracks: ['face'], refr: 7,
-    rate: (c) => (c.state === 'idle' ? 0.8 * (1 - 0.7 * c.bored) * (c.present && c.looking ? 1.6 : 1) : c.state === 'listening' ? 0.5 : 0),
+    rate: (c) => (c.state === 'idle' ? 1.0 * (1 - 0.7 * c.bored) * (c.present && c.looking ? 1.6 : 1) : c.state === 'listening' ? 0.8 : 0),
     make: (r) => {
       const h = 0.12 + 0.22 * r();
       return { dur: 0.13 + h + 0.38, h, amp: 0.3 + 0.35 * r() };
@@ -228,7 +228,7 @@ const KINDS = {
   },
   smile: {
     tracks: ['face'], refr: 10,
-    rate: (c) => (c.state === 'idle' ? (c.typing ? 0.3 : 0.5) * (1 - 0.8 * c.bored) * (c.present && c.looking ? 2.2 : 1) : c.state === 'listening' ? 0.35 : 0),
+    rate: (c) => (c.state === 'idle' ? (c.typing ? 0.3 : 0.7) * (1 - 0.8 * c.bored) * (c.present && c.looking ? 2.2 : 1) : c.state === 'listening' ? 0.5 : 0),
     make: (r) => {
       const a = 0.35 + 0.2 * r(), h = logNormal(r, 1.1, 0.5, 0.4, 3.5), rel = 0.8 + 0.5 * r();
       return { dur: a + h + rel, a, h, rel, amp: 0.15 + 0.22 * r(), brow: r() < 0.35 ? 0.15 : 0 };
@@ -242,7 +242,7 @@ const KINDS = {
   press: {
     // lips pressed together (or rolled in) for a moment
     tracks: ['face'], refr: 8,
-    rate: (c) => (c.state === 'idle' ? 0.45 : c.state === 'thinking' ? 0.9 : 0),
+    rate: (c) => (c.state === 'idle' ? 0.6 : c.state === 'thinking' ? 1.5 : 0),
     make: (r) => {
       const h = logNormal(r, 0.9, 0.45, 0.35, 2.5);
       return { dur: 0.2 + h + 0.32, h, amp: 0.45 + 0.4 * r() };
@@ -256,7 +256,7 @@ const KINDS = {
   purse: {
     // thinking: lips pursed (pushed forward a little)
     tracks: ['face'], refr: 7,
-    rate: (c) => (c.state === 'thinking' ? 0.9 : c.state === 'idle' && !c.typing ? 0.12 : 0),
+    rate: (c) => (c.state === 'thinking' ? 1.2 : c.state === 'idle' && !c.typing ? 0.15 : 0),
     make: (r) => {
       const h = logNormal(r, 1.0, 0.45, 0.4, 2.6);
       return { dur: 0.3 + h + 0.4, h, amp: 0.24 + 0.16 * r() };
@@ -270,7 +270,7 @@ const KINDS = {
   },
   squint: {
     tracks: ['face'], refr: 6,
-    rate: (c) => (c.state === 'thinking' ? 0.8 : 0),
+    rate: (c) => (c.state === 'thinking' ? 1.2 : 0),
     make: (r) => {
       const h = logNormal(r, 1.0, 0.45, 0.4, 2.5);
       return { dur: 0.3 + h + 0.5, h, amp: 0.28 + 0.22 * r() };
@@ -280,7 +280,7 @@ const KINDS = {
   swallow: {
     // lips close, the chin bunches and the head dips a little
     tracks: ['face'], refr: 25,
-    rate: (c) => (c.state === 'idle' && !c.typing ? 0.28 : c.state === 'thinking' ? 0.15 : 0),
+    rate: (c) => (c.state === 'idle' && !c.typing ? 0.35 : c.state === 'thinking' ? 0.2 : 0),
     make: (r) => ({ dur: 0.75, amp: 0.7 + 0.25 * r(), dip: 0.5 + 0.5 * r() }),
     apply: (g, x, o, k) => {
       const e = pulse(x, 0.22, 0.45) * k;
@@ -325,7 +325,7 @@ const KINDS = {
   deepBreath: {
     // a deep breath in and out (a sigh when bored): the chest and head rise, the nostrils widen
     tracks: ['breath'], refr: 20,
-    rate: (c) => (c.state === 'idle' ? 0.32 * (1 + 1.5 * c.bored) : c.state === 'thinking' ? 0.35 : c.state === 'listening' ? 0.12 : 0),
+    rate: (c) => (c.state === 'idle' ? 0.45 * (1 + 1.2 * c.bored) : c.state === 'thinking' ? 0.5 : c.state === 'listening' ? 0.15 : 0),
     make: (r, c) => {
       const a = 1.2 + 0.5 * r(), rel = 2 + 1 * r();
       return { dur: a + 0.5 + rel, a, rel, lift: 0.5 + 0.6 * r(), lips: c.bored > 0.4 || r() < 0.3 };
@@ -418,7 +418,7 @@ export class Behavior {
     this.out = createBehaviorOut();
     /** @type {Array<{ kind: string, t0: number, dur: number, fadeAt: number, fadeDur: number, p: any }>} */
     this._active = [];
-    /** next start time per track (NaN: to be drawn), and the rate it was drawn with */
+    /** next start time per track (NaN: to be drawn; Infinity: nothing fits until the situation changes) */
     this._next = Object.fromEntries(TRACKS.map((k) => [k, NaN]));
     this._ctxKey = '';
     /** when each track became free (the origin of its next wait: continuous time, not a frame) */
@@ -439,6 +439,10 @@ export class Behavior {
     this._lookChangedAt = 0;
     this._userRoll = 0;
     this._ackWanted = false;
+    /** @type {number|undefined} a blink requested by a gesture, at this time */
+    this._blinkAt = undefined;
+    /** @type {Ctx} this frame's situation (one object, updated in place) */
+    this._c = /** @type {any} */ ({});
     // posture: springs toward targets that change every few to tens of seconds
     this._post = { yaw: new Spring(), pitch: new Spring(), roll: new Spring(), shiftX: new Spring(), lean: new Spring() };
     this._postTarget = [0, 0, 0, 0, 0];
@@ -518,14 +522,15 @@ export class Behavior {
   /** Kinds of the gestures running now ('a+b', '' when none): tools, tests. */
   active() { return this._active.filter((g) => this._time < g.fadeAt + g.fadeDur).map((g) => g.kind).join('+'); }
 
-  _ctxFor(state, t) {
+  /** The situation at time t (written into `out`, a fresh object by default). @returns {Ctx} */
+  _ctxFor(state, t, out = /** @type {any} */ ({})) {
     const idleFor = state === 'idle' ? t - Math.max(this._engagedAt, this._stateAt) : 0;
     let bored = state === 'idle' ? smoothstep(45, 180, idleFor) : 0;
     if (state === 'idle' && this._present === false) bored = Math.max(bored, smoothstep(5, 40, t - this._absentAt));
-    return /** @type {Ctx} */ ({
-      state, look: false, lookKind: 'cursor', typing: t - this._typedAt < 1.6, present: this._present, looking: this._looking,
-      bored, L: this.liveliness, A: 0.55 + 0.45 * this.liveliness, thinkSide: 1, thinkUp: true,
-    });
+    out.state = state; out.look = false; out.lookKind = 'cursor'; out.typing = t - this._typedAt < 1.6;
+    out.present = this._present; out.looking = this._looking; out.bored = bored;
+    out.L = this.liveliness; out.A = 0.55 + 0.45 * this.liveliness; out.thinkSide = 1; out.thinkUp = true;
+    return out;
   }
 
   _fade(g, t, d) {
@@ -569,7 +574,7 @@ export class Behavior {
     }
     const state = d.state;
     if (state !== this._state) this.setState(state, t);
-    const c = this._ctxFor(state, t);
+    const c = this._ctxFor(state, t, this._c);
     c.look = !!d.look;
     c.lookKind = d.lookKind || 'cursor';
     c.thinkSide = d.thinkSide ?? 1;
@@ -591,18 +596,22 @@ export class Behavior {
       }
     }
 
-    // ---- schedule: per free track, an exponential wait drawn from the total rate of the kinds that
-    // fit the situation now; a change of situation (state, typing, the camera's view, boredom,
-    // liveliness) draws the pending waits again (memoryless: exact). At the end of a wait one kind is
-    // picked by its rate; one still in its refractory period does not happen (thinned).
+    // ---- schedule: per free track, a random wait drawn from the total rate of the kinds that fit
+    // the situation now; a change of situation (state, typing, the camera's view, boredom,
+    // liveliness) draws the pending waits again. At the end of a wait one kind is picked by its
+    // rate; one still in its refractory period does not happen (thinned).
     const key = `${state}|${c.typing}|${c.present}|${c.looking}|${c.look}|${Math.round(c.bored * 10)}|${L}`;
     if (key !== this._ctxKey) {
+      // (the posture follows the new situation soon, e.g. leaning in as the user starts typing)
+      if (this._ctxKey && this._ctxKey.split('|').slice(0, 5).join() !== key.split('|').slice(0, 5).join()) {
+        this._postNext = Math.min(this._postNext, t + 0.2 + 0.5 * this.rng());
+      }
       this._ctxKey = key;
       for (const k of TRACKS) if (Number.isFinite(this._next[k]) || this._next[k] === Infinity) { this._next[k] = NaN; this._freeAt[k] = t; }
     }
     if (!calm) {
       for (const track of TRACKS) {
-        if (this._busy(track, t)) continue;
+        if (this._busy(track, t) || t < this._next[track]) continue;
         const rates = this._rates(track, c);
         const R = rates.reduce((s, [, r]) => s + r, 0) * L;
         if (Number.isNaN(this._next[track])) {
@@ -611,7 +620,6 @@ export class Behavior {
           this._next[track] = R > 0 ? from + 0.25 - (30 / R) * Math.log(Math.max(1e-9, this.rng() * this.rng())) : Infinity;
           continue;
         }
-        if (t < this._next[track]) continue;
         const at = this._next[track];
         this._next[track] = NaN;
         this._freeAt[track] = at;

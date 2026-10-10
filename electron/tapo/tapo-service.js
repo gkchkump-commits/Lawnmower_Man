@@ -44,8 +44,15 @@ const TICK_MS = 500;
 const SNAPSHOT_STREAM_MS = 30_000;
 const DET_PER_SEC = 10;
 /** How often the camera's health is looked at. */
-/** How much longer than its own timeout main waits for the worker's calibration measurement. */
-export const SHIFT_SLACK_MS = 6000;
+/**
+ * How much longer than its own timeout main waits for the worker's calibration measurement. The
+ * worker can stall for many seconds where frame readback is slow (software GL on a loaded PC:
+ * 16 s measured in tapo-e2e) and then still measure correctly; the wizard shows its progress and
+ * a Stop button meanwhile.
+ */
+export const SHIFT_SLACK_MS = 25_000;
+/** How long main waits for the worker's still reference picture before moving anyway. */
+export const SHIFT_REF_TIMEOUT_MS = 30_000;
 /**
  * Video chunks the worker may be behind before main stops sending (≈ 1.6 s at 15 fps). A PC that
  * cannot decode in real time would otherwise queue chunks without bound in the MessagePort: the
@@ -214,6 +221,8 @@ export class TapoService extends EventEmitter {
     /** @type {NodeJS.Timeout|null} */
     /** main → worker video chunks: sent, acknowledged, skipping to a key frame @type {{ seq: number, acked: number, acks: boolean, skipping: boolean, dropped: number }} */
     this._flow = { seq: 0, acked: 0, acks: false, skipping: false, dropped: 0 };
+    this._shiftSlackMs = SHIFT_SLACK_MS;
+    this._shiftRefTimeoutMs = SHIFT_REF_TIMEOUT_MS;
     this._statusTimer = null;
     this._lastStatusAt = 0;
 
@@ -779,6 +788,7 @@ export class TapoService extends EventEmitter {
       }
       case 'snap-ok':
       case 'snap-err':
+      case 'shift-ref-ok':
       case 'shift': {
         const p = this._pending.get(m.id);
         if (!p) return;
@@ -874,7 +884,12 @@ export class TapoService extends EventEmitter {
     this._updateStream();
     if (!(await this._waitLive(10000))) throw new Error('No live picture, so the camera cannot be calibrated.');
     await new Promise((r) => setTimeout(r, 300));
-    this._post({ t: 'shift-ref' });
+    // the worker answers once it has a still reference picture; the camera moves only then
+    try {
+      await this._request({ t: 'shift-ref' }, this._shiftRefTimeoutMs);
+    } catch (err) {
+      this._log('info', `[tapo] calibration: no reference picture yet (${/** @type {Error} */ (err).message})`);
+    }
   }
 
   /**
@@ -885,7 +900,7 @@ export class TapoService extends EventEmitter {
   async _shiftMeasure(timeoutMs, expectMove = false) {
     if (!this._port) throw new Error('The camera window is not running, so there is no picture.');
     try {
-      const r = await this._request({ t: 'shift-measure', timeoutMs, expectMove }, timeoutMs + SHIFT_SLACK_MS);
+      const r = await this._request({ t: 'shift-measure', timeoutMs, expectMove }, timeoutMs + this._shiftSlackMs);
       return { dx: r.dx, dy: r.dy, score: r.score, settledMs: r.settledMs };
     } catch (err) {
       this._log('info', `[tapo] calibration: no picture measurement (${/** @type {Error} */ (err).message})`);

@@ -370,9 +370,12 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
   after every move and a Stop fallback chain (so a motor can never grind at its end stop),
   presets, home. `calibration.js` turns the camera +0.2 units per axis and measures the picture
   shift in the worker (`src/tapo/worker/shift.js`, block matching on 128×72 luma) for the axis
-  signs and the units per view. When the camera reports that it moved (GetStatus position), the
+  signs and the units per view. The reference picture is a still one (the worker confirms it
+  before the camera moves), and when the camera reports that it moved (GetStatus position), the
   worker waits for the picture to move too (up to 6 s), so a video that lags the motor by a second
-  or two is still measured; without GetStatus, msPerUnit keeps its previous value. Each
+  or two is still measured; a worker that answers late (a busy PC) makes the wizard ask instead
+  of failing. msPerUnit comes from the camera's reported travel time (not from the picture,
+  which lags); without GetStatus it keeps its previous value. Each
   measurement is logged (`[tapo] calibration x +0.2: shift …`).
 * **Video:** the bundled **go2rtc 1.9.14** (`scripts/fetch-go2rtc.mjs`, SHA-256 pinned) pulls one
   RTSP session only while the stream is needed (window visible, armed, calibrating, recording or

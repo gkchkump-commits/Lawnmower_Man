@@ -677,8 +677,11 @@ try {
     const { tapoLabel } = await import(pathToFileURL(path.join(root, 'electron/tray-menu.js')).href);
     const tray = await e2e('trayState');
     check('…and the tray does not say plain "Armed"', !tray?.armed || tapoLabel(tray) === 'Armed · camera offline', { tray, label: tray && tapoLabel(tray) });
+    // (the window renders main's status a moment later: wait for it, as a user would see it)
+    await until(async () => (await cam.locator('.badge-text').innerText().catch(() => '')) === 'Offline', 10000, 250);
     const badge = await cam.locator('.badge-text').innerText().catch(() => '');
     check('…nor the camera window ("Offline")', badge === 'Offline', badge);
+    await until(() => cam.evaluate(() => /camera offline/.test(document.querySelector('.arm')?.textContent || '')), 10000, 250);
     const armBox = await cam.evaluate(() => ({ arm: document.querySelector('.arm')?.getBoundingClientRect().right ?? 1e9, inner: window.innerWidth, label: document.querySelector('.arm')?.textContent || '' }));
     check('…its arm button (to disarm) stays in the window, saying "Armed · camera offline"', armBox.arm <= armBox.inner && /camera offline/.test(armBox.label), armBox);
     await shot(cam, '7-offline');

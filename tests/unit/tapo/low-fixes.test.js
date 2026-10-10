@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
-import { MAX_CHUNKS_BEHIND, SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
+import { MAX_CHUNKS_BEHIND, SHIFT_REF_TIMEOUT_MS, SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeRelay, FakeSidecar, memorySafeStorage, tempSettings } from './helpers/fakes.js';
 
 /** @type {Array<() => Promise<void>>} */
@@ -78,13 +78,41 @@ describe('calibration on a busy PC', () => {
     const { service } = await offlineService(() => Date.now());
     const sent = [];
     service._port = { postMessage: (m) => sent.push(m), close() {} }; // a worker that never answers
+    expect(service._shiftSlackMs).toBe(SHIFT_SLACK_MS);
+    expect(SHIFT_SLACK_MS).toBeGreaterThanOrEqual(20_000); // a worker stalled ~16 s still answers in time
+    service._shiftSlackMs = 300; // (the test does not wait 25 s)
     const t0 = Date.now();
     const r = await service._shiftMeasure(100, true);
     expect(r).toEqual({ dx: 0, dy: 0, score: 0, settledMs: 0 });
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(100 + SHIFT_SLACK_MS - 50);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100 + 300 - 50);
     expect(sent).toEqual([expect.objectContaining({ t: 'shift-measure', timeoutMs: 100, expectMove: true })]);
     service._port = null;
     await expect(service._shiftMeasure(100)).rejects.toThrow(/camera window is not running/);
+  }, 15_000);
+});
+
+describe('calibration: the reference picture', () => {
+  it('main moves the camera only once the worker has a still reference (or after a long wait)', async () => {
+    const { service } = await offlineService(() => Date.now());
+    service.relay.state = 'live';
+    const sent = [];
+    let answer = null;
+    const port = { postMessage: (m) => { sent.push(m); if (m.t === 'shift-ref') answer = m.id; }, close() {} };
+    service._port = port;
+    let done = false;
+    const p = service._shiftRef().then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(sent.map((m) => m.t)).toContain('shift-ref');
+    expect(done).toBe(false); // still waiting for the worker
+    service._onWorkerMessage(port, { t: 'shift-ref-ok', id: answer });
+    await p;
+    expect(done).toBe(true);
+    // a worker that never answers: go on after the timeout (the measurement then decides)
+    expect(SHIFT_REF_TIMEOUT_MS).toBeGreaterThanOrEqual(20_000);
+    service._shiftRefTimeoutMs = 300;
+    const t0 = Date.now();
+    await service._shiftRef();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(300 + 300 - 50);
   }, 15_000);
 });
 

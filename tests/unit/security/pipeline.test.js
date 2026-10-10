@@ -2,7 +2,7 @@
 // a manual clock: the messages main and the page get, the detection duty cycle, suppression
 // while the camera turns, snapshots, the calibration shift measurement and frame lifetimes.
 import { describe, expect, it } from 'vitest';
-import { RATES, SHIFT_MIN_WAIT_MS, SecurityPipeline } from '../../../src/tapo/worker/pipeline.js';
+import { RATES, SHIFT_MIN_WAIT_MS, SHIFT_REF_MAX_WAIT_MS, SecurityPipeline } from '../../../src/tapo/worker/pipeline.js';
 import { fakeGraphics, fakeImage, flush, manualClock, room } from './helpers.js';
 
 function setup(o = {}) {
@@ -252,6 +252,31 @@ describe('SecurityPipeline: calibration shift', () => {
     expect(r.id).toBe(4);
     expect(r.dx).toBeLessThan(-0.08);
     expect(r.score).toBeGreaterThan(0.15);
+  });
+
+  it('a reference asked with an id waits for a still picture, then says so (main moves the camera only then)', async () => {
+    const s = setup();
+    await s.feed(1, () => room());
+    s.main({ t: 'shift-ref', id: 'r9' });
+    // the last move still reaching the video: no reference yet
+    await s.feed(5, (i) => room({ offset: 0.02 * (i + 1) }));
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([]);
+    await s.feed(4, () => room({ offset: 0.1 }));
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([{ t: 'shift-ref-ok', id: 'r9' }]);
+    // the shift is measured from that still picture
+    s.main({ t: 'shift-measure', id: 10, timeoutMs: 6000, expectMove: true });
+    await s.feed(6, (i) => room({ offset: 0.1 + 0.02 * (i + 1) }));
+    await s.feed(6, () => room({ offset: 0.22 }));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r.dx).toBeLessThan(-0.08);
+    expect(r.dx).toBeGreaterThan(-0.16);
+  });
+
+  it('a reference asked with an id is answered even without frames', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r1' });
+    s.clock.advance(SHIFT_REF_MAX_WAIT_MS + 1000);
+    expect(s.of(s.toMain, 'shift-ref-ok')).toEqual([{ t: 'shift-ref-ok', id: 'r1' }]);
   });
 
   it('no frames: the timeout answers with score 0', async () => {

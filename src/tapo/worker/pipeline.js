@@ -51,6 +51,8 @@ export const DETECT_INPUT_WIDTH = 640;
 /** A measurement waits for the picture to change (the camera starting to turn, after the
  * stream's delay) or for this long, before a still picture counts as settled. */
 export const SHIFT_MIN_WAIT_MS = 1500;
+/** The calibration's reference picture waits at most this long for a still picture. */
+export const SHIFT_REF_MAX_WAIT_MS = 4000;
 /** Changed fraction between frames that shows the camera is turning. */
 export const SHIFT_MOVING_FRACTION = 0.03;
 
@@ -156,7 +158,7 @@ export class SecurityPipeline {
     this._detTimes = [];
     /** @type {number[]} when frames arrived (fps) */
     this._frameTimes = [];
-    this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), measure: /** @type {any} */ (null), busy: false };
+    this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null) };
     this._canvases = /** @type {Record<string, any>} */ ({});
     const si = d.setInterval || ((fn, ms) => setInterval(fn, ms));
     this._statsTimer = si(() => this.postStats(), STATS_MS);
@@ -236,10 +238,7 @@ export class SecurityPipeline {
         this.boostUntil = Number(msg.untilMs) || 0;
         return undefined;
       case 'snap': return this._snap(msg, 'main');
-      case 'shift-ref':
-        this.shift.wantRef = true;
-        this.shift.ref = null;
-        return undefined;
+      case 'shift-ref': return this._shiftRef(msg);
       case 'shift-measure': return this._shiftMeasure(msg);
       case 'view': // main may say the window is hidden or minimized (the page cannot tell)
         this.mainVisible = msg.visible !== false;
@@ -565,6 +564,47 @@ export class SecurityPipeline {
   }
 
   /**
+   * Take the calibration's reference picture: with an id, the next still one (≤
+   * SHIFT_REF_MAX_WAIT_MS), and main is told when it is taken ({ t: 'shift-ref-ok' }) and moves
+   * the camera only then: on a lagging video the reference would otherwise show the camera still
+   * settling, or already moving. @param {{ id?: unknown }} msg
+   */
+  _shiftRef(msg) {
+    const s = this.shift;
+    this._clearTimeout(s.refReq?.timer);
+    s.wantRef = true;
+    s.ref = null;
+    s.refReq = null;
+    // (without an id — an older main — the next frame is the reference, as before)
+    if (typeof msg.id !== 'string') return;
+    const rr = { id: msg.id, startedAt: this.now(), prev: /** @type {Uint8Array|null} */ (null), stable: 0, timer: /** @type {any} */ (null) };
+    // no frames at all: answer anyway (the measurement then says "not measurable")
+    rr.timer = this._setTimeout(() => {
+      if (s.refReq !== rr) return;
+      s.refReq = null;
+      if (rr.prev) {
+        s.ref = rr.prev;
+        s.wantRef = false;
+      }
+      this.postMain({ t: 'shift-ref-ok', id: rr.id });
+    }, SHIFT_REF_MAX_WAIT_MS + 1000);
+    s.refReq = rr;
+  }
+
+  /** @param {Uint8Array} luma */
+  _refTaken(luma) {
+    const s = this.shift;
+    const rr = s.refReq;
+    s.wantRef = false;
+    s.ref = luma;
+    s.refReq = null;
+    if (rr) {
+      this._clearTimeout(rr.timer);
+      this.postMain({ t: 'shift-ref-ok', id: rr.id });
+    }
+  }
+
+  /**
    * Tell main which chunk was handled (flow control: main stops sending when this falls behind),
    * every ACK_EVERY chunks or ACK_EVERY_MS. @param {unknown} seq
    */
@@ -605,8 +645,14 @@ export class SecurityPipeline {
       .then((rgba) => {
         const luma = lumaFromRgba(rgba, SHIFT_WIDTH * SHIFT_HEIGHT);
         if (s.wantRef) {
-          s.wantRef = false;
-          s.ref = luma;
+          const rr = s.refReq;
+          if (rr) {
+            // the reference is a still picture (the last move may still be reaching the video)
+            rr.stable = rr.prev && changedFraction(rr.prev, luma) < SETTLE_FRACTION ? rr.stable + 1 : 0;
+            rr.prev = luma;
+            if (rr.stable < SETTLE_FRAMES && this.now() - rr.startedAt < SHIFT_REF_MAX_WAIT_MS) return;
+          }
+          this._refTaken(luma);
           return;
         }
         const m = s.measure;

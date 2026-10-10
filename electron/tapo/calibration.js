@@ -194,7 +194,10 @@ export class CalibrationWizard extends EventEmitter {
       this._log('info', `[tapo] calibration ${axis} +${amount}: shift ${Number(d).toFixed(3)} (score ${Number(m.score).toFixed(2)}, picture settled after ${m.settledMs ?? '?'} ms, camera ${mv.moved === true ? 'reported the move' : mv.measured ? 'reported no move' : 'cannot report'})`);
       if (reliable && Math.abs(d) >= MIN_SHIFT) {
         await this._move(run, axis === 'x' ? -amount : 0, axis === 'y' ? -amount : 0);
-        return { d, amount, settledMs: settledMs > 0 ? Math.max(settledMs, m.settledMs || 0) : 0 };
+        // msPerUnit is the motor's speed: the camera's own travel time, not when the picture
+        // settled, which also holds the video's lag (1–2 s on a real camera, more with a stalled
+        // worker: tapo-e2e on a loaded PC made msPerUnit 20000, the cap) divided by 0.2 units
+        return { d, amount, settledMs };
       }
       if (!reliable || amount === 0.4) {
         // the camera is still turned: the user can see where it went

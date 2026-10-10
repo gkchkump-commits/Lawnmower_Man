@@ -52,6 +52,17 @@ function rig(o = {}) {
   return { wiz, moves, saved, states, finished, net, measures };
 }
 
+describe('CalibrationWizard: msPerUnit', () => {
+  it('a picture that settles much later than the camera stopped (a stalled worker) does not stretch msPerUnit', async () => {
+    const r = rig({ overrides: [{ dx: -0.16, dy: 0, score: 0.9, settledMs: 16_000 }] });
+    r.wiz.request({ action: 'start' });
+    const st = await r.finished();
+    expect(st.step).toBe('done');
+    // the camera's own 1200 ms per 0.2 units (the picture's 16 s are its lag, not the motor's)
+    expect(st.result.msPerUnit).toBe(Math.round(1200 / 0.2));
+  });
+});
+
 describe('CalibrationWizard: video lag', () => {
   it('tells the picture to wait for a move the camera reported (a real camera\'s video lags the motor)', async () => {
     const r = rig({ reportsMoves: true });
@@ -78,7 +89,9 @@ describe('CalibrationWizard', () => {
     expect(st.result).toMatchObject({ invertPan: false, invertTilt: false, minStep: 0.05 });
     expect(st.result.viewUnitsX).toBeCloseTo(1 / 0.8);
     expect(st.result.viewUnitsY).toBeCloseTo(1 / 0.7);
-    expect(st.result.msPerUnit).toBe(Math.round(1500 / 0.2));
+    // updated on purpose: msPerUnit is the camera's reported travel time (1200 ms), not the
+    // picture's settle time (1500 ms), which includes the video's lag
+    expect(st.result.msPerUnit).toBe(Math.round(1200 / 0.2));
     expect(r.saved).toHaveLength(1);
     expect(r.saved[0].calibratedAt).toBe('2026-10-10T12:00:00.000Z');
     expect(r.net().x).toBeCloseTo(0);

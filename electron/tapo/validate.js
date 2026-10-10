@@ -278,6 +278,9 @@ export function validateWorkerMessage(m) {
     case 'snap-err':
       if (typeof m.id !== 'string' || m.id.length > 64) return null;
       return { t: 'snap-err', id: m.id, message: shortText(m.message, 300) };
+    case 'shift-ref-ok':
+      if (typeof m.id !== 'string' || m.id.length > 64) return null;
+      return { t: 'shift-ref-ok', id: m.id };
     case 'shift':
       if (typeof m.id !== 'string' || m.id.length > 64 || !num(m.dx, -2, 2) || !num(m.dy, -2, 2) || !num(m.score, -1, 1)) return null;
       return { t: 'shift', id: m.id, dx: m.dx, dy: m.dy, score: m.score, settledMs: num(m.settledMs, 0, 1e6) ? m.settledMs : 0 };

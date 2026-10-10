@@ -76,6 +76,7 @@ export function fakeCameraWindow(o = {}) {
           const ab = JPEG.buffer.slice(JPEG.byteOffset, JPEG.byteOffset + JPEG.byteLength);
           port.postMessage({ t: 'snap-ok', id: m.id, jpeg: ab, width: 160, height: 90, frameTs: 1 });
         }
+        if (m.t === 'shift-ref' && m.id) port.postMessage({ t: 'shift-ref-ok', id: m.id });
         if (m.t === 'shift-measure') port.postMessage({ t: 'shift', id: m.id, ...(w.shifts.shift() || { dx: -0.2, dy: 0.15, score: 0.6 }), settledMs: 900 });
       });
     },

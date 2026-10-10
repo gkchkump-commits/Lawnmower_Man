@@ -110,6 +110,35 @@ function firstLine(text) {
   return line.length > 300 ? `${line.slice(0, 299)}…` : line;
 }
 
+/** App tool names that may reach --allowedTools / --disallowedTools (contract §10.1). */
+export const MCP_TOOL_NAME = /^mcp__[a-z0-9-]+__[a-z][a-z0-9_]{0,63}$/;
+/** Names of the app's in-process MCP servers (they become the `mcp__<name>__` prefix). */
+const MCP_SERVER_NAME = /^[a-z0-9-]{1,64}$/;
+/**
+ * The loopback HTTP fallback ("G2", contract §10.4): the --mcp-config file names this variable
+ * instead of the bearer token, and the token itself travels only in the CLI's environment.
+ */
+export const MCP_TOKEN_ENV = 'LM_MCP_TOKEN';
+
+/**
+ * An in-process MCP server the app offers to Claude (the camera: electron/tapo/camera-mcp.js).
+ * `handle` answers one JSON-RPC message (null for a notification). `startHttp` / `stopHttp`
+ * serve the same handle() over loopback Streamable HTTP for a CLI that does not take
+ * in-process servers: startHttp() resolves { url: 'http://127.0.0.1:<port>/mcp', token } and is
+ * idempotent while running (same url and token); the endpoint wants `Authorization: Bearer
+ * <token>` and refuses any request with an Origin header or another Host.
+ * @typedef {{ name: string, handle: (message: object) => Promise<object|null>,
+ *             startHttp?: () => Promise<{ url: string, token: string }>, stopHttp?: () => Promise<void> }} SdkMcpServer
+ */
+
+/** @param {unknown} list @param {string} what */
+function toolList(list, what) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) throw new TypeError(`${what} must be an array`);
+  for (const t of list) if (typeof t !== 'string' || !MCP_TOOL_NAME.test(t)) throw new Error(`Invalid tool name in ${what}: ${JSON.stringify(t)}`);
+  return [...new Set(list)];
+}
+
 const SAFE_MODEL = /^[A-Za-z0-9._:@/[\]-]{1,100}$/;
 const SAFE_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -130,12 +159,21 @@ const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'manual', 'd
 /**
  * Build the CLI argument list (contract §3.2). Values that reach the command line are
  * re-validated here (defense in depth; settings.js validates them too).
+ *
+ * App tools (the home camera, contract §10): `allowedTools` are pre-approved (no card),
+ * `disallowedTools` are removed from the CLI; only `mcp__<server>__<tool>` names are accepted.
+ * `mcpConfigFile` loads the app's servers over loopback HTTP (the fallback for a CLI that does
+ * not take in-process servers); chat mode still passes --strict-mcp-config, so the user's own
+ * MCP servers stay out.
  * @param {{ mode?: string, model?: string, effort?: string, resumeSessionId?: string,
  *           personaFile: string, agentPermissionMode?: string, strictMcpInChat?: boolean,
+ *           allowedTools?: string[], disallowedTools?: string[], mcpConfigFile?: string,
  *           extraArgs?: string[] }} o
  * @returns {string[]}
  */
 export function buildClaudeArgs(o) {
+  const allowed = toolList(o.allowedTools, 'allowedTools');
+  const denied = toolList(o.disallowedTools, 'disallowedTools');
   const args = [
     '-p',
     '--input-format', 'stream-json',
@@ -163,7 +201,7 @@ export function buildClaudeArgs(o) {
   args.push('--setting-sources', 'user');
   switch (o.mode) {
     case 'assistant':
-      args.push('--tools', ASSISTANT_TOOLS, '--allowedTools', ASSISTANT_ALLOWED_TOOLS, '--append-system-prompt-file', o.personaFile);
+      args.push('--tools', ASSISTANT_TOOLS, '--allowedTools', [ASSISTANT_ALLOWED_TOOLS, ...allowed].join(','), '--append-system-prompt-file', o.personaFile);
       break;
     case 'agent':
       args.push('--append-system-prompt-file', o.personaFile);
@@ -171,13 +209,18 @@ export function buildClaudeArgs(o) {
         if (!PERMISSION_MODES.has(o.agentPermissionMode)) throw new Error('Invalid permission mode');
         args.push('--permission-mode', o.agentPermissionMode);
       }
+      if (allowed.length) args.push('--allowedTools', allowed.join(','));
       break;
     default:
       // Pure conversation: no built-in tools, and skip the user's MCP servers too (they would
-      // add tools and slow every launch).
+      // add tools and slow every launch). The app's own tools (the camera) still come in: as
+      // in-process servers (initialize.sdkMcpServers) or through mcpConfigFile.
       args.push('--tools', '', '--system-prompt-file', o.personaFile);
       if (o.strictMcpInChat !== false) args.push('--strict-mcp-config');
+      if (allowed.length) args.push('--allowedTools', allowed.join(','));
   }
+  if (denied.length) args.push('--disallowedTools', denied.join(','));
+  if (o.mcpConfigFile) args.push('--mcp-config', o.mcpConfigFile);
   if (Array.isArray(o.extraArgs)) args.push(...o.extraArgs.map(String));
   return args;
 }
@@ -250,6 +293,11 @@ const finiteOrUndef = (n) => (typeof n === 'number' && Number.isFinite(n) ? n : 
  * @property {{ baseDelayMs?: number, maxDelayMs?: number, maxAttempts?: number, stableMs?: number }} [restart]
  * @property {string} [agentPermissionMode] e.g. 'acceptEdits' (default: none → every edit asks)
  * @property {string[]} [extraArgs]         appended to the CLI args (diagnostics/tests)
+ * @property {() => SdkMcpServer[]} [getSdkMcpServers]  the app's in-process MCP servers (contract §10.1)
+ * @property {() => { allow: string[], deny: string[] }} [getToolPermissions]  pre-approved / removed app tools
+ * @property {() => Record<string, any>} [getPersonaContext]  passed to buildPersona(mode, { context })
+ * @property {string} [mcpDir]              where the HTTP fallback's --mcp-config file is written
+ *                                          (default: <personaDir>/../mcp, i.e. <userData>/mcp)
  * @property {(level: 'debug'|'info'|'warn'|'error', msg: string) => void} [log]
  */
 
@@ -297,6 +345,21 @@ export class ClaudeSession extends EventEmitter {
     this._agentPermissionMode = opts.agentPermissionMode || '';
     this._extraArgs = opts.extraArgs || [];
     this._log = opts.log || (() => {});
+    this._getSdkMcpServers = opts.getSdkMcpServers || (() => []);
+    this._getToolPermissions = opts.getToolPermissions || (() => ({ allow: [], deny: [] }));
+    this._getPersonaContext = opts.getPersonaContext || (() => ({}));
+    this._mcpDir = opts.mcpDir || path.join(path.dirname(this._personaDir), 'mcp');
+    /**
+     * How the app's MCP servers reach the CLI: 'sdk' (in-process over the control channel,
+     * contract §10.1) until a CLI shows that it ignores them; then 'http' (loopback, §10.4) for
+     * the rest of this app session.
+     * @type {'sdk'|'http'}
+     */
+    this._mcpTransport = 'sdk';
+    /** Servers whose HTTP endpoint we started (stopped when no longer used). @type {Map<string, SdkMcpServer>} */
+    this._httpServers = new Map();
+    /** @type {Set<string>} */
+    this._warned = new Set();
 
     const s = this._safeSettings();
     /** Current conversation id ('' = none yet). Restarts always resume it. */
@@ -579,6 +642,7 @@ export class ClaudeSession extends EventEmitter {
     // wait for it too, so "stopped" means no CLI process is left (on Windows a live process
     // also keeps its working folder locked).
     await Promise.allSettled([...this._killing]);
+    await this._stopHttpServers(new Set());
     this._setStatus('exited', 'Stopped');
   }
 
@@ -607,7 +671,106 @@ export class ClaudeSession extends EventEmitter {
 
   /** @param {ReturnType<ClaudeSession['_safeSettings']>} s */
   _spawnKeyFor(s) {
-    return JSON.stringify([s.mode, s.model, s.effort, s.workdir, s.persona, this._cliOverride || s.cliPath]);
+    const m = this._mcpPlan();
+    // a change of the app's tools, their permissions or the persona context restarts the CLI
+    // (after the running turn), resuming the conversation
+    return JSON.stringify([s.mode, s.model, s.effort, s.workdir, s.persona, this._cliOverride || s.cliPath, [m.names, m.allow, m.deny, m.context, m.transport]]);
+  }
+
+  /**
+   * The app's MCP servers, tool permissions and persona context as they are now (no side
+   * effects; called for every spawn-key comparison).
+   * @returns {{ servers: SdkMcpServer[], names: string[], allow: string[], deny: string[], context: Record<string, any>, transport: 'none'|'sdk'|'http' }}
+   */
+  _mcpPlan() {
+    /** @type {SdkMcpServer[]} */
+    let servers = [];
+    try {
+      const list = this._getSdkMcpServers();
+      servers = (Array.isArray(list) ? list : []).filter((sv) => {
+        const ok = sv && typeof sv.name === 'string' && MCP_SERVER_NAME.test(sv.name) && typeof sv.handle === 'function';
+        if (!ok) this._warnOnce(`server:${sv && sv.name}`, `[claude] ignoring an invalid MCP server entry ${JSON.stringify(sv && sv.name)}`);
+        return ok;
+      });
+    } catch (err) {
+      this._log('error', `[claude] getSdkMcpServers failed: ${/** @type {Error} */ (err).message}`);
+    }
+    const seen = new Set();
+    servers = servers.filter((sv) => !seen.has(sv.name) && seen.add(sv.name));
+    /** @type {{ allow?: unknown, deny?: unknown }} */
+    let perms = {};
+    try {
+      perms = this._getToolPermissions() || {};
+    } catch (err) {
+      this._log('error', `[claude] getToolPermissions failed: ${/** @type {Error} */ (err).message}`);
+    }
+    const names = servers.map((sv) => sv.name);
+    // only tools of servers that are actually offered; anything malformed is dropped (and logged)
+    const pick = (/** @type {unknown} */ list) => (Array.isArray(list) ? list : []).filter((t) => {
+      const ok = typeof t === 'string' && MCP_TOOL_NAME.test(t);
+      if (!ok) this._warnOnce(`tool:${t}`, `[claude] ignoring an invalid tool permission ${JSON.stringify(t)}`);
+      return ok && names.some((n) => t.startsWith(`mcp__${n}__`));
+    }).sort();
+    /** @type {Record<string, any>} */
+    let context = {};
+    try {
+      const c = this._getPersonaContext();
+      context = isPlainObject(c) ? JSON.parse(JSON.stringify(c)) : {};
+    } catch (err) {
+      this._log('error', `[claude] getPersonaContext failed: ${/** @type {Error} */ (err).message}`);
+    }
+    const http = this._mcpTransport === 'http' && servers.every((sv) => typeof sv.startHttp === 'function');
+    return { servers, names, allow: pick(perms.allow), deny: pick(perms.deny), context, transport: !servers.length ? 'none' : http ? 'http' : 'sdk' };
+  }
+
+  /**
+   * Serve the plan's servers over loopback HTTP and write the --mcp-config file (fallback G2).
+   * @param {SdkMcpServer[]} servers
+   * @returns {Promise<{ file: string, env: Record<string, string> }>}
+   */
+  async _startHttpServers(servers) {
+    /** @type {Record<string, any>} */
+    const mcpServers = {};
+    /** @type {Record<string, string>} */
+    const env = {};
+    let i = 0;
+    for (const sv of servers) {
+      const ep = await /** @type {NonNullable<SdkMcpServer['startHttp']>} */ (sv.startHttp)();
+      if (!ep || typeof ep.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\//.test(ep.url) || typeof ep.token !== 'string' || !ep.token) {
+        throw new Error(`${sv.name}: startHttp() did not return a loopback url and a token`);
+      }
+      this._httpServers.set(sv.name, sv);
+      const tokenEnv = i++ === 0 ? MCP_TOKEN_ENV : `${MCP_TOKEN_ENV}_${i}`;
+      env[tokenEnv] = ep.token;
+      mcpServers[sv.name] = { type: 'http', url: ep.url, headers: { Authorization: `Bearer \${${tokenEnv}}` } };
+    }
+    nodeFs.mkdirSync(this._mcpDir, { recursive: true });
+    const file = path.join(this._mcpDir, servers.length === 1 ? `${servers[0].name}.json` : 'app-servers.json');
+    const tmp = `${file}.${process.pid}.tmp`;
+    nodeFs.writeFileSync(tmp, `${JSON.stringify({ mcpServers }, null, 2)}\n`, 'utf8');
+    nodeFs.renameSync(tmp, file);
+    // The CLI must reach 127.0.0.1 directly, also when the user has a proxy configured.
+    const noProxy = [this._env.NO_PROXY, this._env.no_proxy, '127.0.0.1', 'localhost'].filter(Boolean).join(',');
+    env.NO_PROXY = noProxy;
+    return { file, env };
+  }
+
+  /** @param {string} key @param {string} msg */
+  _warnOnce(key, msg) {
+    if (this._warned.has(key)) return;
+    this._warned.add(key);
+    this._log('warn', msg);
+  }
+
+  /** Stop the HTTP endpoints we started that the next CLI no longer uses. @param {Set<string>} keep */
+  async _stopHttpServers(keep) {
+    const stops = [];
+    for (const [name, sv] of this._httpServers) {
+      if (keep.has(name)) continue;
+      this._httpServers.delete(name);
+      if (typeof sv.stopHttp === 'function') stops.push(Promise.resolve().then(() => /** @type {any} */ (sv).stopHttp()).catch((err) => this._log('warn', `[claude] stopping the ${name} MCP endpoint: ${err.message}`)));
+    }
+    await Promise.all(stops);
   }
 
   _ensureRunning() {
@@ -664,6 +827,9 @@ export class ClaudeSession extends EventEmitter {
     }
 
     const workdir = resolveWorkdir(s.workdir, { homedir: this._homedir, env: this._env, platform: this._platform });
+    // The app's own tools (contract §10): computed once per spawn and kept on `info`.
+    const plan = this._mcpPlan();
+    const spawnKey = this._spawnKeyFor(s);
     let personaFile;
     try {
       nodeFs.mkdirSync(workdir, { recursive: true });
@@ -674,13 +840,28 @@ export class ClaudeSession extends EventEmitter {
       throw new Error(msg);
     }
     try {
-      personaFile = this._writePersona(s, workdir);
+      personaFile = this._writePersona(s, workdir, plan.context);
     } catch (err) {
       const msg = `Cannot write the persona file: ${/** @type {Error} */ (err).message}`;
       this._setStatus('error', msg);
       this._failQueued(msg);
       throw new Error(msg);
     }
+
+    /** @type {{ file: string, env: Record<string, string> }|null} */
+    let http = null;
+    let transport = plan.transport;
+    if (transport === 'http') {
+      try {
+        http = await this._startHttpServers(plan.servers);
+      } catch (err) {
+        // without the endpoint the camera tools are simply missing this time; the in-process
+        // route is offered again (it costs nothing)
+        this._log('warn', `[claude] MCP over HTTP unavailable: ${/** @type {Error} */ (err).message}`);
+        transport = 'sdk';
+      }
+    }
+    await this._stopHttpServers(new Set(transport === 'http' ? plan.names : []));
 
     const resumeId = this._sessionId || '';
     const args = buildClaudeArgs({
@@ -690,6 +871,9 @@ export class ClaudeSession extends EventEmitter {
       resumeSessionId: resumeId,
       personaFile,
       agentPermissionMode: s.mode === 'agent' ? this._agentPermissionMode : '',
+      allowedTools: plan.allow,
+      disallowedTools: plan.deny,
+      mcpConfigFile: http ? http.file : '',
       extraArgs: this._extraArgs,
     });
     if (this._stopped) throw new Error('Claude session was stopped');
@@ -700,7 +884,7 @@ export class ClaudeSession extends EventEmitter {
     try {
       ({ child } = spawnPortable(cli.path, args, {
         cwd: workdir,
-        env: cleanChildEnv(this._env),
+        env: cleanChildEnv(this._env, http ? http.env : {}),
         stdio: ['pipe', 'pipe', 'pipe'],
         platform: this._platform,
         windowsHide: true,
@@ -710,7 +894,8 @@ export class ClaudeSession extends EventEmitter {
       this._setStatus('error', msg);
       throw new Error(msg);
     }
-    this._log('info', `[claude] spawned pid ${child.pid} (${s.mode}${resumeId ? `, resume ${resumeId}` : ''})`);
+    const mcpNote = plan.names.length ? `, tools ${plan.names.join('+')} via ${transport === 'http' ? 'HTTP' : 'control channel'}` : '';
+    this._log('info', `[claude] spawned pid ${child.pid} (${s.mode}${resumeId ? `, resume ${resumeId}` : ''}${mcpNote})`);
 
     const info = {
       proc: child,
@@ -719,7 +904,17 @@ export class ClaudeSession extends EventEmitter {
       exited: false,
       expectedExit: false,
       resumeId,
-      spawnKey: this._spawnKeyFor(s),
+      spawnKey,
+      /** The app's MCP servers as offered to this process. */
+      mcp: {
+        transport,
+        names: plan.names,
+        /** @type {Map<string, SdkMcpServer>} */
+        servers: new Map(plan.servers.map((sv) => [sv.name, sv])),
+        /** servers whose tools/list this process asked for (the in-process route works) */
+        listed: new Set(),
+        checked: false,
+      },
       spawnedAt: Date.now(),
       stderr: new TextRingBuffer(16 * 1024),
       lastErrorText: '',
@@ -766,7 +961,10 @@ export class ClaudeSession extends EventEmitter {
     });
     child.once('close', (code, signal) => this._onExit(info, code, signal));
 
-    this._sendControl({ subtype: 'initialize' }, this._initTimeoutMs).then(
+    /** @type {Record<string, any>} */
+    const init = { subtype: 'initialize' };
+    if (transport === 'sdk' && plan.names.length) init.sdkMcpServers = plan.names;
+    this._sendControl(init, this._initTimeoutMs).then(
       () => this._onReady(info),
       (err) => {
         if (info === this._procInfo && !info.exited) {
@@ -778,11 +976,11 @@ export class ClaudeSession extends EventEmitter {
     return info.readyPromise;
   }
 
-  /** @param {ReturnType<ClaudeSession['_safeSettings']>} s @param {string} workdir */
-  _writePersona(s, workdir) {
+  /** @param {ReturnType<ClaudeSession['_safeSettings']>} s @param {string} workdir @param {Record<string, any>} [context] */
+  _writePersona(s, workdir, context = {}) {
     nodeFs.mkdirSync(this._personaDir, { recursive: true });
     const file = path.join(this._personaDir, personaFileName(s.mode));
-    const text = buildPersona(s.mode, { custom: s.persona, platform: this._platform, workdir });
+    const text = buildPersona(s.mode, { custom: s.persona, platform: this._platform, workdir, context });
     const tmp = `${file}.${process.pid}.tmp`;
     nodeFs.writeFileSync(tmp, text, 'utf8');
     nodeFs.renameSync(tmp, file);
@@ -1049,8 +1247,12 @@ export class ClaudeSession extends EventEmitter {
     const id = msg.request_id;
     const req = msg.request || {};
     if (typeof id !== 'string' || !id) return;
+    if (req.subtype === 'mcp_message') {
+      this._onMcpMessage(info, id, req);
+      return;
+    }
     if (req.subtype !== 'can_use_tool') {
-      // We don't implement hooks/MCP-over-stdio etc.; answer so the CLI never hangs on us.
+      // We don't implement hooks etc.; answer so the CLI never hangs on us.
       this._write({ type: 'control_response', response: { subtype: 'error', request_id: id, error: `Unsupported control request: ${req.subtype}` } });
       return;
     }
@@ -1069,12 +1271,88 @@ export class ClaudeSession extends EventEmitter {
     this._emit(ev);
   }
 
+  /**
+   * A JSON-RPC message from the CLI to one of the app's in-process MCP servers (contract §10.1):
+   * answered as soon as the server has, independently of turns, so a tool call never waits on
+   * anything else. Notifications get the empty success the Agent SDK sends.
+   * @param {any} info @param {string} id @param {Record<string, any>} req
+   */
+  _onMcpMessage(info, id, req) {
+    const name = typeof req.server_name === 'string' ? req.server_name : '';
+    const server = info.mcp && info.mcp.transport === 'sdk' ? info.mcp.servers.get(name) : undefined;
+    const reply = (/** @type {Record<string, any>} */ response) => {
+      // a process replaced in the meantime never sees an answer meant for its predecessor
+      if (info !== this._procInfo || info.exited) return;
+      this._write({ type: 'control_response', response });
+    };
+    if (!server) {
+      reply({ subtype: 'error', request_id: id, error: `SDK MCP server not found: ${name}` });
+      return;
+    }
+    const message = req.message;
+    if (!isPlainObject(message)) {
+      reply({ subtype: 'error', request_id: id, error: 'mcp_message without a JSON-RPC message' });
+      return;
+    }
+    const method = typeof message.method === 'string' ? message.method : '(response)';
+    this._log('debug', `[claude] mcp ${name} ${method}${typeof message.params?.name === 'string' ? ` ${message.params.name}` : ''}`);
+    Promise.resolve()
+      .then(() => server.handle(message))
+      .then(
+        (result) => {
+          if (method === 'tools/list' && result && isPlainObject(result) && 'result' in result) info.mcp.listed.add(name);
+          reply({ subtype: 'success', request_id: id, response: { mcp_response: result ?? { jsonrpc: '2.0', result: {}, id: 0 } } });
+        },
+        (err) => {
+          const text = err && err.message ? String(err.message) : String(err);
+          this._log('warn', `[claude] mcp ${name} ${method} failed: ${text}`);
+          reply({ subtype: 'error', request_id: id, error: text.slice(0, 500) });
+        },
+      );
+  }
+
+  /**
+   * The CLI's system/init after it was offered in-process servers: when their tools are missing
+   * (a CLI that ignores initialize.sdkMcpServers), switch this app session to the loopback HTTP
+   * route and restart the CLI after the running turn (resuming the conversation). Decided once
+   * per process; a server still 'pending' is looked at again on the next init.
+   * @param {any} info @param {Record<string, any>} msg
+   */
+  _checkSdkMcp(info, msg) {
+    const m = info.mcp;
+    if (!m || m.transport !== 'sdk' || m.checked || !m.names.length || this._mcpTransport !== 'sdk') return;
+    const tools = Array.isArray(msg.tools) ? msg.tools.filter((t) => typeof t === 'string') : [];
+    const listed = Array.isArray(msg.mcp_servers) ? msg.mcp_servers : [];
+    const statusOf = (/** @type {string} */ name) => listed.find((x) => x && x.name === name)?.status;
+    const missing = m.names.filter((/** @type {string} */ n) => !tools.some((t) => t.startsWith(`mcp__${n}__`)));
+    if (!missing.length) {
+      m.checked = true;
+      return;
+    }
+    if (missing.every((/** @type {string} */ n) => statusOf(n) === 'pending')) return;
+    m.checked = true;
+    const version = this._cli?.version || 'unknown version';
+    if (missing.some((/** @type {string} */ n) => m.listed.has(n) || statusOf(n) === 'connected')) {
+      // the server is connected but its tools are not offered: HTTP would not change that
+      this._log('warn', `[claude] ${missing.join(', ')} connected, but the CLI (${version}) does not list its tools`);
+      return;
+    }
+    if (!missing.every((/** @type {string} */ n) => typeof m.servers.get(n)?.startHttp === 'function')) {
+      this._log('warn', `[claude] the CLI (${version}) did not take the in-process tools of ${missing.join(', ')}, and there is no HTTP fallback`);
+      return;
+    }
+    this._log('warn', `[claude] the CLI (${version}) did not take the in-process tools of ${missing.join(', ')}; serving them over loopback HTTP from the next turn on`);
+    this._mcpTransport = 'http';
+    this.applySettings(); // the spawn key changed: restart after the running turn
+  }
+
   /** @param {any} info @param {Record<string, any>} msg */
   _onInit(info, msg) {
     if (typeof msg.session_id === 'string' && msg.session_id) this._setSessionId(msg.session_id);
     if (typeof msg.model === 'string') this._model = msg.model;
     this._tools = Array.isArray(msg.tools) ? msg.tools.filter((x) => typeof x === 'string') : [];
     if (!this._cli?.version && typeof msg.claude_code_version === 'string' && this._cli) this._cli.version = msg.claude_code_version;
+    this._checkSdkMcp(info, msg);
     const key = JSON.stringify([this._sessionId, this._model, this._tools]);
     if (key === info.lastSessionEvent) return; // the CLI repeats init on every turn
     info.lastSessionEvent = key;

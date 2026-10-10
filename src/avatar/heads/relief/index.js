@@ -165,6 +165,8 @@ export default class ReliefHead {
     geo.setAttribute('aSlitD', new THREE.BufferAttribute(slitDistances(mesh.positions, n, this.pack.rig.slitLine), 1));
     const Index = n > 65535 ? Uint32Array : Uint16Array;
     geo.setIndex(new THREE.BufferAttribute(Index.from(mesh.indices), 1));
+    // the relief's surface normals (it is a height field: every face looks toward the viewer)
+    geo.setAttribute('aNormal', new THREE.BufferAttribute(reliefNormals(geo.getAttribute('position').array, mesh.indices), 3));
     geo.computeBoundingSphere();
     geo.boundingSphere.radius *= 1.5; // rig deformation headroom
 
@@ -190,6 +192,9 @@ export default class ReliefHead {
       uLipWarp: { value: new THREE.Vector4() },
       uColLine: { value: palette.line.clone() }, uColRim: { value: palette.rim.clone() },
       uColEye: { value: palette.eye.clone() }, uColGrid: { value: palette.grid.clone() },
+      // the light and the hologram's life: see FACE_FRAG ("light and life") and RELIEF_LIGHT
+      uLight: { value: new THREE.Vector4(RELIEF_LIGHT.diffuse, RELIEF_LIGHT.glint, RELIEF_LIGHT.rim, RELIEF_LIGHT.sharpen) },
+      uPulseW: { value: new THREE.Vector2() }, uBreath: { value: 0.5 }, uPop: { value: 1 },
     };
     const mat = new THREE.ShaderMaterial({
       vertexShader: FACE_VERT, fragmentShader: FACE_FRAG, uniforms: this.faceUniforms,
@@ -275,6 +280,12 @@ export default class ReliefHead {
     f.uError.value = a.error;
     f.uSleep.value = a.sleep;
     f.uFx.value = this.fx;
+    // (the light itself is physical; its emissive parts scale with the living effects)
+    const fxk = Math.min(1.5, this.fx);
+    f.uLight.value.set(RELIEF_LIGHT.diffuse, RELIEF_LIGHT.glint * fxk, RELIEF_LIGHT.rim * fxk, RELIEF_LIGHT.sharpen);
+    f.uPop.value = fxk;
+    f.uBreath.value = a.breath;
+    f.uPulseW.value.set(...this._pulseWave(time, a.pulse ?? 0));
     f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
     f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
     f.uLens.value.set(u.lens[0], u.lens[1]);
@@ -288,6 +299,19 @@ export default class ReliefHead {
     cu.uJawPx.value = u.jawDrop * H;
     // world -> px -> mouth texture v (its upper half, the cavity, spans the mouth rect height)
     cu.uTeethShift.value = (u.teethShift * H * 0.5) / (this.pack.mouthRect?.[3] || 127);
+  }
+
+  /**
+   * The energy wave of an emphasis (AnimState.pulse): its front starts at the brow when a pulse
+   * rises and runs out over the face. @param {number} time @param {number} pulse
+   * @returns {[number, number]} radius (plate heights), amplitude
+   */
+  _pulseWave(time, pulse) {
+    const w = this._wave || (this._wave = { last: 0, t0: -Infinity, rising: false });
+    if (pulse > w.last + 0.01 && !w.rising) { w.rising = true; w.t0 = time - 0.03; }
+    else if (pulse < w.last) w.rising = false;
+    w.last = pulse;
+    return pulse > 0.002 ? [(time - w.t0) * 0.9, pulse] : [0, 0];
   }
 
   /**
@@ -309,6 +333,15 @@ export default class ReliefHead {
     };
   }
 
+  /**
+   * The glow a covered pixel needs to occlude the desktop (post.js): with a baked occlusion mask
+   * (masks_c) the whole face and cranium are glass that hides a busy desktop behind it.
+   * @returns {[number, number]}
+   */
+  coverageGate() {
+    return this.hasLids ? [0.0, 0.015] : [0.04, 0.24];
+  }
+
   /** @returns {import('../../fx/particles.js').ParticleAnchors} */
   particleAnchors() {
     const p = this.pack;
@@ -326,6 +359,7 @@ export default class ReliefHead {
       depth: (p.rig.depth?.inflateRadius ?? 0.3 * H) / H,
       outline: this._worldOutline(p.visibleOutline ?? p.outline),
       jaw: jawFromLandmarks(p.landmarks, W, H),
+      pivot: /** @type {[number, number, number]} */ ([...this.rig.headPivot]),
     };
   }
 
@@ -365,6 +399,32 @@ export default class ReliefHead {
     if (this.textures) Object.values(this.textures).forEach((t) => t.dispose());
     this.group = null;
   }
+}
+
+/** The relief's light (FACE_FRAG "light and life"): the key light's change as the head turns,
+ * the glint, the rim on the edges turning away, the plate's sharpening. */
+export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.5, glint: 0.5, rim: 0.55, sharpen: 0.45 });
+
+/**
+ * Area-weighted vertex normals of a height-field mesh, every face turned toward +z (the viewer).
+ * @param {ArrayLike<number>} pos xyz per vertex @param {ArrayLike<number>} idx triangles
+ * @returns {Float32Array}
+ */
+export function reliefNormals(pos, idx) {
+  const n = new Float32Array(pos.length);
+  for (let i = 0; i < idx.length; i += 3) {
+    const a = idx[i] * 3, b = idx[i + 1] * 3, c = idx[i + 2] * 3;
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    for (const v of [a, b, c]) { n[v] += nx; n[v + 1] += ny; n[v + 2] += nz; }
+  }
+  for (let v = 0; v < n.length; v += 3) {
+    const l = Math.hypot(n[v], n[v + 1], n[v + 2]);
+    if (l > 0) { n[v] /= l; n[v + 1] /= l; n[v + 2] /= l; } else n[v + 2] = 1;
+  }
+  return n;
 }
 
 /**

@@ -5,6 +5,7 @@
 // particle per frame; only a handful of uniforms change.
 
 import * as THREE from 'three';
+import { springStep } from '../motion.js';
 import { mulberry32 } from '../noise.js';
 
 /**
@@ -21,6 +22,8 @@ import { mulberry32 } from '../noise.js';
  *           pose). When given, the halo and the wisps hug the real outline instead of the ellipse.
  * @property {{ center: [number,number], radius: [number,number] }} [jaw]  half ellipse of the jaw
  *           line (jaw angles -> chin) for the collar; derived from the head ellipse when missing
+ * @property {[number,number,number]} [pivot]  the point the head turns about (world); the aura
+ *           turns with it (parallax). Below the head centre when missing.
  */
 
 export const KIND_FRACTIONS = [
@@ -63,6 +66,12 @@ uniform float uRad[NRAD]; // outline radius around uAnchor.xy, angle -PI..PI
 uniform float uError;
 uniform vec3 uCyan;
 uniform vec3 uAmber;
+// the head's motion, a few frames behind it: the aura turns and shifts with it about its pivot,
+// each layer at its own depth (parallax against the face and each other)
+uniform mat3 uHeadRot;
+uniform vec3 uHeadPivot;
+uniform vec3 uHeadXform;  // shift x, y (world), scale
+uniform vec2 uHeadPar;    // the far field's slight counter-parallax (yaw, pitch)
 varying vec3 vColor;
 varying float vAlpha;
 varying float vBokeh;
@@ -198,6 +207,15 @@ void main() {
     twinkle = mix(1.0, 0.55 + 0.45 * twinkle, spark);
   }
 
+  // the aura around the head goes with it (the neck motes partly, the far field not)
+  float follow = aKind < 0.5 ? 1.0 : aKind < 1.5 ? 0.35 : aKind < 2.5 ? 0.0 : 1.0;
+  if (follow > 0.0) {
+    vec3 hq = uHeadPivot + uHeadRot * (p - uHeadPivot) * uHeadXform.z + vec3(uHeadXform.xy, 0.0);
+    p = mix(p, hq, follow);
+  } else {
+    p.xy -= uHeadPar * p.z;
+  }
+
   // error: everything shivers and a little red bleeds in
   p.xy += uError * 0.004 * vec2(sin(uTime * 50.0 + aSeed.x * 40.0), cos(uTime * 47.0 + aSeed.y * 40.0));
   col = mix(col, vec3(1.0, 0.35, 0.3), uError * 0.35);
@@ -237,6 +255,19 @@ void main() {
   float a = mix(mix(core, disc * 0.6, vBokeh), smoke, vSoft) * vAlpha;
   gl_FragColor = vec4(vColor * a, 0.0);                           // additive, alpha untouched
 }`;
+
+/**
+ * Rotation Rz(roll) * Ry(yaw) * Rx(-pitch), column-major mat3 (the heads' convention: yaw > 0 turns
+ * toward screen right, pitch > 0 looks up, roll > 0 tilts counter-clockwise on screen).
+ */
+export function yprMatrix(yaw, pitch, roll, out) {
+  const ax = -pitch;
+  const cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(yaw), sy = Math.sin(yaw), cz = Math.cos(roll), sz = Math.sin(roll);
+  out[0] = cz * cy; out[1] = sz * cy; out[2] = -sy;
+  out[3] = cz * sy * sx - sz * cx; out[4] = sz * sy * sx + cz * cx; out[5] = cy * sx;
+  out[6] = cz * sy * cx + sz * sx; out[7] = sz * sy * cx - cz * sx; out[8] = cy * cx;
+  return out;
+}
 
 /** Ellipse polygon from the anchors (fallback outline). */
 function ellipseOutline(a, n) {
@@ -444,7 +475,16 @@ export class Particles {
       uError: { value: 0 },
       uCyan: { value: new THREE.Color(opts.palette.wisp) },
       uAmber: { value: new THREE.Color(opts.palette.mote) },
+      uHeadRot: { value: new THREE.Matrix3() },
+      uHeadPivot: { value: new THREE.Vector3() },
+      uHeadXform: { value: new THREE.Vector3(0, 0, 1) },
+      uHeadPar: { value: new THREE.Vector2() },
     };
+    // the head's motion as the aura follows it: springs a few frames behind (yaw, pitch, roll,
+    // shiftX, lean)
+    this._follow = [0, 0, 0, 0, 0].map(() => ({ x: 0, v: 0 }));
+    this._rot = new Float32Array(9);
+    this._faceH = 0.6;
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERT, fragmentShader: FRAG, uniforms: this.uniforms,
       transparent: true, depthTest: true, depthWrite: false,
@@ -488,6 +528,9 @@ export class Particles {
     fillHaloBases(this._base, this.geometry.getAttribute('aSeed').array, outline, a);
     this.geometry.getAttribute('aBase').needsUpdate = true;
     const [rx, ry] = a.radius;
+    const pv = a.pivot ?? [a.center[0], a.center[1] - 0.45 * ry, 0];
+    u.uHeadPivot.value.set(pv[0], pv[1], pv[2]);
+    this._faceH = 1.6 * ry;
     const raw = outlineRadii(outline, a.center, RADIUS_SAMPLES,
       (th) => 1 / Math.hypot(Math.cos(th) / rx, Math.sin(th) / ry));
     // ribbons pass around the ears instead of tracing every notch of the silhouette
@@ -518,12 +561,25 @@ export class Particles {
       this._pt = time;
       this._swirl = 0;
     }
+    // the aura follows the head a few frames behind (t90 ~0.3 s); fixed-time renders: at once
+    const tgt = [a.headYaw ?? 0, a.headPitch ?? 0, a.headRoll ?? 0, a.shiftX ?? 0, a.lean ?? 0];
+    for (let k = 0; k < 5; k++) {
+      const s = this._follow[k];
+      if (dt > 0) springStep(s, tgt[k], 12, dt);
+      else { s.x = tgt[k]; s.v = 0; }
+    }
+    const f = this._follow;
+    u.uHeadRot.value.fromArray(yprMatrix(f[0].x, f[1].x, f[2].x, this._rot));
+    // (as the heads: 2 % of the face height sideways, 3 % larger and a little lower leaning in)
+    u.uHeadXform.value.set(0.02 * this._faceH * f[3].x, -0.012 * this._faceH * f[4].x, 1 + 0.03 * f[4].x);
+    u.uHeadPar.value.set(0.12 * f[0].x, 0.12 * f[1].x);
     u.uTime.value = time;
     u.uPTime.value = this._pt;
     u.uSwirl.value = this._swirl;
     u.uState.value.set(a.listen, a.think, a.speak, a.sleep);
     u.uError.value = a.error;
-    u.uSpeechPulse.value = a.speech;
+    // (an emphasis sends a pulse of energy out through the aura)
+    u.uSpeechPulse.value = Math.max(a.speech, a.pulse ?? 0);
     // idle shows ~70% of the motes; attention / thinking / speech make the aura denser
     u.uVisible.value = Math.min(1, 0.7 + 0.3 * Math.max(a.listen, a.think, a.speak)) * (1 - 0.55 * a.sleep);
     // the aura builds up over the first ~12 s (as in the reference video) and with activity
@@ -533,7 +589,7 @@ export class Particles {
     const w = Math.min(1, Math.max(0, (time - 1) / 11));
     u.uWispBuild.value = 0.04 + 0.96 * w * w * (3 - 2 * w);
     u.uWisp.value = (1.0 + 0.45 * a.think + 0.35 * a.speak * (0.5 + a.speech) + 0.2 * a.listen) * (1 - 0.6 * a.sleep);
-    u.uIntensity.value = (0.7 + 0.6 * a.energy) * (1 - 0.4 * a.error);
+    u.uIntensity.value = (0.7 + 0.6 * a.energy + 0.3 * (a.pulse ?? 0)) * (1 - 0.4 * a.error);
   }
 
   dispose() {

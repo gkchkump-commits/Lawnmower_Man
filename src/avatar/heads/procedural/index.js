@@ -262,7 +262,8 @@ export default class ProceduralHead {
   /** @returns {import('../../fx/particles.js').ParticleAnchors} */
   particleAnchors() {
     const p = this.model.meta.particleAnchors;
-    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon() };
+    const pv = this.model.meta.rig?.headPivot;
+    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon(), ...(pv ? { pivot: [pv[0], pv[1], pv[2]] } : {}) };
   }
 
   /** Silhouette (world, rest pose, screen plane) for hitTest. */

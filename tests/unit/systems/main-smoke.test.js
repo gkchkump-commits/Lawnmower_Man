@@ -29,6 +29,7 @@ vi.mock('electron', async () => {
       this.events = new Map();
       this.send = vi.fn((ch, payload) => this.sent.push([ch, payload]));
       this.isDestroyed = () => false;
+      this.isCrashed = () => false;
       this.setWindowOpenHandler = vi.fn((h) => { this.openHandler = h; });
       this.toggleDevTools = fn();
       this.reload = fn();
@@ -55,8 +56,11 @@ vi.mock('electron', async () => {
     getBounds() { return { ...this.bounds }; }
     getContentBounds() { return { ...this.bounds }; }
     isVisible() { return this.visible; }
-    isDestroyed() { return false; }
+    isDestroyed() { return !!this.destroyed; }
     isMinimized() { return false; }
+    setTitle(t) { this.title = t; }
+    setMenuBarVisibility() {}
+    destroy() { this.destroyed = true; this.events.get('closed')?.(); }
     show() { this.visible = true; this.events.get('show')?.(); }
     showInactive() { this.visible = true; this.events.get('show')?.(); }
     hide() { this.visible = false; this.events.get('hide')?.(); }
@@ -114,6 +118,10 @@ vi.mock('electron', async () => {
       },
     },
     shell: { openExternal: vi.fn(async () => {}), openPath: vi.fn(async () => '') },
+    // the home camera (electron/tapo, off by default): main.js hands these to createTapo()
+    safeStorage: { isAsyncEncryptionAvailable: vi.fn(async () => false), getSelectedStorageBackend: vi.fn(() => 'basic_text') },
+    Notification: class { static isSupported() { return false; } show() {} on() {} },
+    MessageChannelMain: class {},
   };
 });
 
@@ -198,15 +206,22 @@ describe('electron/main.js wiring', () => {
     expect(boot.appMenu).toEqual([[null]]);
   });
 
-  it('exposes exactly the IPC channels the preload uses', () => {
-    const preload = fs.readFileSync(path.resolve('electron/preload.cjs'), 'utf8');
-    const used = new Set([...preload.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
-    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor', 'lm:window:visibility'];
+  it('exposes exactly the IPC channels the preloads use', () => {
+    // the avatar window's preload and the Home camera window's (electron/tapo registers lm:tapo:*)
+    const preloads = ['electron/preload.cjs', 'electron/preload-camera.cjs'].map((f) => fs.readFileSync(path.resolve(f), 'utf8')).join('\n');
+    const used = new Set([...preloads.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
+    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor', 'lm:window:visibility',
+      'lm:tapo:alert', 'lm:tapo:look', 'lm:tapo:event', 'lm:tapo:open-event', 'lm:tapo:calibration', 'lm:tapo:port'];
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
-    expect([...m.handlers.keys()].sort()).toEqual([
+    expect([...m.handlers.keys()].filter((ch) => !ch.startsWith('lm:tapo:')).sort()).toEqual([
       'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:retry', 'lm:claude:send', 'lm:claude:status',
       'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:open-setup-log', 'lm:voice:restart', 'lm:voice:setup',
+    ]);
+    expect([...m.handlers.keys()].filter((ch) => ch.startsWith('lm:tapo:')).sort()).toEqual([
+      'lm:tapo:arm', 'lm:tapo:calibrate', 'lm:tapo:clear-credentials', 'lm:tapo:discover', 'lm:tapo:event-ack', 'lm:tapo:event-remove', 'lm:tapo:events-list',
+      'lm:tapo:open-clips', 'lm:tapo:preset-remove', 'lm:tapo:preset-save', 'lm:tapo:presets', 'lm:tapo:ptz', 'lm:tapo:request-port', 'lm:tapo:set-credentials',
+      'lm:tapo:status', 'lm:tapo:test', 'lm:tapo:window',
     ]);
   });
 
@@ -796,6 +811,47 @@ describe('electron/main.js wiring', () => {
     } finally {
       await invoke('lm:settings:set', { camera: { enabled: false } });
     }
+  });
+
+  it('home camera: its window comes and goes with tapo.enabled, may use only its own settings, gets them forwarded', async () => {
+    const t = main.__test;
+    const camWindows = () => m.windows.filter((w) => /preload-camera\.cjs$/.test(w.opts.webPreferences?.preload || ''));
+    expect(camWindows()).toHaveLength(0); // off by default: no window, no camera traffic
+    expect(t.state.tray.menu.template.find((i) => i.label === 'Home camera').submenu[0].label).toBe('Home camera is off');
+    const cam = { sender: null, senderFrame: { url: 'app://lawnmower/tapo/index.html' } };
+    try {
+      await invoke('lm:settings:set', { tapo: { enabled: true, name: 'front door camera' } });
+      const [cw] = camWindows();
+      expect(cw).toBeTruthy();
+      expect(cw.opts.webPreferences).toMatchObject({ contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true });
+      expect(cw.loadURL).toHaveBeenCalledWith('app://lawnmower/tapo/index.html');
+      expect(t.state.tapo.cameraWindow()).toBe(cw);
+      cam.sender = cw.webContents;
+      // the camera window: settings (its groups only), app info, its lm:tapo:* channels — never Claude
+      expect((await m.handlers.get('lm:settings:get')(cam)).tapo.name).toBe('front door camera');
+      expect(await m.handlers.get('lm:app:info')(cam)).toMatchObject({ version: '0.1.0-test' });
+      await expect(m.handlers.get('lm:settings:set')(cam, { window: { alwaysOnTop: false } })).rejects.toThrow(/only change the camera settings/);
+      await expect(m.handlers.get('lm:settings:set')(cam, { tapo: { name: 'porch camera' }, claude: { mode: 'agent' } })).rejects.toThrow(/only change the camera settings/);
+      expect((await m.handlers.get('lm:settings:set')(cam, { tapo: { name: 'porch camera' } })).tapo.name).toBe('porch camera');
+      expect(cw.webContents.sent.some(([ch, st]) => ch === 'lm:settings:changed' && st.tapo.name === 'porch camera')).toBe(true);
+      await expect(m.handlers.get('lm:claude:send')(cam, 'hi')).rejects.toThrow(/untrusted/);
+      await expect(m.handlers.get('lm:voice:info')(cam)).rejects.toThrow(/untrusted/);
+      expect((await m.handlers.get('lm:tapo:status')(cam)).connection).toBe('not-configured');
+      // a page from somewhere else in that window is not trusted either
+      await expect(m.handlers.get('lm:settings:get')({ sender: cw.webContents, senderFrame: { url: 'https://evil.example/' } })).rejects.toThrow(/untrusted/);
+      // the avatar window: status yes, the camera window's setup channels no
+      expect((await invoke('lm:tapo:status')).name).toBe('porch camera');
+      await expect(invoke('lm:tapo:set-credentials', { username: 'camacct', password: 'se&cret' })).rejects.toThrow(/untrusted/);
+      // the tray's Home camera submenu
+      const sub = t.state.tray.menu.template.find((i) => i.label === 'Home camera').submenu;
+      expect(sub.map((i) => i.label)).toEqual(['Not set up yet', 'Set up the home camera…', 'Armed', 'Open clips folder']);
+      // not configured: no camera tools for Claude
+      expect(t.state.tapo.mcpServers()).toEqual([]);
+    } finally {
+      await invoke('lm:settings:set', { tapo: { enabled: false, name: 'camera' } });
+    }
+    expect(camWindows()[0].destroyed).toBe(true);
+    expect(t.state.tapo.cameraWindow()).toBe(null);
   });
 
   it('shuts down child processes on will-quit, then quits', async () => {

@@ -84,6 +84,25 @@ const api = {
   app: {
     info: () => invoke('lm:app:info'),
   },
+  // The Tapo home camera (docs/TAPO.md): status, arming (always with the exit delay from here),
+  // pan/tilt, presets, the events list, and the camera window. Alerts and "look over there"
+  // points arrive through onAlert / onLook. The camera window itself has its own preload
+  // (preload-camera.cjs, window.lawnmowerCamera).
+  tapo: {
+    status: () => invoke('lm:tapo:status'),
+    arm: (armed) => invoke('lm:tapo:arm', { armed: !!armed }),
+    // { op: 'nudge'|'hold'|'heartbeat'|'release'|'stop'|'center'|'preset'|'preset-name'|'home', … }
+    ptz: (cmd) => invoke('lm:tapo:ptz', cmd),
+    presets: (o) => invoke('lm:tapo:presets', o),
+    events: (q) => invoke('lm:tapo:events-list', q),
+    // { eventId? }: show the camera window (and open that event's clip)
+    openWindow: (o) => invoke('lm:tapo:window', { show: true, ...(o || {}) }),
+    openClips: () => invoke('lm:tapo:open-clips'),
+    onStatus: (cb) => subscribe('lm:tapo:status', cb),
+    onAlert: (cb) => subscribe('lm:tapo:alert', cb),
+    // { x, y, holdMs }: a point in this window's CSS px (the camera window's centre)
+    onLook: (cb) => subscribe('lm:tapo:look', cb),
+  },
 };
 
 contextBridge.exposeInMainWorld('lawnmower', api);

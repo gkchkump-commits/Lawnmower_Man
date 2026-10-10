@@ -3,7 +3,8 @@
 // Responsibilities: single-instance app lifecycle, the transparent always-on-top avatar window,
 // app:// protocol serving dist/, CSP + permission + navigation hardening, tray menu, global
 // shortcuts, IPC for the window.lawnmower contract (docs/ARCHITECTURE.md §3), and supervision of
-// the Claude CLI session and the local voice server.
+// the Claude CLI session and the local voice server. The Tapo home camera (electron/tapo/,
+// docs/TAPO.md) is composed here too: its window, IPC channels, clip mount and Claude tools.
 //
 // Dev/test environment overrides (all optional):
 //   VITE_DEV_SERVER_URL        load the renderer from a loopback Vite dev server (ignored unless loopback)
@@ -13,8 +14,12 @@
 //   LAWNMOWER_AGENT_PERMISSION_MODE  e.g. "acceptEdits" for agent mode
 //   LAWNMOWER_DEBUG=1          debug logging;  LAWNMOWER_DEVTOOLS=1  allow DevTools when packaged
 //   LAWNMOWER_FORCE_CLICK_THROUGH=1  honour click-through on Linux too (no mouse-move forwarding there)
-//   LAWNMOWER_E2E=1            expose a few main-process helpers to scripts/electron-e2e.mjs
-//                              (globalThis.__lawnmowerE2E; main process only, never the renderer)
+//   LAWNMOWER_E2E=1            expose a few main-process helpers to scripts/electron-e2e.mjs and
+//                              scripts/tapo-e2e.mjs (globalThis.__lawnmowerE2E; main process only,
+//                              never the renderer)
+//   LAWNMOWER_TAPO_ALLOW_LOOPBACK=1  the home camera may be on 127.0.0.1 (the camera simulator)
+//   LAWNMOWER_TAPO_FAKE_DETECTOR=1   the camera window's worker uses the test person detector
+//   LAWNMOWER_GO2RTC           path of the go2rtc binary (default: resources/tapo/ or vendor/go2rtc/)
 //
 // These are honoured in packaged builds too, deliberately (scripts/electron-e2e.mjs --packaged
 // drives the installed app with them). Threat model: the environment of a desktop process is set
@@ -28,12 +33,15 @@ import {
   app,
   BrowserWindow,
   Menu,
+  MessageChannelMain,
+  Notification,
   dialog,
   Tray,
   globalShortcut,
   ipcMain,
   nativeImage,
   protocol,
+  safeStorage,
   screen,
   session,
   shell,
@@ -80,6 +88,8 @@ import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
 import { HotkeyManager } from './hotkeys.js';
 import { renderIconPng } from './icon.js';
 import { createLogger } from './logger.js';
+import { createTapo } from './tapo/index.js';
+import { validateCameraSettingsPatch } from './tapo/validate.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, '..');
@@ -98,6 +108,11 @@ const state = {
   /** @type {SettingsStore|null} */ settings: null,
   /** @type {ClaudeSession|null} */ claude: null,
   /** @type {VoiceSidecar|null} */ voice: null,
+  /** The home camera (electron/tapo/index.js createTapo). @type {ReturnType<typeof createTapo>|null} */ tapo: null,
+  /** The camera's Claude tools as last handed to the session (see syncClaudeTools). */
+  tapoToolsKey: '',
+  /** The tray's Home camera state as last shown (see rebuildTrayForTapo). */
+  tapoTrayKey: '',
   /** @type {VoiceSetupRunner|null} */ setup: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
   /** @type {CursorTracker|null} */ cursor: null,
@@ -198,8 +213,47 @@ async function init() {
   state.followCursor = settings.get().avatar.followCursor !== false;
 
   setupSessionSecurity(session.defaultSession);
-  protocol.handle(APP_SCHEME, createAppProtocolHandler({ root: distDir, host: APP_HOST, csp, log }));
+  // app:// serves dist/ and, under /__clips/, the home camera's clips and snapshots (Range for
+  // seeking). The handler reads `mounts` on every request: filled right after createTapo() below,
+  // in the same synchronous block, so the camera window (opened on the next tick) loads through it.
+  /** @type {import('./app-protocol.js').Mount[]} */
+  const appMounts = [];
+  protocol.handle(APP_SCHEME, createAppProtocolHandler({ root: distDir, host: APP_HOST, csp, log, mounts: appMounts }));
   Menu.setApplicationMenu(null);
+
+  // --- Home camera (Tapo C211, docs/TAPO.md; contract §3.2) ---
+  // Its own window, IPC channels (lm:tapo:*), notifications and the Claude tools. It talks to the
+  // camera only while settings.tapo.enabled is on and the camera is set up.
+  const tapo = createTapo({
+    electron: { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain, dialog },
+    settings,
+    log,
+    userData,
+    appRoot,
+    resourcesPath: process.resourcesPath,
+    isPackaged: app.isPackaged,
+    devServerUrl,
+    trust,
+    env: process.env,
+    appVersion: app.getVersion(),
+    preloadCamera: path.join(here, 'preload-camera.cjs'),
+    // (state.tapo: the camera window is looked up when a call arrives, not now)
+    isTrustedSender: (event, kinds) => {
+      assertSender(event, kinds);
+    },
+    getAvatarWindow: () => state.win,
+    sendToAvatar: sendToRenderer,
+    showAvatar: () => showWindow(false),
+    icon: appIcon(),
+  });
+  state.tapo = tapo;
+  appMounts.push(...tapo.protocolMounts());
+  Object.assign(trayActions, tapo.trayActions);
+  // connection and armed state change on their own (status is coalesced to ≤ 4 a second)
+  tapo.service.on('status', () => {
+    rebuildTrayForTapo();
+    syncClaudeTools();
+  });
 
   // --- Claude ---
   const claude = new ClaudeSession({
@@ -208,6 +262,13 @@ async function init() {
     onSessionId: (id) => settings.update({ claude: { lastSessionId: id } }),
     cliPath: process.env.LAWNMOWER_CLAUDE_CLI || '',
     agentPermissionMode: process.env.LAWNMOWER_AGENT_PERMISSION_MODE || '',
+    // The home camera's tools (contract §10): in-process over the control channel; when a CLI
+    // does not take in-process servers (system/init without them), the session switches to the
+    // server's loopback HTTP endpoint (startHttp(), --mcp-config <userData>/mcp/…) by itself.
+    getSdkMcpServers: () => (state.tapo ? state.tapo.mcpServers() : []),
+    getToolPermissions: () => (state.tapo ? state.tapo.toolPermissions() : { allow: [], deny: [] }),
+    getPersonaContext: () => (state.tapo ? state.tapo.personaContext() : {}),
+    mcpDir: path.join(userData, 'mcp'),
     log,
   });
   claude.on('event', (ev) => {
@@ -223,6 +284,7 @@ async function init() {
     }
   });
   state.claude = claude;
+  state.tapoToolsKey = claudeToolsKey();
 
   // --- Voice ---
   // Packaged: the code ships in resources/voice, but the venv (and models) live in a per-user
@@ -318,8 +380,9 @@ async function shutdown() {
     globalShortcut.unregisterAll();
   } catch { /* ignore */ }
   const timeout = new Promise((r) => setTimeout(r, 5000));
+  // tapo.stop() is bounded (≈ 4 s): Stop the motor, Unsubscribe, finish the clip, kill go2rtc
   await Promise.race([
-    Promise.allSettled([state.claude?.stop(), state.voice?.stop()]),
+    Promise.allSettled([state.claude?.stop(), state.voice?.stop(), state.tapo?.stop()]),
     timeout,
   ]);
   try {
@@ -468,6 +531,9 @@ function createWindow() {
     endResize();
     if (state.win === win) state.win = null;
     syncCursorTracking();
+    // The avatar is the app: closing it quits, as before the home camera, whose hidden window
+    // (it hosts the security worker) would otherwise keep 'window-all-closed' from firing.
+    if (!state.quitting) app.quit();
   });
 
   win.webContents.on('render-process-gone', (_e, details) => {
@@ -770,7 +836,11 @@ function reclampWindow() {
  */
 function onSettingsChanged(next, prev) {
   sendToRenderer('lm:settings:changed', next);
+  sendToCameraWindow('lm:settings:changed', next);
   const changed = (/** @type {keyof import('./settings.js').Settings} */ group) => JSON.stringify(next[group]) !== JSON.stringify(prev[group]);
+  const tapoChanged = changed('tapo') || changed('security');
+  // turns the camera window on/off, reconnects, arms (exit delay), applies the window options
+  if (tapoChanged) state.tapo?.applySettings(next, prev);
 
   const { lastSessionId: _a, ...claudeNext } = next.claude;
   const { lastSessionId: _b, ...claudePrev } = prev.claude;
@@ -793,7 +863,35 @@ function onSettingsChanged(next, prev) {
     if (next.window.sizePreset !== prev.window.sizePreset || next.window.avatarWidth !== prev.window.avatarWidth
       || next.window.showChat !== prev.window.showChat) applyWindowLayout();
   }
-  if (changed('window') || changed('claude') || changed('hotkeys') || changed('camera')) rebuildTray();
+  if (changed('window') || changed('claude') || changed('hotkeys') || changed('camera') || tapoChanged) rebuildTray();
+  // the camera's tools, their permissions (security.claudeSee/claudeMove) and the persona's camera
+  // paragraph are part of the CLI's spawn key: a change restarts it after the running turn
+  if (tapoChanged) syncClaudeTools();
+}
+
+/** What the Claude CLI is given of the home camera (server names, permissions, persona context). */
+function claudeToolsKey() {
+  const t = state.tapo;
+  if (!t) return '';
+  return JSON.stringify([t.mcpServers().map((sv) => sv.name), t.toolPermissions(), t.personaContext()]);
+}
+
+/**
+ * Hand the camera's tools to the Claude session again when they changed: also on status changes,
+ * because they depend on more than settings (a saved password makes the camera "configured").
+ */
+function syncClaudeTools() {
+  const key = claudeToolsKey();
+  if (key === state.tapoToolsKey) return;
+  state.tapoToolsKey = key;
+  state.claude?.applySettings();
+}
+
+/** Rebuild the tray when the home camera's tray state (connection, armed, …) changed. */
+function rebuildTrayForTapo() {
+  const key = state.tapo ? JSON.stringify(state.tapo.trayState()) : '';
+  if (key === state.tapoTrayKey) return;
+  rebuildTray();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -817,6 +915,7 @@ function createTray() {
   rebuildTray();
 }
 
+/** Tray menu actions; createTapo() adds tapoShow / tapoArm / tapoOpenClips (the Home camera submenu). */
 const trayActions = {
   toggleVisible,
   setAlwaysOnTop: (/** @type {boolean} */ on) => state.settings?.update({ window: { alwaysOnTop: on } }),
@@ -868,7 +967,9 @@ function rebuildTray() {
     voiceSetup: state.setup ? state.setup.state.state : 'idle',
     claudeProblem: state.claudeProblem ? state.claudeProblem.kind : '',
     hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
+    tapo: state.tapo ? state.tapo.trayState() : undefined,
   };
+  state.tapoTrayKey = st.tapo ? JSON.stringify(st.tapo) : '';
   try {
     tray.setContextMenu(Menu.buildFromTemplate(/** @type {any} */ (buildTrayTemplate(/** @type {any} */ (st), /** @type {any} */ (trayActions)))));
     tray.setToolTip(trayTooltip(/** @type {any} */ (st)));
@@ -891,28 +992,59 @@ function sendToRenderer(channel, payload) {
   }
 }
 
-/** Only our own window/page may call us. @param {import('electron').IpcMainEvent|import('electron').IpcMainInvokeEvent} event */
-function assertTrustedSender(event) {
-  const win = state.win;
-  const frameUrl = event.senderFrame ? event.senderFrame.url : '';
-  if (!win || event.sender !== win.webContents || !isTrustedUrl(frameUrl, trust)) {
-    throw new Error('IPC from an untrusted sender was rejected');
+/** The home camera window, while it exists (it lives hidden while the feature is on). @param {string} channel @param {unknown} payload */
+function sendToCameraWindow(channel, payload) {
+  const wc = state.tapo?.cameraWindow()?.webContents;
+  if (!wc || wc.isDestroyed() || wc.isCrashed()) return; // a crashed page reloads and reads settings again
+  try {
+    wc.send(channel, payload);
+  } catch (err) {
+    state.log('warn', `[ipc] send ${channel} to the camera window failed: ${/** @type {Error} */ (err).message}`);
   }
 }
 
-/** @param {string} channel @param {(...args: any[]) => any} fn */
-function handle(channel, fn) {
-  ipcMain.handle(channel, async (event, ...args) => {
-    assertTrustedSender(event);
-    return fn(...args);
-  });
+/** @typedef {'avatar'|'camera'} SenderKind */
+
+/**
+ * Only our own windows and pages may call us: `kinds` says which — 'avatar' is the avatar window,
+ * 'camera' the Home camera window — and the calling frame must show our own page. Returns the
+ * kind of the sender; throws for anyone else.
+ * @param {import('electron').IpcMainEvent|import('electron').IpcMainInvokeEvent} event
+ * @param {SenderKind[]} [kinds]
+ * @returns {SenderKind}
+ */
+function assertSender(event, kinds = ['avatar']) {
+  const frameUrl = event.senderFrame ? event.senderFrame.url : '';
+  if (isTrustedUrl(frameUrl, trust)) {
+    const win = state.win;
+    if (kinds.includes('avatar') && win && !win.isDestroyed() && event.sender === win.webContents) return 'avatar';
+    const cam = state.tapo?.cameraWindow();
+    if (kinds.includes('camera') && cam && !cam.isDestroyed() && event.sender === cam.webContents) return 'camera';
+  }
+  throw new Error('IPC from an untrusted sender was rejected');
 }
 
-/** @param {string} channel @param {(...args: any[]) => void} fn */
+/**
+ * An invoke handler for the windows in `kinds` (default: the avatar window only).
+ * @param {string} channel @param {(...args: any[]) => any} fn @param {SenderKind[]} [kinds]
+ */
+function handle(channel, fn, kinds = ['avatar']) {
+  handleFrom(channel, (_who, ...args) => fn(...args), kinds);
+}
+
+/**
+ * Like handle(), and `fn` is told which window called (its first argument).
+ * @param {string} channel @param {(who: SenderKind, ...args: any[]) => any} fn @param {SenderKind[]} kinds
+ */
+function handleFrom(channel, fn, kinds) {
+  ipcMain.handle(channel, async (event, ...args) => fn(assertSender(event, kinds), ...args));
+}
+
+/** A send (fire-and-forget) handler, from the avatar window only. @param {string} channel @param {(...args: any[]) => void} fn */
 function on(channel, fn) {
   ipcMain.on(channel, (event, ...args) => {
     try {
-      assertTrustedSender(event);
+      assertSender(event, ['avatar']);
       fn(...args);
     } catch (err) {
       state.log('warn', `[ipc] ${channel}: ${/** @type {Error} */ (err).message}`);
@@ -949,8 +1081,13 @@ function registerIpc() {
     voice.restart();
   });
 
-  handle('lm:settings:get', () => settings.get());
-  handle('lm:settings:set', (patch) => settings.update(validateSettingsPatch(patch)).settings);
+  // The avatar window and the Home camera window; the camera window may change only its own
+  // groups (tapo, security).
+  handle('lm:settings:get', () => settings.get(), ['avatar', 'camera']);
+  handleFrom('lm:settings:set', (who, patch) => {
+    const p = who === 'camera' ? validateCameraSettingsPatch(patch) : patch;
+    return settings.update(validateSettingsPatch(p)).settings;
+  }, ['avatar', 'camera']);
 
   handle('lm:app:info', () => {
     const s = settings.get();
@@ -967,7 +1104,7 @@ function registerIpc() {
       gpu: state.gpu,
       logFile: state.log.file,
     };
-  });
+  }, ['avatar', 'camera']);
 
   on('lm:window:set-ignore-mouse', (ignore) => applyMouseIgnore(validateBoolean(ignore, 'ignore')));
   on('lm:window:set-size-preset', (preset) => settings.update({ window: { sizePreset: validateSizePreset(preset) } }));
@@ -1094,7 +1231,7 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, startResize, stepResize, endResize, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
+export const __test = { state, csp, assertSender, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, startResize, stepResize, endResize, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
 
 // scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
 // through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).
@@ -1109,5 +1246,10 @@ if (process.env.LAWNMOWER_E2E === '1') {
     voiceInfo: () => voiceInfo(),
     voiceSetupState: () => (state.setup ? state.setup.state : null),
     blockedRequests: () => state.blockedRequests.slice(),
+    // The home camera's hooks (status, notifications, setPassword, clipsDir, workerStats,
+    // go2rtcPid, …): a getter, because this object exists before init() creates the camera.
+    get tapo() {
+      return state.tapo ? state.tapo.e2e : null;
+    },
   };
 }

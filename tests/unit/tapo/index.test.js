@@ -27,7 +27,8 @@ function setup(settingsInit, o = {}) {
   const opened = [];
   const tapo = createTapo({
     electron: {
-      app: { getPath: () => path.join(userData, 'Videos'), on: () => {} },
+      ...(o.electron || {}),
+      app: { getPath: () => path.join(userData, 'Videos'), on: () => {}, ...(o.app || {}) },
       ipcMain,
       safeStorage: memorySafeStorage(),
       Notification: FakeNotification,
@@ -41,7 +42,8 @@ function setup(settingsInit, o = {}) {
     log: (l, m) => logs.push(`${l} ${m}`),
     userData,
     appRoot: path.resolve('.'),
-    isPackaged: false,
+    isPackaged: !!o.isPackaged,
+    platform: o.platform,
     devServerUrl: null,
     env: { LAWNMOWER_TAPO_ALLOW_LOOPBACK: '1', LAWNMOWER_E2E: '1', LAWNMOWER_GO2RTC: path.join(userData, 'no-go2rtc'), ...(o.env || {}) },
     appVersion: '0.5.0',
@@ -57,6 +59,41 @@ function setup(settingsInit, o = {}) {
   cleanup.push(() => tapo.stop());
   return { tapo, store, ipcMain, toAvatar, logs, userData, opened, avatarShown: () => avatarShown };
 }
+
+describe('createTapo: the PC itself (UX review)', () => {
+  it('armed keeps the PC awake, waking up reconnects, "Start with Windows" sets the login item', async () => {
+    FakeBrowserWindow.all = [];
+    const power = [];
+    const listeners = new Map();
+    const login = [];
+    const r = setup({ tapo: { enabled: true, host: '127.0.0.1', onvifPort: 1, username: 'camacct' }, security: { armDelaySec: 0 } }, {
+      electron: {
+        powerSaveBlocker: { start: (type) => { power.push(['start', type]); return 7; }, stop: (id) => power.push(['stop', id]) },
+        powerMonitor: { on: (ev, f) => listeners.set(ev, f), removeListener: (ev) => listeners.delete(ev) },
+      },
+      app: { setLoginItemSettings: (x) => login.push(x) },
+      isPackaged: true,
+      platform: 'win32',
+    });
+    await r.tapo.ready;
+    expect(login).toEqual([{ openAtLogin: false, args: ['--hidden'] }]);
+    await r.ipcMain.invoke('lm:tapo:arm', { sender: { kind: 'camera' } }, { armed: true, immediate: true });
+    await until(() => power.length === 1, 5000);
+    expect(power).toEqual([['start', 'prevent-app-suspension']]);
+    // the PC woke up: the service reconnects at once
+    let resumed = 0;
+    r.tapo.service.onResume = () => { resumed++; };
+    listeners.get('resume')();
+    expect(resumed).toBe(1);
+    await r.ipcMain.invoke('lm:tapo:arm', { sender: { kind: 'camera' } }, { armed: false });
+    await until(() => power.length === 2, 5000);
+    expect(power[1]).toEqual(['stop', 7]);
+    r.store.update({ security: { startAtLogin: true } });
+    expect(login.at(-1)).toEqual({ openAtLogin: true, args: ['--hidden'] });
+    await r.tapo.stop();
+    expect(listeners.has('resume')).toBe(false);
+  });
+});
 
 describe('createTapo', () => {
   it('turned off: no window, no MCP server, no tools; the clip mount and tray state are ready', async () => {

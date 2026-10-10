@@ -48,6 +48,7 @@ export function detectorAssets(devServerUrl) {
  * @property {(channel: string, payload: unknown) => void} sendToAvatar
  * @property {() => void} showAvatar           bring the avatar back without focus
  * @property {any} [icon]
+ * @property {string} [platform]               process.platform (tests)
  */
 
 /** @param {CreateTapoOptions} o */
@@ -192,7 +193,7 @@ export function createTapo(o) {
   powerMonitor?.on?.('resume', onResume);
   /** "Start Lawnmower Man with Windows" (security.startAtLogin): hidden, in the tray; installed builds only. */
   const syncLogin = () => {
-    if (!o.isPackaged || typeof app.setLoginItemSettings !== 'function' || !['win32', 'darwin'].includes(process.platform)) return;
+    if (!o.isPackaged || typeof app.setLoginItemSettings !== 'function' || !['win32', 'darwin'].includes(o.platform || process.platform)) return;
     try {
       app.setLoginItemSettings({ openAtLogin: !!settings.get().security.startAtLogin, args: ['--hidden'] });
     } catch (err) {

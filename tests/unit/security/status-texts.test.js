@@ -68,6 +68,7 @@ describe('footer and formats', () => {
     expect(footerText(online(), { hasFrame: true, detector: { state: 'loading' } })).toMatch(/person detector loading/);
     expect(footerText(online(), { hasFrame: true, detector: { state: 'on', rateHz: 0 } })).toMatch(/person detector ready$/);
     expect(footerText(online(), { hasFrame: true, detector: { state: 'stub', rateHz: 1 } })).toMatch(/test detector 1 Hz$/);
+    expect(footerText(online(), { hasFrame: true, detector: { state: 'stub', rateHz: 1, lastMs: 0.3 } })).toMatch(/test detector 1 Hz$/);
   });
   it('formats', () => {
     expect(formatBitrate(640)).toBe('640 kbit/s');

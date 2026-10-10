@@ -104,7 +104,7 @@ export function footerText(st, w = null) {
   if (det.state === 'on' || det.state === 'stub') {
     const hz = Number(det.rateHz) || 0;
     // no detections while disarmed (unless person boxes are shown): "ready", not a rate of 0
-    parts.push(`${det.state === 'stub' ? 'test detector' : 'person detector'} ${hz ? `${hz % 1 ? hz.toFixed(1) : hz} Hz${det.lastMs ? ` / ${Math.round(det.lastMs)} ms` : ''}` : 'ready'}`);
+    parts.push(`${det.state === 'stub' ? 'test detector' : 'person detector'} ${hz ? `${hz % 1 ? hz.toFixed(1) : hz} Hz${Math.round(det.lastMs) > 0 ? ` / ${Math.round(det.lastMs)} ms` : ''}` : 'ready'}`);
   } else if (det.state === 'loading') {
     parts.push('person detector loading…');
   } else if (det.state === 'failed') {

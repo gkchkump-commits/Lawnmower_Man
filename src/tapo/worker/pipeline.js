@@ -620,6 +620,8 @@ export class SecurityPipeline {
     const recent = this._detTimes.filter((x) => now - x <= 4000);
     this.postPage({
       ...main,
+      // how the video is decoded: null when nothing went through the decoder (the mock's pictures)
+      decoding: this.decoder.config ? (this.decoder.acceleration === 'prefer-hardware' ? 'hardware' : 'software') : null,
       codec: this.decoder.codec,
       hasFrame: !!this.lastFrame?.image,
       lastFrameAgoMs: Number.isFinite(this.lastFrameAt) ? Math.round(now - this.lastFrameAt) : null,

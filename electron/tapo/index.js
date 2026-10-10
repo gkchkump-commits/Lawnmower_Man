@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setImmediate } from 'node:timers';
 
 import { CredentialStore } from './credentials.js';
 import { TapoService, defaultClipsDir } from './tapo-service.js';
@@ -205,7 +206,11 @@ export function createTapo(o) {
   });
 
   // --- start -------------------------------------------------------------------------------
-  if (settings.get().tapo.enabled) ensureWindow();
+  // The window opens on the next turn of the event loop: main.js registers the app:// protocol
+  // (with protocolMounts()) right after createTapo(), and the camera page loads through it.
+  setImmediate(() => {
+    if (!quitting && !cam && settings.get().tapo.enabled) ensureWindow();
+  });
   const ready = service.start().catch((err) => log('error', `[tapo] start failed: ${err && err.stack ? err.stack : err}`));
 
   const trayActions = {

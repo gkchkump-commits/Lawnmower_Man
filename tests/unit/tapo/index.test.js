@@ -99,8 +99,9 @@ describe('createTapo', () => {
     cleanup.push(() => cam.close());
     const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-tapo-clips-'));
     const r = setup({ tapo: { enabled: true, host: '127.0.0.1', onvifPort: cam.port, username: 'camacct', name: 'porch camera' }, security: { clipsDir: clips, armDelaySec: 0 } });
+    expect(FakeBrowserWindow.all).toHaveLength(0); // not before main.js registered app:// (next tick)
     await r.tapo.ready;
-    expect(FakeBrowserWindow.all).toHaveLength(1); // created hidden at start-up (the worker lives in it)
+    await until(() => FakeBrowserWindow.all.length === 1); // created hidden at start-up (the worker lives in it)
     const bw = FakeBrowserWindow.all[0];
     expect(bw.shown).toBe(false);
     expect(bw.opts.title).toBe('Home camera — porch camera');

@@ -99,7 +99,7 @@ describe('app:// clip mount with Range', () => {
       '/__clips/notes.mp4',
       '/__clips/2026-10-10/%2e%2e/140312-person-a1b2.mp4',
       '/__clips/2026-10-10/..%2F..%2Fetc%2Fpasswd',
-      '/__clips/%2e%2e/%2e%2e/etc/passwd',
+      '/__clips/2026-10-10/%2e%2e%2f140312-person-a1b2.mp4', // (bare %2e%2e segments are normalized away by URL parsing)
       '/__clips/2026-10-10/140312-person-A1B2.mp4',
     ]) {
       const r = await get(handler, p);

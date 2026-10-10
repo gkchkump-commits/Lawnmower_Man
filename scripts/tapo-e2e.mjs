@@ -586,7 +586,10 @@ try {
   }
   if (!keep) fs.rmSync(userData, { recursive: true, force: true });
   console.log(JSON.stringify(report, null, 2));
-  if (reportFile) fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
+  if (reportFile) {
+    fs.mkdirSync(path.dirname(reportFile), { recursive: true });
+    fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
+  }
   console.error(`tapo-e2e: ${Object.values(report.checks).filter((v) => v === 'ok').length} passed, ${report.failed || 0} failed`);
   process.exit(report.ok ? 0 : 1);
 }

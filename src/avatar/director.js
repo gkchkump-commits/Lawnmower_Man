@@ -201,6 +201,12 @@ const HEAD_SHARE_FOLLOW = 0.38;
 const SETTLED_GY = 6.78 / GAZE_DEG.y;
 const WEIGHTED = /** @type {const} */ (['listening', 'thinking', 'speaking', 'error', 'sleep']);
 const WEIGHT_OMEGA = { listening: 8, thinking: 8, speaking: 8, error: 14, sleep: 3.2 };
+// ---- "Hey Jade" (contract-wake §9.7): the fast wake ----
+/** setState(s, { fast: true }): the weight springs use at least this ω for FAST_WAKE_S, so leaving
+ * sleep (ω 3.2) reaches the listening pose within ≈ 400 ms ("she heard me", ux.md ACK-5) */
+export const FAST_WAKE_OMEGA = 12;
+export const FAST_WAKE_S = 0.6;
+// ---- end "Hey Jade" ----
 /** No blink starts within this long (s) of the last one (requested and gaze-evoked ones neither). */
 const BLINK_REFRACTORY = 0.8;
 /** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
@@ -309,6 +315,7 @@ export class Director {
     this._sighAt = -Infinity;
     this._nextSigh = Infinity;
     this._errorKick = -Infinity;
+    this._fastUntil = -Infinity; // wake: the fast wake (setState(s, { fast: true }))
     this._w = { listening: 0, thinking: 0, speaking: 0, error: 0, sleep: 0 };
     // settled-render internals (the original closed-form pose)
     this._gx = 0; this._gy = 0;
@@ -336,8 +343,11 @@ export class Director {
    */
   setUser(u) { this.behavior.setUser(u, this._time); }
 
-  /** @param {AvatarState} s */
-  setState(s) {
+  /**
+   * @param {AvatarState} s
+   * @param {{ fast?: boolean }} [o] fast: the state weights move fast for 0.6 s (a wake from a doze)
+   */
+  setState(s, o) {
     if (!STATES.includes(s)) {
       console.warn(`[avatar] unknown state "${s}" ignored`);
       return;
@@ -360,6 +370,7 @@ export class Director {
       this._gazeNextAt = t + d;
     }
     this.current = s;
+    if (o?.fast) this._fastUntil = t + FAST_WAKE_S; // wake:
   }
 
   get state() { return this.current; }
@@ -599,7 +610,8 @@ export class Director {
 
     // ---- state weights (springs: posture and glow start and end with zero velocity) -------------
     const w = this._w;
-    for (const s of WEIGHTED) w[s] = clamp01(sp(this._sw[s], this.current === s ? 1 : 0, WEIGHT_OMEGA[s]));
+    const fast = time < this._fastUntil; // wake: the fast wake
+    for (const s of WEIGHTED) w[s] = clamp01(sp(this._sw[s], this.current === s ? 1 : 0, fast ? Math.max(WEIGHT_OMEGA[s], FAST_WAKE_OMEGA) : WEIGHT_OMEGA[s]));
     o.listen = w.listening; o.think = w.thinking; o.speak = w.speaking; o.error = w.error; o.sleep = w.sleep;
     const idleW = clamp01(1 - (w.listening + w.thinking + w.speaking + w.error + w.sleep));
 

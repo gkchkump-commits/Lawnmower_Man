@@ -51,7 +51,7 @@ describe('settings drawer: Camera section', () => {
     const paths = cam.fields.map((f) => f.path).filter(Boolean);
     expect(paths).toEqual(['camera.enabled', 'camera.deviceId', 'camera.followFace', 'camera.presence', 'camera.mirrorExpressions', 'camera.shareWithClaude', 'camera.greeting', 'camera.lookToTalk']);
     expect(cam.fields.find((f) => f.path === 'camera.deviceId').type).toBe('select');
-    expect(cam.fields.find((f) => f.path === 'camera.shareWithClaude').label).toBe('Let Claude see me');
+    expect(cam.fields.find((f) => f.path === 'camera.shareWithClaude').label).toBe('Let Jade see me');
     expect(cam.fields.some((f) => f.type === 'info' && f.id === 'cameraInfo')).toBe(true);
   });
 });

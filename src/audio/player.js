@@ -7,8 +7,12 @@
 // Audio clips (the local voice):
 //
 //   source → clip gain ─┬→ analyser → mute → destination      the DRY voice, for the lip-sync
-//                       └→ voice character (AudioWorklet) → destination
-//                          (or straight to the destination for 'natural' / without the worklet)
+//                       └→ voice character (AudioWorklet) → master → destination
+//                          (or straight to the master for 'natural' / without the worklet)
+//
+// The master gain ducks her voice while "Hey Jade" is checked during a reply (duck/unduck,
+// src/wake/). Earcons (playCue) are their own sources in this AudioContext, so Chromium's echo
+// canceller has them in its reference; they bypass the queue, the events and the master.
 //
 // The analyser always sees the unprocessed voice, so loudness and spectrum lip-sync do not
 // depend on the effect, and `current.time` is the playback clock of the dry clip (output latency
@@ -19,7 +23,8 @@
 //
 // Events: 'start' (clip), 'end' (clip, { stopped }), 'idle', 'error' (err, clip), and for speech
 // clips 'speechstart' (clip: the voice really started) and 'boundary' ({ word, charIndex,
-// charLength, clip }: a word starts; charIndex into clip.text when the voice reports it)
+// charLength, clip }: a word starts; charIndex into clip.text when the voice reports it).
+// playCue() emits none of them.
 /* global AudioWorkletNode */
 
 import { Emitter } from '../app/emitter.js';
@@ -96,6 +101,14 @@ export class AudioPlayer extends Emitter {
     this._fxStatsId = 0;
     /** @type {null | { clip: AudioClip, resolve: Function }} a clip waiting for the effect to load */
     this._pendingStart = null;
+    // ---- "Hey Jade" (wake word; contract-wake §9.3) ----
+    /** @type {GainNode|null} her voice → master → destination (ducked during a barge-in check) */
+    this.master = null;
+    /** the master's target level in dB (0 = not ducked) */
+    this.duckDb = 0;
+    /** earcons played (a test counter) */
+    this.cues = 0;
+    // ---- end "Hey Jade" ----
     if (this._fxWanted()) this._prepareFx();
   }
 
@@ -260,6 +273,85 @@ export class AudioPlayer extends Emitter {
     if (p || queued.length) this.emit('idle');
   }
 
+  // ---- "Hey Jade" (wake word; contract-wake §9.3) ----
+
+  /** The kind of the clip playing now ('audio' = the local voice, 'speech' = the system voice), or null. */
+  get kind() {
+    return this._playing ? this._playing.kind : null;
+  }
+
+  /** The master gain right now, in dB (its automation's current value). */
+  get masterGainDb() {
+    const g = this.master?.gain?.value;
+    return typeof g === 'number' && g > 0 ? 20 * Math.log10(g) : g === 0 ? -Infinity : 0;
+  }
+
+  /**
+   * Lower her voice (the local voice; the system voice cannot be ducked).
+   * @param {number} [db] @param {number} [rampMs]
+   */
+  duck(db = -15, rampMs = 60) {
+    this.duckDb = db;
+    this._rampMaster(10 ** (db / 20), rampMs, 0);
+  }
+
+  /**
+   * Back to full level. @param {number} [rampMs] @param {number} [afterMs] start the ramp this much later
+   */
+  unduck(rampMs = 300, afterMs = 0) {
+    this.duckDb = 0;
+    this._rampMaster(1, rampMs, afterMs);
+  }
+
+  /** @param {number} target @param {number} rampMs @param {number} afterMs */
+  _rampMaster(target, rampMs, afterMs) {
+    const ctx = this.ctx;
+    const g = this.master?.gain;
+    if (!ctx || !g) return;
+    try {
+      const t = ctx.currentTime + Math.max(0, afterMs) / 1000;
+      g.cancelScheduledValues(ctx.currentTime);
+      g.setValueAtTime(g.value, ctx.currentTime);
+      if (afterMs > 0) g.setValueAtTime(g.value, t);
+      if (rampMs > 0) g.linearRampToValueAtTime(target, t + rampMs / 1000);
+      else g.setValueAtTime(target, t);
+    } catch {
+      try { g.value = target; } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Play a short cue (an earcon) right away, next to whatever plays: no queue, no events, not
+   * ducked. In this AudioContext, so the echo canceller has it in its reference (ux.md ACK-6).
+   * @param {Float32Array} samples @param {number} rate
+   * @returns {{ startPerf: number, endPerf: number }|null} when it is heard (performance.now() ms)
+   */
+  playCue(samples, rate) {
+    const ctx = this._ensureContext();
+    if (!ctx || !samples?.length) return null;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    try {
+      const buf = ctx.createBuffer(1, samples.length, rate);
+      buf.copyToChannel(/** @type {Float32Array<ArrayBuffer>} */ (samples), 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      const lead = 0.005;
+      src.start(ctx.currentTime + lead);
+      src.onended = () => {
+        try { src.disconnect(); } catch { /* ignore */ }
+      };
+      this.cues++;
+      const now = globalThis.performance?.now?.() ?? Date.now();
+      const startPerf = now + (lead + (ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000;
+      return { startPerf, endPerf: startPerf + (samples.length / rate) * 1000 };
+    } catch (err) {
+      console.warn('[player] the cue could not be played', err);
+      return null;
+    }
+  }
+  // ---- end "Hey Jade" ----
+
   /** Linear RMS of the current (dry) output (0 when silent / unavailable). */
   level() {
     const a = this.analyser;
@@ -291,6 +383,7 @@ export class AudioPlayer extends Emitter {
     try { this.ctx?.close(); } catch { /* ignore */ }
     this.ctx = null;
     this.analyser = null;
+    this.master = null; // wake:
     this.removeAllListeners();
   }
 
@@ -316,6 +409,11 @@ export class AudioPlayer extends Emitter {
     a.connect(mute);
     mute.connect(this.ctx.destination);
     this.analyser = a;
+    // wake: her voice (dry or through the effect) goes through the master gain (duck/unduck)
+    const master = this.ctx.createGain();
+    master.gain.value = 1;
+    master.connect(this.ctx.destination);
+    this.master = master;
     return this.ctx;
   }
 
@@ -351,7 +449,7 @@ export class AudioPlayer extends Emitter {
       node.port.onmessage = (e) => this._onFxMessage(e.data);
       // a processor that throws outputs silence: send the voice around it from then on
       node.onprocessorerror = () => this._fxFailed('the voice effect stopped');
-      node.connect(ctx.destination);
+      node.connect(this.master || ctx.destination); // wake: through the master
       this._fxNode = node;
       this.fxState = 'ready';
       return true;
@@ -387,7 +485,7 @@ export class AudioPlayer extends Emitter {
     const p = this._playing;
     if (p && p.fx && p.gain && this.ctx) {
       try { p.gain.disconnect(node); } catch { /* ignore */ }
-      try { p.gain.connect(this.ctx.destination); } catch { /* ignore */ }
+      try { p.gain.connect(this.master || this.ctx.destination); } catch { /* ignore */ } // wake: master
       p.fx = false;
     }
     try { node?.disconnect(); } catch { /* ignore */ }
@@ -458,7 +556,7 @@ export class AudioPlayer extends Emitter {
     source.connect(gain);
     gain.connect(this.analyser);
     const fxNode = this._fxWanted() ? this._fxNode : null;
-    gain.connect(fxNode || ctx.destination);
+    gain.connect(fxNode || this.master || ctx.destination); // wake: through the master
     const startAt = ctx.currentTime + 0.01;
     const entry = { clip, kind: /** @type {const} */ ('audio'), resolve, source, gain, startAt, duration: buffer.duration, buffer, fx: !!fxNode };
     this._playing = entry;

@@ -19,10 +19,14 @@
 // Home camera: the `tapo` namespace (contract §6.2) is backed by the pretend camera of
 // mock-tapo.js (?tapo=<scenario>); __mock.tapoAlert({ kind, quiet }) sends an alert like main's
 // (lm:tapo:alert) and __mock.tapoLook(p) a look toward the camera window.
+// "Hey Jade": the `wake` namespace (contract-wake §6.2) with the mock spotter of mock-wake.js
+// (?wake=missing|error|basic|blocked, ?wakeMock=auto; window.__wakeMock); __mock.sttQueue(list)
+// sets what the fake /stt answers, call by call (the wake segment, then the command).
 /* global URLSearchParams */
 
 import { DEFAULT_SETTINGS, clone, deepMerge, isPlainObject } from '../app/settings-defaults.js';
 import { createMockTapoCore, sanitizeTapoValue } from './mock-tapo.js';
+import { createMockWake } from './mock-wake.js';
 import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
 
 /**
@@ -39,6 +43,8 @@ import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
  * @property {'failed'} [voiceSetup]              start after a failed "Set up local voice…" run
  *                                                (the half-installed venv of a real bug report)
  * @property {string} [tapo]                      Home camera scenario (mock-tapo.js); default ?tapo= or 'online'
+ * @property {string} [wake]                      "Hey Jade" scenario (mock-wake.js); default ?wake=
+ * @property {string} [wakeMock]                  'auto': the mock spotter fires on every onset; default ?wakeMock=
  */
 
 /** The output tail of the failed setup step that ?voiceSetup=failed shows. */
@@ -57,7 +63,7 @@ export const MOCK_NOT_FOUND = 'Claude CLI not found. Install Claude Code (https:
 export const MOCK_NOT_LOGGED_IN = 'Not logged in · Please run /login';
 
 export const MOCK_REPLIES = Object.freeze({
-  greeting: "Hello! I'm Claude, floating on your desktop as a hologram. You can type to me here, or hold Space and talk once the local voice server is installed. What shall we do?",
+  greeting: "Hello! I'm Jade, floating on your desktop as a hologram. You can type to me here, or hold Space and talk once the local voice server is installed. What shall we do?",
   code: "Sure, here's a small JavaScript helper that debounces a function:\n\n```js\nexport function debounce(fn, ms = 200) {\n  let timer;\n  return (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), ms);\n  };\n}\n```\n\nWrap a handler with `debounce(save, 500)` and it only runs after the input has been quiet for half a second.",
   markdown: "## Formatting check\n\nHere is **bold**, *italic*, ~~struck~~ and `inline code`, plus a [link](https://www.anthropic.com).\n\n- First item\n- Second item\n  - nested detail\n1. Step one\n2. Step two\n\n| Feature | Status |\n|---|---|\n| Streaming | works |\n| Voice | ready |\n\n> A quote, for good measure.",
   long: "Holograms work by recording how light from an object interferes with a reference beam. The interference pattern stores both the brightness and the direction of the light, so when the pattern is lit again, it rebuilds the original wavefront.\n\nThat is why a true hologram shows parallax: move your head and you see around the object. What you see on your desktop right now is a cheat, of course. It's a real-time rendering made to look like one, with a glowing wireframe, bloom and a cloud of particles.\n\nStill, it's a fun way to give a voice assistant a face.",
@@ -505,7 +511,18 @@ export function createMockBridge(options = {}) {
   };
 
   // ---------------------------------------------------------------- voice
-  const voiceFetch = opt.voice === 'fake' ? createFakeVoiceFetch({ token: 'mock-token' }) : null;
+  // ---- "Hey Jade": what /stt answers, call by call (null: the default transcript) ----
+  /** @type {string[]|null} */
+  let sttQueue = null;
+  let sttFrom = 0;
+  let sttDelay = 0;
+  const voiceFetch = opt.voice === 'fake'
+    ? createFakeVoiceFetch({
+      token: 'mock-token',
+      transcripts: ({ n }) => (sttQueue && sttQueue.length ? sttQueue[Math.min(n - sttFrom, sttQueue.length - 1)] : undefined),
+      sttDelayMs: () => sttDelay,
+    })
+    : null;
   const win = opt.platform === 'win32';
   const failedSetup = opt.voiceSetup === 'failed';
   /** @type {Record<string, any>|null} the last voice.setup() answer (VoiceInfo.setup) */
@@ -593,6 +610,7 @@ export function createMockBridge(options = {}) {
           voiceChanged();
         });
         tapoSettingsChanged(prev, settings);
+        wakeCore.settingsChanged(prev, settings); // "Hey Jade": the engine starts and stops with it
       }
       return clone(settings);
     },
@@ -677,11 +695,21 @@ export function createMockBridge(options = {}) {
     calls.push([name, ...args]);
   };
 
+  // ---------------------------------------------------------------- "Hey Jade" (wake word)
+  const wq = new URLSearchParams(globalThis.location?.search || '');
+  const wakeCore = createMockWake({
+    scenario: opt.wake ?? wq.get('wake') ?? '',
+    mode: opt.wakeMock ?? wq.get('wakeMock') ?? '',
+    getSettings: () => settings,
+    record: (entry) => calls.push(entry),
+  });
+
   const bridge = {
     claude,
     voice,
     settings: settingsApi,
     tapo,
+    wake: wakeCore.api,
     window: {
       setIgnoreMouse: record('setIgnoreMouse'),
       setSizePreset: record('setSizePreset'),
@@ -696,6 +724,7 @@ export function createMockBridge(options = {}) {
       minimize: record('minimize'),
       hide: record('hide'),
       quit: record('quit'),
+      show: record('show'), // "Hey Jade" while hidden brings the window back (lm:window:show)
     },
     onHotkey: (cb) => subscribe('hotkey', cb),
     app: {
@@ -731,9 +760,23 @@ export function createMockBridge(options = {}) {
       /** @param {{ x: number, y: number, holdMs: number }} p */
       tapoLook: (p) => tapoDeliver('look', p),
       tapo: tapoCore,
+      /** "Hey Jade": the pretend engine (also window.__wakeMock) */
+      wake: wakeCore.hooks,
+      /** what the fake /stt answers from now on, call by call (the last repeats); null: the default */
+      sttQueue: (/** @type {string[]|null} */ list) => {
+        sttQueue = Array.isArray(list) ? list.map(String) : null;
+        sttFrom = voiceFetch ? voiceFetch.stats.stt : 0;
+      },
+      /** extra time each fake /stt call takes from now on (ms) */
+      sttDelay: (/** @type {number} */ ms) => {
+        sttDelay = Math.max(0, Number(ms) || 0);
+      },
+      /** the fake voice server's calls so far ({ stt, tts }) */
+      voiceStats: () => (voiceFetch ? { ...voiceFetch.stats } : { stt: 0, tts: 0 }),
       dispose: () => {
         clearTimeout(startTimer);
         tapoCore.dispose();
+        wakeCore.dispose();
       },
     },
   };

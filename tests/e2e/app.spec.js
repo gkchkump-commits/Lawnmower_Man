@@ -123,7 +123,7 @@ test.describe('app (mock bridge)', () => {
     await expect(page.locator('.msg-claude.error .turn-error')).toContainText('Simulated failure');
     await send(page, 'hi');
     await waitIdle(page);
-    await expect(page.locator('.msg-claude').last()).toContainText("I'm Claude");
+    await expect(page.locator('.msg-claude').last()).toContainText("I'm Jade");
   });
 
   test('settings drawer: switching the renderer re-creates the avatar', async ({ page }, testInfo) => {

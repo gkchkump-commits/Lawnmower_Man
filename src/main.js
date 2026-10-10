@@ -35,6 +35,8 @@ import { TapoAvatarLink } from './tapo/avatar-link.js';
 import { ArmedPill, showDescribeConsent } from './tapo/avatar-ui.js';
 import { hasDescribeConsent } from './tapo/consent.js';
 import { drawerStatusLine } from './tapo/status.js';
+import { WakeFeature } from './wake/feature.js';
+import { WakeUi } from './wake/ui.js';
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -198,6 +200,8 @@ async function boot() {
   let camera = null;
   /** @type {TapoAvatarLink|null} the Home camera's link to the avatar (created after the controller) */
   let tapoLink = null;
+  /** @type {WakeFeature|null} "Hey Jade" (created after the camera; src/wake/) */
+  let wake = null;
 
   // ---------------------------------------------------------------- controller
   controller = new Controller({
@@ -239,6 +243,7 @@ async function boot() {
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
     if (!settings.avatar.followCursor) gaze.releaseCursor();
     camera?.applySettings(settings);
+    wake?.applySettings(settings); // "Hey Jade"
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
     if (JSON.stringify(prev.tapo) !== JSON.stringify(settings.tapo)) refreshTapoInfo();
     if (prev.voice.systemVoice !== settings.voice.systemVoice) {
@@ -320,6 +325,22 @@ async function boot() {
       bridge.tapo.openClips().then((r) => {
         if (r && r.ok === false) view.toast(r.error || 'Could not open the clips folder.', 'warn');
       }, (err) => view.toast(`Could not open the clips folder: ${err?.message || err}`, 'warn'));
+    // ---- "Hey Jade" (Settings › Voice, the drawer's wakeInfo buttons) ----
+    } else if (a === 'wakeEchoTest') {
+      wake?.echoTest();
+    } else if (a === 'wakeRecord') {
+      if (wake?.recordClip(30)) view.toast('Recording 30 s: say “Hey Jade” about 5 times, near and across the room.', 'info');
+    } else if (a === 'wakeMicSettings') {
+      Promise.resolve(bridge.wake?.openMicSettings?.()).then((r) => {
+        if (r && r.ok === false) view.toast('Open Windows Settings › Privacy & security › Microphone and turn on “Let desktop apps access your microphone”.', 'info');
+      }, () => {});
+    } else if (a === 'wakeRetry') {
+      wake?.retryMic();
+    } else if (a === 'wakeDownload') {
+      Promise.resolve(bridge.wake?.download?.()).then((r) => {
+        view.toast(r?.started ? 'Downloading the extra wake-word model…' : 'The extra wake-word model is not downloading (it may already be there).', 'info');
+      }, (err) => view.toast(`Could not start the download: ${err?.message || err}`, 'warn'));
+    // ---- end "Hey Jade" ----
     }
   }
 
@@ -384,6 +405,7 @@ async function boot() {
   const updateVoiceStatus = () => {
     view.setVoiceStatus(voiceClient.info, caps());
     controller.voiceChanged();
+    wake?.voiceChanged(); // "Hey Jade" needs the local voice
     refreshInfo();
   };
   let lastSetupKey = '';
@@ -541,12 +563,19 @@ async function boot() {
     bridge.window.onVisibility((v) => {
       heard = true;
       camera?.setVisible(v?.visible !== false);
+      wake?.setVisible(v?.visible !== false); // wake: Settings › Voice › Listen while hidden
     });
     bridge.app.info().then((i) => {
-      if (!heard && i && typeof i.visible === 'boolean') camera?.setVisible(i.visible);
+      if (!heard && i && typeof i.visible === 'boolean') {
+        camera?.setVisible(i.visible);
+        wake?.setVisible(i.visible); // wake:
+      }
     }, () => {});
   } else {
-    document.addEventListener('visibilitychange', () => camera?.setVisible(document.visibilityState === 'visible'));
+    document.addEventListener('visibilitychange', () => {
+      camera?.setVisible(document.visibilityState === 'visible');
+      wake?.setVisible(document.visibilityState === 'visible'); // wake:
+    });
   }
   navigator.mediaDevices?.addEventListener?.('devicechange', () => camera?.refreshDevices());
 
@@ -592,11 +621,61 @@ async function boot() {
     /** @type {HTMLElement|null} */ (document.querySelector('[data-section="tapo"]'))?.setAttribute('hidden', '');
   }
 
+  // ---------------------------------------------------------------- "Hey Jade" (src/wake/, docs/WAKE.md)
+  // ---- "Hey Jade" (wake word; contract-wake §9.5) ----
+  // the wake word: the mic tap → the wake-word engine (main's utility process) → stage 2 on the
+  // local voice's /stt → the controller; the chip, the drawer's Hey Jade group, the offer card
+  const WAKE_PATHS = ['wake.enabled', 'wake.phrase', 'wake.sensitivity', 'wake.followUpSec', 'wake.bargeIn', 'wake.sounds', 'wake.whileHidden', 'wake.transcriptFallback'];
+  if (bridge.wake && mic.supported) {
+    const wakeUi = new WakeUi({
+      body,
+      view,
+      cards: $('cards'),
+      drawer,
+      toast: (msg, level) => view.toast(msg, /** @type {any} */ (level)),
+      onAction: (a) => runAction(a),
+    });
+    const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)');
+    wake = new WakeFeature({
+      bridge,
+      controller,
+      mic,
+      player,
+      services,
+      voiceInfo: () => voiceClient.info,
+      getAvatar: () => avatarHost.avatar,
+      gaze,
+      camera,
+      view: wakeUi,
+      getSettings: () => settings,
+      saveWake: (fields) => {
+        const [k, v] = Object.entries(fields)[0];
+        return saveSettings({ wake: fields }, `wake.${k}`, v);
+      },
+      reducedMotion: () => !!reduced?.matches,
+    });
+    app.wake = wake;
+    view.status.wake.addEventListener('click', () => {
+      drawer.open();
+      document.querySelector('[data-path="wake.enabled"]')?.scrollIntoView({ block: 'center' });
+    });
+  } else {
+    // an older main without the wake word (or no microphone support): no Hey Jade group
+    for (const p of WAKE_PATHS) {
+      const c = drawer.controls.get(p);
+      if (c) c.row.hidden = true;
+    }
+    drawer.setAction('wakeEchoTest', { hidden: true });
+    drawer.setAction('wakeRecord', { hidden: true });
+  }
+  // ---- end "Hey Jade" ----
+
   // ---------------------------------------------------------------- start
   await controller.start();
   camera.applySettings(settings);
   tapoLink?.start();
   refreshTapoInfo();
+  wake?.start(); // "Hey Jade"
   webSpeech.setPreferred(settings.voice.systemVoice);
   webSpeech.onVoicesChanged(() => {
     drawer.setSystemVoiceOptions(webSpeech.allVoices());

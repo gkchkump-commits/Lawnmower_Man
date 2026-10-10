@@ -9,6 +9,13 @@
 //             how many closures seal at all
 //   onsets    the jaw opening (> 0.08) after a pause vs the acoustic onset (-30 dB re peak)
 //   xcorr     lag of the best correlation between jawOpen and the audio level (dB)
+//   releases  EVERY m b p whose next sound is a vowel (or r, w, y): when the relief lips part vs
+//             the acoustic release — the steepest rise of the 0.8-5 kHz band (this tool's own
+//             zero-phase band-pass, 10 ms Hann power) after its minimum near the closure — by what
+//             comes before: V_ a vowel, C_ a consonant ("and Pam", "it back"), P_ a pause (phrase
+//             start); and the share of releases more than 20 ms late
+//   short     every vowel of 60 ms or more (on the timeline, 40 ms earlier to 10 ms later): the
+//             rendered opening's peak (how many stay under 5 px)
 // Negative numbers: the mouth is EARLY (leads the sound), as it should be by a few tens of ms.
 //
 //   node tools/visual/lipsync-align.mjs <dir with name.wav + name.json> [--latency 0.02]
@@ -101,6 +108,61 @@ function simulate(clip, samples, sr) {
   return rec;
 }
 
+/** RBJ band-pass biquad run forward and backward (zero phase) over x. */
+function bandpass(x, sr, lo, hi) {
+  const f0 = Math.sqrt(lo * hi), q = f0 / (hi - lo);
+  const w = (2 * Math.PI * f0) / sr, al = Math.sin(w) / (2 * q), a0 = 1 + al;
+  const b0 = al / a0, b2 = -al / a0, a1 = (-2 * Math.cos(w)) / a0, a2 = (1 - al) / a0;
+  const run = (src) => {
+    const y = new Float64Array(src.length);
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < src.length; i++) {
+      const v = b0 * src[i] + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = src[i]; y2 = y1; y1 = v; y[i] = v;
+    }
+    return y;
+  };
+  const f = run(run(x));                    // two stages forward
+  const r = run(run(f.reverse())).reverse(); // two backward
+  return r;
+}
+
+/** The 0.8-5 kHz band's level (dB) every 2.5 ms, a 10 ms Hann window. */
+function bandLevel(x, sr) {
+  const y = bandpass(x, sr, 800, 5000);
+  const H = Math.round(0.0025 * sr), N = Math.round(0.01 * sr);
+  const w = new Float64Array(N);
+  let ws = 0;
+  for (let j = 0; j < N; j++) { w[j] = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / (N - 1)); ws += w[j]; }
+  const out = new Float64Array(Math.floor(x.length / H));
+  for (let i = 0; i < out.length; i++) {
+    let acc = 0;
+    for (let j = 0; j < N; j++) { const k = i * H - (N >> 1) + j; if (k >= 0 && k < y.length) acc += w[j] * y[k] * y[k]; }
+    out[i] = 10 * Math.log10(acc / ws + 1e-12);
+  }
+  return { db: out, hop: H / sr };
+}
+
+/** A closure's release near time c in the band level: [time of the steepest rise after the minimum, depth] or null. */
+function bandRelease(B, c) {
+  const { db, hop } = B;
+  const i0 = Math.max(1, Math.round((c - 0.08) / hop)), i1 = Math.min(db.length - 2, Math.round((c + 0.08) / hop));
+  if (i1 - i0 < 5) return null;
+  let k = i0;
+  for (let i = i0; i <= i1; i++) if (db[i] < db[k]) k = i;
+  const fl = Math.round(0.12 / hop);
+  let l = -Infinity, r = -Infinity;
+  for (let i = Math.max(0, k - fl); i <= k; i++) l = Math.max(l, db[i]);
+  for (let i = k; i <= Math.min(db.length - 1, k + fl); i++) r = Math.max(r, db[i]);
+  if (Math.min(l, r) - db[k] < 10) return null;
+  let best = -Infinity, at = k;
+  for (let i = k; i <= Math.min(db.length - 2, k + Math.round(0.09 / hop)); i++) {
+    const d = db[i + 1] - db[i - 1];
+    if (d > best) { best = d; at = i; }
+  }
+  return at * hop;
+}
+
 function stats(v) {
   if (!v.length) return 'n=0';
   const s = [...v].sort((a, b) => a - b).map((x) => x * 1000);
@@ -109,7 +171,8 @@ function stats(v) {
   return `n=${String(s.length).padStart(3)} median ${q(0.5).toFixed(1).padStart(6)} ms  mean ${mean.toFixed(1).padStart(6)}  IQR [${q(0.25).toFixed(0)}, ${q(0.75).toFixed(0)}]`;
 }
 
-const pooled = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: [] };
+const pooled = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: [], relV: [], relC: [], relP: [], short: [] };
+const NEXT_VOCALIC = new Set(['aa', 'E', 'I', 'O', 'U', 'RR']);
 let nSealed = 0, nClosures = 0;
 const perClip = [];
 for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
@@ -128,7 +191,7 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
     for (let j = i + 1; j < Math.min(db.length, i + 25); j++) rr = Math.max(rr, db[j]);
     if (Math.min(l, rr) - db[i] >= 8 && db[i] > -45) dips.push(i * HOP);
   }
-  const r = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: 0 };
+  const r = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: 0, relV: [], relC: [], relP: [], short: [] };
   const tl = meta.visemes;
   for (let i = 1; i + 1 < tl.length; i++) {
     const s = tl[i];
@@ -190,6 +253,33 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
       if (Number.isFinite(tm)) r.onset.push(tm - ta);
     }
   }
+  // releases of every m b p into a vowel, by what precedes it; the opening of every vowel >= 60 ms
+  const band = bandLevel(wav.samples, wav.sampleRate);
+  const sealedRuns = [];
+  for (const q of rec) {
+    if (q.ap >= SEAL_PX) continue;
+    const last = sealedRuns[sealedRuns.length - 1];
+    if (last && q.t - last[1] < 1.5 / FPS) last[1] = q.t; else sealedRuns.push([q.t, q.t]);
+  }
+  for (let i = 0; i + 1 < tl.length; i++) {
+    const s = tl[i];
+    if (s.viseme === 'PP' && NEXT_VOCALIC.has(tl[i + 1].viseme)) {
+      const rel = bandRelease(band, 0.5 * (s.start + s.end));
+      if (rel === null) continue;
+      const prev = tl[i - 1];
+      const ctx = !prev || (prev.viseme === 'sil' && (i === 1 || prev.end - prev.start >= 0.1)) ? 'relP' : NEXT_VOCALIC.has(prev.viseme) ? 'relV' : 'relC';
+      const near = sealedRuns.filter(([a, b]) => b >= rel - 0.15 && a <= rel + 0.05);
+      if (!near.length) continue;
+      const run = near.reduce((x, y) => (Math.abs(y[1] - rel) < Math.abs(x[1] - rel) ? y : x));
+      (r[ctx] ||= []).push(run[1] + 1 / FPS - rel);
+    }
+    if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme) && s.end - s.start >= 0.06) {
+      let pk = 0;
+      // (the mouth leads: the timeline's vowel, 40 ms early to 10 ms late)
+      for (const q of rec) if (q.t >= s.start - 0.04 && q.t <= s.end + 0.01) pk = Math.max(pk, q.ap);
+      (r.short ||= []).push(pk);
+    }
+  }
   // xcorr of jaw (frames) with the audio level (dB, floored at -40) over +-150 ms
   const frames = rec.filter((q) => q.t >= 0 && q.t < wav.durationSec);
   const A = frames.map((q) => q.jaw);
@@ -204,7 +294,7 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
   }
   // + lag: jaw[i + lag] matches audio[i], i.e. the mouth comes AFTER the sound
   r.xcorr = bestLag / FPS;
-  for (const k of ['closure', 'sealOn', 'sealEnd', 'onset']) pooled[k].push(...r[k]);
+  for (const k of ['closure', 'sealOn', 'sealEnd', 'onset', 'relV', 'relC', 'relP', 'short']) pooled[k].push(...(r[k] || []));
   pooled.xcorr.push(r.xcorr);
   perClip.push({ clip: basename(f, '.json'), ...r, r: bestR });
   console.log(`${basename(f, '.json').padEnd(22)} xcorr ${(r.xcorr * 1000).toFixed(0).padStart(4)} ms (r=${bestR.toFixed(2)})  closures ${stats(r.closure)}`);
@@ -215,4 +305,10 @@ console.log(`seal on ${stats(pooled.sealOn)}  (sealed ${nSealed}/${nClosures})`)
 console.log(`seal end ${stats(pooled.sealEnd)}`);
 console.log(`onset   ${stats(pooled.onset)}`);
 console.log(`xcorr   ${stats(pooled.xcorr)}`);
+const late = (v) => (v.length ? `, ${((100 * v.filter((x) => x > 0.02).length) / v.length).toFixed(0)} % > 20 ms late` : '');
+console.log(`release after a vowel     ${stats(pooled.relV)}${late(pooled.relV)}`);
+console.log(`release after a consonant ${stats(pooled.relC)}${late(pooled.relC)}`);
+console.log(`release at a phrase start ${stats(pooled.relP)}${late(pooled.relP)}`);
+const sh = pooled.short;
+console.log(`vowels >= 60 ms: ${sh.length}, opening under 5 px: ${sh.filter((x) => x < 5).length}`);
 if (opt('json')) writeFileSync(opt('json'), JSON.stringify({ pooled, sealed: [nSealed, nClosures], perClip }, null, 1));

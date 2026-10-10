@@ -26,8 +26,9 @@ uniform vec4 uChinC;    // chin boss centre xy, radii xy
 uniform vec4 uAlaC;     // nostril wing centres: L.xy, R.xy
 uniform vec3 uFaceR;    // cheek radii xy, nostril wing radius
 uniform vec3 uMouth;    // mouth centre x, y (world, rest), half width (world)
-uniform vec2 uLens;     // the opening's half width (x mouth half widths: the corners move), the
-                        // share of the jaw drop the commissures take
+uniform vec4 uLens;     // the opening's half width (x mouth half widths: the corners move), the
+                        // share of the jaw drop the commissures take, the lens profile exponents
+                        // of the upper and the lower lip (smaller: fuller toward the corners)
 uniform float uLowerClose; // the part of uLowerDrop that closes the lips over the jaw (press, tuck)
 
 // The lips part as a lens: fully in the middle, tapering to closed corners (the commissures move
@@ -50,7 +51,7 @@ vec3 applyRig(vec3 p, float slitD) {
   // of the jaw drop, the lower lip's own parting tapers the same way
   float ax = abs(position.x - uMouth.x) / max(1e-4, uMouth.z);
   float mu = ax / max(1e-4, uLens.x);
-  float lensUp = lensOf(mu, 0.75), lensLo = lensOf(mu, 0.55);
+  float lensUp = lensOf(mu, uLens.z), lensLo = lensOf(mu, uLens.w);
   float fLo = mix(uLens.y, 1.0, lensLo);
   float reach = 1.0 - smoothstep(1.05, 1.7, ax);
   float nearUp = (1.0 - smoothstep(0.0, 28.0, -slitD)) * reach;
@@ -154,7 +155,7 @@ uniform vec3 uColRim;
 uniform vec3 uColEye;
 uniform vec3 uColGrid;
 uniform vec4 uLipWarp;      // px: upper thinning, contact, lower lip rise, lower thinning
-uniform vec3 uOpen;         // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width
+uniform vec4 uOpen;         // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width, exponent
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
@@ -280,7 +281,7 @@ void main() {
   float openC = uOpen.x + uOpen.y;
   if (openC > 0.5 && abs(vLip.y) < 1.3 && abs(vLip.x) < 12.0) {
     float mu = abs(vLip.y) / max(0.05, uOpen.z);
-    float lensAt = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6) * (1.0 - smoothstep(0.72, 1.0, mu));
+    float lensAt = pow(clamp(1.0 - mu * mu, 0.0, 1.0), uOpen.w) * (1.0 - smoothstep(0.72, 1.0, mu));
     float k = smoothstep(0.5, 6.0, openC * lensAt) * mB.b;
     float ad = abs(vLip.x);
     col *= 1.0 - 0.55 * k * (1.0 - smoothstep(0.0, 4.5, ad));
@@ -391,14 +392,17 @@ void main() {
 
 export const CAVITY_FRAG = /* glsl */ `
 uniform sampler2D tMouth;
-uniform float uTeeth;      // teeth visibility (an O / U pucker shows the dark interior, few teeth)
+uniform float uTeeth;      // upper teeth visibility (an O / U pucker shows the dark interior, few teeth)
+uniform float uTeethLo;    // lower teeth visibility (they ride on the jaw behind the lower lip)
+uniform float uTuck;       // the lower lip tucked under the upper incisors (f v)
+uniform vec2 uIncisors;    // mouth-texture v of the upper incisors' crowns: top edge, bottom edge
 uniform vec3 uDark;
 uniform float uSleep;
 uniform float uTongue;     // tongue tip at the teeth (th, l)
 uniform float uTeethShift; // mouth-texture v: the upper incisors follow a lifted upper lip
 uniform float uJawPx;      // jaw drop (plate px)
 uniform vec3 uColLine;
-uniform vec3 uOpen;        // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width
+uniform vec4 uOpen;        // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width, exponent
 varying vec2 vUvM;
 varying float vLayer;
 varying float vSlit;
@@ -409,7 +413,7 @@ varying vec2 vTongue;
 // warmly by the lips near their edges; open vowels show the body of the tongue low in the mouth.
 vec2 openingAt() {
   float mu = abs(vTongue.x) / max(0.05, uOpen.z);
-  float lens = pow(clamp(1.0 - mu * mu, 0.0, 1.0), 0.6) * (1.0 - smoothstep(0.72, 1.0, mu));   // (as the rig's lensOf)
+  float lens = pow(clamp(1.0 - mu * mu, 0.0, 1.0), uOpen.w) * (1.0 - smoothstep(0.72, 1.0, mu));   // (as the rig's lensOf)
   float up = uOpen.x * lens, lo = uOpen.y * lens;
   return vec2(clamp((vTongue.y + up) / max(1.0, up + lo), 0.0, 1.0), lens);
 }
@@ -433,7 +437,7 @@ void main() {
   if (vLayer > 0.5) {
     vec3 c = texture2D(tMouth, vUvM).rgb;
     // the tongue tip sits in front of the lower teeth
-    float a = smoothstep(0.03, 0.16, max(c.r, max(c.g, c.b))) * vis * (1.0 - tg.a);
+    float a = smoothstep(0.03, 0.16, max(c.r, max(c.g, c.b))) * vis * smoothstep(0.0, 0.6, uTeethLo) * (1.0 - tg.a);
     if (a < 0.01) discard;
     gl_FragColor = vec4(c * a * 0.92, a);
   } else {
@@ -453,7 +457,16 @@ void main() {
     // ... and behind the upper incisors' edge
     float teethLum = smoothstep(0.05, 0.25, max(c.r, max(c.g, c.b))) * vis;
     c = mix(c, tg.rgb, tg.a * (1.0 - 0.45 * teethLum));
-    c = c * shade * (1.0 - 0.4 * uSleep);
+    // f / v: the lower lip is drawn up under the upper incisors, whose crowns fill the opening
+    // down to it (no dark gap under the teeth; the gaps between them stay dark), lit like the
+    // teeth of an open mouth
+    float tk = 0.0;
+    if (uTuck > 0.01) {
+      vec2 tuv = vec2(vUvM.x, mix(uIncisors.x, uIncisors.y, clamp(op.x, 0.0, 1.0)));
+      tk = smoothstep(0.0, 0.5, uTuck) * smoothstep(0.1, 0.4, op.y);
+      c = mix(c, texture2D(tMouth, tuv).rgb * mix(0.7, 1.0, op.x), tk);
+    }
+    c = c * mix(shade, 1.0, 0.7 * tk) * (1.0 - 0.4 * uSleep);
     gl_FragColor = vec4(c, 1.0);
   }
 }`;

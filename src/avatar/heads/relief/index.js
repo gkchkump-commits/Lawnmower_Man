@@ -3,9 +3,10 @@
 // the mouth cavity (dark interior + upper teeth on the upper jaw, lower teeth on the jaw).
 
 import { packWeights, validateMesh, validatePack, withSlash } from '../../pack.js';
-import { RIG_LIMITS, buildRig, rigUniforms } from './rig.js';
+import { RIG_LIMITS, buildRig, incisorBand, rigUniforms } from './rig.js';
 import { mouthRegion, refineMesh } from './refine.js';
 import { irisLayer } from './iris.js';
+import { lowerTeeth, upperTeeth } from '../teeth.js';
 import { CAVITY_FRAG, CAVITY_VERT, FACE_FRAG, FACE_VERT } from './shaders.js';
 
 /** @typedef {import('../../types.js').HeadContext} HeadContext */
@@ -114,9 +115,9 @@ export default class ReliefHead {
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
       uMouth: { value: new THREE.Vector3(r.mouthCenter[0], r.mouthCenter[1], r.mouthHalfW) },
-      uLens: { value: new THREE.Vector2(1, RIG_LIMITS.cornerJawShare) },
+      uLens: { value: new THREE.Vector4(1, RIG_LIMITS.cornerJawShare, 0.75, 0.55) },
       uLowerClose: { value: 0 },
-      uOpen: { value: new THREE.Vector3(0, 0, 1) },
+      uOpen: { value: new THREE.Vector4(0, 0, 1, 0.65) },
       // jaw hinge and the face regions that move with the mouth (rest geometry; amounts per frame)
       uHinge: { value: new THREE.Vector4(...r.hinge) },
       uHingeK: { value: new THREE.Vector3(RIG_LIMITS.hingeSide, RIG_LIMITS.hingeStretch, RIG_LIMITS.hingeBack) },
@@ -224,7 +225,9 @@ export default class ReliefHead {
     this.cavityUniforms = {
       ...this._commonUniforms(),
       tMouth: { value: this.textures.mouth },
-      uTeeth: { value: 0 }, uSleep: { value: 0 }, uTongue: { value: 0 }, uTeethShift: { value: 0 }, uJawPx: { value: 0 },
+      uTeeth: { value: 0 }, uTeethLo: { value: 0 }, uTuck: { value: 0 }, uSleep: { value: 0 },
+      // the upper incisors' crowns in the mouth texture (v of their top and bottom edge)
+      uIncisors: { value: new THREE.Vector2(...incisorRows(this.textures.mouth.image)) }, uTongue: { value: 0 }, uTeethShift: { value: 0 }, uJawPx: { value: 0 },
       uPxPerUnit: { value: this.pack.plate.height },
       uColLine: { value: this.ctx.palette.line.clone() },
       uDark: { value: new THREE.Color().setRGB(dark[0], dark[1], dark[2], THREE.SRGBColorSpace) },
@@ -276,14 +279,16 @@ export default class ReliefHead {
     f.uFx.value = this.fx;
     f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
     f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
-    f.uLens.value.set(u.lens[0], u.lens[1]);
+    f.uLens.value.set(u.lens[0], u.lens[1], u.lens[2], u.lens[3]);
     f.uLowerClose.value = u.lowerClose;
-    f.uOpen.value.set(u.open[0], u.open[1], u.open[2]);
+    f.uOpen.value.set(u.open[0], u.open[1], u.open[2], u.open[3]);
     const cu = this.cavityUniforms;
     const H = this.pack.plate.height;
     cu.uTeeth.value = cavityTeeth(a);
+    cu.uTeethLo.value = cavityLowerTeeth(a);
     cu.uSleep.value = a.sleep;
     cu.uTongue.value = u.tongue;
+    cu.uTuck.value = u.tuck;
     cu.uJawPx.value = u.jawDrop * H;
     // world -> px -> mouth texture v (its upper half, the cavity, spans the mouth rect height)
     cu.uTeethShift.value = (u.teethShift * H * 0.5) / (this.pack.mouthRect?.[3] || 127);
@@ -398,6 +403,29 @@ export function refineCavity(c) {
 }
 
 /**
+ * The v range (texture v, 1 = top) of the upper incisors' crowns in the mouth texture: measured on
+ * the image when it can be read back, else the reference pack's (rows 37.5-45 of 254).
+ * @param {any} image @returns {[number, number]} [v top, v bottom]
+ */
+export function incisorRows(image) {
+  let band = null;
+  try {
+    if (typeof document !== 'undefined' && image?.width > 0) {
+      const c = document.createElement('canvas');
+      c.width = image.width;
+      c.height = image.height;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      if (g) {
+        g.drawImage(image, 0, 0);
+        band = incisorBand(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
+      }
+    }
+  } catch { /* the default */ }
+  const b = band || { top: 37.5 / 254, bottom: 45 / 254 };
+  return [1 - b.top, 1 - b.bottom];
+}
+
+/**
  * Jaw line as a half ellipse (world units) through both jaw angles and the chin, for the
  * particle collar. @returns {{center:[number,number], radius:[number,number]}|undefined}
  */
@@ -412,14 +440,23 @@ export function jawFromLandmarks(lm, W, H) {
 }
 
 /**
- * How much of the teeth the parted lips reveal (the dark interior always shows through the
- * opening): jaw and wide visemes bare the teeth, a rounded O / U pucker mostly does not.
+ * How much of the UPPER teeth the parted lips reveal (the dark interior always shows through the
+ * opening): jaw and wide visemes bare the teeth, a rounded O / U pucker mostly does not; in an
+ * f / v the incisors rest on the tucked lower lip.
  * @param {AnimState} a
  */
 export function cavityTeeth(a) {
-  const open = Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06, a.mouthTeeth ?? 0, (a.mouthTuck ?? 0) * 0.8);
-  // rounded lips cover the teeth more; pressed lips hide them
-  return open * (1 - 0.4 * a.mouthRound * (1 - (a.mouthTeeth ?? 0))) * (1 - (a.mouthPress ?? 0));
+  return upperTeeth(a);
+}
+
+/**
+ * How much of the LOWER teeth show. They ride on the jaw behind the lower lip: hidden while the
+ * jaw is nearly closed (behind the upper incisors and the lip), uncovered as it opens wide or as
+ * spread lips draw back from them; a tucked lower lip (f v) and rounded lips cover them.
+ * @param {AnimState} a
+ */
+export function cavityLowerTeeth(a) {
+  return lowerTeeth(a);
 }
 
 /**

@@ -23,11 +23,12 @@
 /** Tunable magnitudes, fractions of the face height (fh) / mouth half width (hw). */
 export const RIG_LIMITS = {
   jawDropFh: 0.095,       // lower lip drop at jawOpen = 1
-  wideCornerHw: 0.11,     // corners outward for mouthWide = 1
+  wideCornerHw: 0.13,     // corners outward for mouthWide = 1
+  jawCornerInHw: 0.06,   // the corners draw in a little as the jaw opens wide (the lips stretch down)
   wideLipFh: 0.007,       // lips part (teeth show) for wide
   roundCornerHw: 0.4,     // corners inward for mouthRound = 1 (more stretches the cheek grid)
   roundPushFh: 0.05,      // lips forward for round
-  roundLipFh: 0.026,      // centre parting for round: with the narrow lens, a round opening
+  roundLipFh: 0.008,      // centre parting for round: rounded lips leave a small orifice (the jaw sets how open)
   smileUpFh: 0.032,       // corners up for smile
   smileOutHw: 0.07,
   smileLidFrac: 0.12,     // lower lid squint
@@ -48,9 +49,10 @@ export const RIG_LIMITS = {
   teethShift: 0.6,        // the upper incisors follow a lifted upper lip by this fraction
   asymFh: 0.008,          // corner height difference at |mouthAsym| = 1
   // the face moving with the mouth
-  jawUpperLipFh: 0.03,    // the upper lip rises as the jaw opens (~30 % of the lower lip: open vowels; the incisors show)
+  jawUpperLipFh: 0.02,    // the upper lip rises as the jaw opens (~20 % of the lower lip: open vowels; the incisors show)
   roundThick: 0.22,       // rounded (protruded) lips look fuller: the lip texture expands
   cornerJawShare: 0.4,    // the commissures drop with this share of the jaw: the opening is a lens, the corners stay closed
+  lensFull: 0.3,          // how much fuller (rounder-ended) an open / spread opening is than a small one (lens exponent)
   cheekLiftFh: 0.012,     // cheeks / nasolabial folds lift for cheekRaise = 1
   cheekOutFh: 0.004,      // ... and move a little outward
   chinLiftFh: 0.007,      // the chin boss bunches up under pressed lips (mentalis)
@@ -197,7 +199,7 @@ export function rigUniforms(rig, a, u) {
   u.lowerClose = (press + tuck) * u.jawDrop;
   u.lipPush = L.roundPushFh * round * fh;
   // corners: x outward is -x for L, +x for R; asymmetry tilts the mouth a little
-  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
+  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile - L.jawCornerInHw * clamp01(a.jawOpen) * clamp01(a.jawOpen)) * hw;
   const up = L.smileUpFh * smile * fh - 0.004 * round * fh;
   const tilt = L.asymFh * clamp(a.mouthAsym ?? 0, -1, 1) * fh;
   u.cornerL = u.cornerL || [0, 0];
@@ -205,15 +207,23 @@ export function rigUniforms(rig, a, u) {
   u.cornerL[0] = -out; u.cornerL[1] = up + tilt;
   u.cornerR[0] = out; u.cornerR[1] = up - tilt;
   // the lens of the opening spans the corners where they are now (narrow for O / U, wide for E)
-  u.lens = u.lens || [1, L.cornerJawShare];
+  u.lens = u.lens || [1, L.cornerJawShare, 0.75, 0.55];
   u.lens[0] = Math.max(0.35, 1 + out / hw);
   u.lens[1] = L.cornerJawShare;
+  // the opening's outline: a slender almond for a small or rounded opening; an open vowel's and a
+  // spread one's are fuller toward the corners (rounder ends, a flatter middle: a smaller
+  // exponent of the lens profile, upper lip and lower lip)
+  const jo = clamp01((clamp01(a.jawOpen) - 0.15) / 0.5);
+  const full = (jo * jo * (3 - 2 * jo) + 0.5 * wide * (1 - jo)) * (1 - round);
+  u.lens[2] = 0.75 - L.lensFull * full;
+  u.lens[3] = 0.55 - 0.75 * L.lensFull * full;
   // the opening at the centre (plate px) for the shading of the lips' inner edges and the cavity
   const px = 1 / (rig.px ?? 1 / 1168);
-  u.open = u.open || [0, 0, 1];
+  u.open = u.open || [0, 0, 1, 0.65];
   u.open[0] = Math.max(0, u.upperLift) * px;
   u.open[1] = Math.max(0, u.jawDrop + u.lowerDrop) * px;
   u.open[2] = u.lens[0];
+  u.open[3] = 0.5 * (u.lens[2] + u.lens[3]);
   // lip texture warp (plate px): x upper thinning, y contact, z lower lip rise, w lower thinning
   // (pressed lips thin, rounded ones fill out: a negative thinning expands the lip texture)
   const thick = L.roundThick * round * (1 - press) * (1 - tuck);
@@ -229,6 +239,7 @@ export function rigUniforms(rig, a, u) {
   u.faceMove[2] = L.nostrilPx * clamp01(a.nostrilFlare ?? 0) * (rig.px ?? 1 / 1168);
   u.faceMove[3] = L.cheekOutFh * clamp01(a.cheekRaise ?? 0) * fh;
   u.tongue = clamp01(a.mouthTongue ?? 0) * (1 - press);
+  u.tuck = tuck;
   // the upper incisors follow a lifted upper lip part of the way (world units); in a tuck they
   // fill the small opening down to the lower lip that touches them
   u.teethShift = L.teethShift * lift0 * openK + 1.1 * L.tuckLiftFh * tuck * fh;
@@ -256,6 +267,33 @@ export function rigUniforms(rig, a, u) {
   u.headRot = headRotation(a.headYaw, a.headPitch, a.headRoll, u.headRot || new Float32Array(9));
   u.breathY = (a.breath - 0.5) * L.breathFh * fh;
   return u;
+}
+
+/**
+ * The upper incisors' crowns in the pack's mouth texture (its upper half is the cavity with the
+ * upper teeth along its top): the brightest band of rows across the middle fifth, where the mean
+ * luminance exceeds 45 % of its peak. Fractions of the texture height (0 = top row), or null.
+ * @param {Uint8ClampedArray|Uint8Array} rgba @param {number} w @param {number} h
+ * @returns {{ top: number, bottom: number }|null}
+ */
+export function incisorBand(rgba, w, h) {
+  const x0 = Math.floor(0.4 * w), x1 = Math.ceil(0.6 * w), rows = h >> 1;
+  const lum = new Float32Array(rows);
+  let peak = 0, pr = -1;
+  for (let y = 0; y < rows; y++) {
+    let acc = 0;
+    for (let x = x0; x < x1; x++) {
+      const i = (y * w + x) * 4;
+      acc += 0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
+    }
+    lum[y] = acc / ((x1 - x0) * 255);
+    if (lum[y] > peak) { peak = lum[y]; pr = y; }
+  }
+  if (pr < 0 || peak < 0.2) return null;
+  let a = pr, b = pr;
+  while (a > 0 && lum[a - 1] > 0.45 * peak) a--;
+  while (b + 1 < rows && lum[b + 1] > 0.45 * peak) b++;
+  return { top: a / h, bottom: (b + 1) / h };
 }
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }

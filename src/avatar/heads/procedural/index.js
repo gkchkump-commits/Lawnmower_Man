@@ -5,6 +5,7 @@
 // reference video are used. Two draw calls: the head (skin + mouth cavity share the mesh) and,
 // on medium / high, an additive halo shell over the silhouette triangles (shared buffers).
 
+import { lowerTeeth, upperTeeth } from '../teeth.js';
 import { decodeModel, packCurveTexture, validateMeta } from './format.js';
 import { buildProcRig, procRigUniforms } from './rig.js';
 import { DEFAULT_DEFINES, HALO_FRAG, HALO_VERT, HEAD_FRAG, HEAD_VERT } from './shaders.js';
@@ -179,6 +180,7 @@ export default class ProceduralHead {
       uCornerR: { value: new THREE.Vector3() },
       uLips: { value: new THREE.Vector4() },
       uMouthX: { value: new THREE.Vector4() },
+      uTeethVis: { value: new THREE.Vector2() },
       uBrow: { value: new THREE.Vector2() },
       uBreathY: { value: 0 },
       uNeckRot: { value: new THREE.Vector2(meta.neck.fadeBottom - 0.02, meta.neck.fadeTop + 0.06) },
@@ -234,6 +236,7 @@ export default class ProceduralHead {
     f.uCornerR.value.fromArray(u.cornerR);
     f.uLips.value.fromArray(u.lips);
     f.uMouthX.value.fromArray(u.mouthX);
+    f.uTeethVis.value.set(upperTeeth(a), lowerTeeth(a));
     f.uBrow.value.fromArray(u.brow);
     f.uBreathY.value = u.breathY;
     f.uFace.value.set(u.face[0], u.face[1]);

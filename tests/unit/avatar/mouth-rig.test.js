@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createAnimState } from '../../../src/avatar/director.js';
 import { RIG_LIMITS, buildRig, rigUniforms } from '../../../src/avatar/heads/relief/rig.js';
-import { cavityTeeth, slitDistances } from '../../../src/avatar/heads/relief/index.js';
+import { cavityLowerTeeth, cavityTeeth, slitDistances } from '../../../src/avatar/heads/relief/index.js';
+import { incisorBand } from '../../../src/avatar/heads/relief/rig.js';
 import * as reliefShaders from '../../../src/avatar/heads/relief/shaders.js';
 import * as procShaders from '../../../src/avatar/heads/procedural/shaders.js';
 import { PROC_LIMITS, buildProcRig, deformVertex, procRigUniforms } from '../../../src/avatar/heads/procedural/rig.js';
@@ -62,6 +63,32 @@ describe('relief rig: speech channels', () => {
     expect(opening(pt)).toBeCloseTo(0, 9);
   });
 
+  it('the lower teeth ride on the jaw: hidden by a closed jaw, a tuck (f v) or rounded lips', () => {
+    expect(cavityLowerTeeth(pose({}))).toBe(0);
+    expect(cavityLowerTeeth(pose({ jawOpen: 0.12 }))).toBe(0);            // behind the lower lip
+    expect(cavityLowerTeeth(pose({ jawOpen: 0.7 }))).toBeGreaterThan(0.9); // an open "ah"
+    expect(cavityLowerTeeth(pose({ jawOpen: 0.12, mouthWide: 0.8, mouthTeeth: 0.8 }))).toBeGreaterThan(0.3); // "ee": lips drawn back
+    expect(cavityLowerTeeth(pose({ jawOpen: 0.7, mouthTuck: 1 }))).toBe(0);
+    expect(cavityLowerTeeth(pose({ jawOpen: 0.45, mouthRound: 1 }))).toBeLessThan(0.15);
+    // the upper ones: shown by parted lips, hidden by rounded ones more than before
+    expect(cavityTeeth(pose({ jawOpen: 0.45, mouthRound: 1 }))).toBeLessThan(0.2);
+    expect(cavityTeeth(pose({ jawOpen: 0.45 }))).toBeCloseTo(0.45, 9);
+  });
+
+  it('locates the incisors in the mouth texture (the brightest band across its middle)', () => {
+    const w = 40, h = 80, px = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const v = y >= 12 && y < 17 ? 230 : 20;
+        px.set([v, v, v, 255], (y * w + x) * 4);
+      }
+    }
+    const b = incisorBand(px, w, h);
+    expect(b.top).toBeCloseTo(12 / h, 9);
+    expect(b.bottom).toBeCloseTo(17 / h, 9);
+    expect(incisorBand(new Uint8ClampedArray(w * h * 4), w, h)).toBe(null);
+  });
+
   it('teeth raise the upper lip and the incisors follow part of the way', () => {
     const u = rigUniforms(rig, pose({ mouthTeeth: 1 }), {});
     expect(u.upperLift).toBeCloseTo(RIG_LIMITS.teethLiftFh * fh, 9);
@@ -81,10 +108,14 @@ describe('relief rig: speech channels', () => {
     expect(n.cornerL[1]).toBeCloseTo(-RIG_LIMITS.asymFh * fh, 9);  // clamped to -1
   });
 
-  it('round pulls the corners in further than before and opens the centre', () => {
+  it('round pulls the corners in and leaves a small orifice (the jaw sets how open it is)', () => {
     const u = rigUniforms(rig, pose({ mouthRound: 1 }), {});
     expect(-u.cornerR[0]).toBeCloseTo(RIG_LIMITS.roundCornerHw * rig.mouthHalfW, 9);
-    expect(opening(u)).toBeGreaterThan(0.02 * fh);
+    // (v0.4: rounding alone used to part the lips by 0.052 fh, so an "oo" gaped wider than an "ah")
+    expect(opening(u)).toBeGreaterThan(0.012 * fh);
+    expect(opening(u)).toBeLessThan(0.025 * fh);
+    const oh = rigUniforms(rig, pose({ mouthRound: 0.8, jawOpen: 0.45 }), {});
+    expect(opening(oh)).toBeGreaterThan(2 * opening(u));
   });
 
   it('reuses its output arrays', () => {

@@ -6,8 +6,9 @@ export const PROC_LIMITS = Object.freeze({
   jawAngle: 0.15,          // jaw rotation at jawOpen = 1 (lower lip drops ~0.055 units)
   wideJawAngle: 0.025,     // lips part a little for wide visemes (E / I / S)
   wideCornerHw: 0.12,      // corners outward for mouthWide = 1
+  jawCornerInHw: 0.06,     // the corners draw in a little as the jaw opens wide (the lips stretch down)
   wideLipFh: 0.006,        // upper lip lift / lower lip drop for wide
-  roundCornerHw: 0.24,     // corners inward for mouthRound = 1
+  roundCornerHw: 0.3,      // corners inward for mouthRound = 1
   roundPushFh: 0.03,       // lips forward for round
   smileUpFh: 0.03,         // corners up for smile
   smileOutHw: 0.09,
@@ -165,7 +166,7 @@ export function procRigUniforms(rig, a, u) {
   u.jawAngle = L.jawAngle * jaw + L.wideJawAngle * wide * (1 - jaw);
   u.jawRot = rotationX(u.jawAngle, u.jawRot || new Float32Array(9));
   u.headRot = rotationYPR(a.headYaw, a.headPitch, a.headRoll, u.headRot || new Float32Array(9));
-  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
+  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile - L.jawCornerInHw * jaw * jaw) * hw;
   const up = (L.smileUpFh * smile - 0.004 * round) * fh;
   const back = (-L.smileBackFh * smile + 0.01 * round) * fh;
   const tilt = L.asymFh * clamp(a.mouthAsym ?? 0, -1, 1) * fh;

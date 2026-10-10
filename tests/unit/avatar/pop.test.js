@@ -5,7 +5,8 @@ import { normalizeOptions } from '../../../src/avatar/index.js';
 import { Particles, yprMatrix } from '../../../src/avatar/fx/particles.js';
 import { BLOOM_GAIN, COVERAGE_GATE, HALO, haloMix } from '../../../src/avatar/fx/post.js';
 import { Projector } from '../../../src/avatar/fx/projector.js';
-import { RELIEF_LIGHT, reliefNormals } from '../../../src/avatar/heads/relief/index.js';
+import { RELIEF_LIGHT, liteDefines, reliefNormals } from '../../../src/avatar/heads/relief/index.js';
+import { FACE_FRAG, FACE_VERT } from '../../../src/avatar/heads/relief/shaders.js';
 import { headRotation } from '../../../src/avatar/heads/relief/rig.js';
 import { rotationYPR } from '../../../src/avatar/heads/procedural/rig.js';
 import { QUALITY } from '../../../src/avatar/quality.js';
@@ -118,6 +119,15 @@ describe('quality tiers and options', () => {
     expect(QUALITY.medium.msaa).toBeGreaterThan(0);
     // (no FXAA on Low: it smeared the fine wire grid and the irises and cost a fifth more)
     expect(QUALITY.low).toEqual({ dprCap: 1, msaa: 0, particles: 1200, bloomScale: 0.25, bloomLevels: 3, halfFloat: false });
+    // ... and its relief shader goes without the light (the turn light, glint, rim, sharpening,
+    // scan lines): as cheap as before it
+    expect(liteDefines('low')).toEqual({ RELIEF_LITE: '' });
+    expect(liteDefines('medium')).toEqual({});
+    expect(liteDefines('high')).toEqual({});
+    for (const src of [FACE_VERT, FACE_FRAG]) {
+      expect((src.match(/#ifndef RELIEF_LITE/g) || []).length).toBe((src.match(/#endif/g) || []).length);
+    }
+    expect((FACE_FRAG.match(/#ifndef RELIEF_LITE/g) || []).length).toBeGreaterThanOrEqual(4);
   });
 
   it('normalizes liveliness, the projector and the glass opacity', () => {

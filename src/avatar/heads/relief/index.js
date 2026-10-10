@@ -198,6 +198,8 @@ export default class ReliefHead {
     };
     const mat = new THREE.ShaderMaterial({
       vertexShader: FACE_VERT, fragmentShader: FACE_FRAG, uniforms: this.faceUniforms,
+      // (the Low tier, for integrated GPUs, goes without the light: see FACE_FRAG)
+      defines: liteDefines(this.ctx.quality),
       side: THREE.DoubleSide, depthTest: true, depthWrite: true, transparent: false,
       // premultiplied "over"
       blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
@@ -380,8 +382,13 @@ export default class ReliefHead {
     return { iris: this.iris ? structuredClone(this.iris) : null, irisLayer: this.faceUniforms?.uIrisLayer.value === 1, mesh: this.meshStats ?? null };
   }
 
-  /** @param {{ palette?: import('../../types.js').HeadPalette, fx?: number }} o */
+  /** @param {{ palette?: import('../../types.js').HeadPalette, fx?: number, quality?: string }} o */
   setOptions(o) {
+    const mat = this.faceMesh?.material;
+    if (o.quality !== undefined && mat) {
+      const d = liteDefines(o.quality);
+      if (('RELIEF_LITE' in d) !== ('RELIEF_LITE' in mat.defines)) { mat.defines = d; mat.needsUpdate = true; }
+    }
     if (o.palette && this.faceUniforms) {
       this.faceUniforms.uColLine.value.copy(o.palette.line);
       this.faceUniforms.uColRim.value.copy(o.palette.rim);
@@ -400,6 +407,11 @@ export default class ReliefHead {
     if (this.textures) Object.values(this.textures).forEach((t) => t.dispose());
     this.group = null;
   }
+}
+
+/** Shader defines for a quality tier: the Low tier renders without the light (RELIEF_LITE). @param {string} q */
+export function liteDefines(q) {
+  return q === 'low' ? { RELIEF_LITE: '' } : {};
 }
 
 /** The relief's light (FACE_FRAG "light and life"): the key light's change as the head turns,

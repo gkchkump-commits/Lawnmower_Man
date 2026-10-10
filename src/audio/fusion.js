@@ -312,7 +312,8 @@ export function vowelAmounts(viseme, va, n, clipNorm, T) {
     wide *= 1 - 0.45 * reduced;
     teeth *= 1 - 0.4 * reduced;
   }
-  if (viseme === 'O' || viseme === 'U') round = clamp(T[2] * (0.82 + 0.25 * (stress - 0.9)), 0, 1);
+  // rounded vowels: a stressed "oo" / "o" is fully rounded, a reduced one less (not a pucker)
+  if (viseme === 'O' || viseme === 'U') round = clamp(T[2] * clamp(0.9 + 0.3 * (stress - 0.9), 0.75, 1), 0, 1);
   teeth = clamp(teeth * (0.6 + 0.4 * Math.min(1.1, stress)), 0, 1);
   return { jaw, wide, round, teeth, stress };
 }

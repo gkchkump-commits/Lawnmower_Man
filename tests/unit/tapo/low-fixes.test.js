@@ -92,26 +92,29 @@ describe('calibration on a busy PC', () => {
 });
 
 describe('calibration: the reference picture', () => {
-  it('main moves the camera only once the worker has a still reference (or after a long wait)', async () => {
+  // (updated on purpose for the gated protocol: a worker that never answers used to mean "go on
+  // and let the measurement decide"; now it means "no reference", and the wizard measures nothing)
+  it('main moves the camera only once the worker has a still reference; a worker that never answers gives none', async () => {
     const { service } = await offlineService(() => Date.now());
     service.relay.state = 'live';
     const sent = [];
     let answer = null;
-    const port = { postMessage: (m) => { sent.push(m); if (m.t === 'shift-ref') answer = m.id; }, close() {} };
+    const port = { postMessage: (m) => { sent.push(m); if (m.t === 'shift-ref') answer = m; }, close() {} };
     service._port = port;
-    let done = false;
-    const p = service._shiftRef().then(() => { done = true; });
+    let done = null;
+    const p = service._shiftRef(1234.5).then((r) => { done = r; });
     await new Promise((r) => setTimeout(r, 600));
     expect(sent.map((m) => m.t)).toContain('shift-ref');
-    expect(done).toBe(false); // still waiting for the worker
-    service._onWorkerMessage(port, { t: 'shift-ref-ok', id: answer });
+    expect(answer.after).toBe(1234.5); // only pictures that reached main after the last move
+    expect(done).toBe(null); // still waiting for the worker
+    service._onWorkerMessage(port, { t: 'shift-ref-ok', id: answer.id, gated: true, ok: true, still: true, at: 1300 });
     await p;
-    expect(done).toBe(true);
-    // a worker that never answers: go on after the timeout (the measurement then decides)
+    expect(done).toEqual({ ok: true, at: 1300, still: true });
+    // a worker that never answers: no reference after the timeout
     expect(SHIFT_REF_TIMEOUT_MS).toBeGreaterThanOrEqual(20_000);
     service._shiftRefTimeoutMs = 300;
     const t0 = Date.now();
-    await service._shiftRef();
+    expect(await service._shiftRef(2000)).toEqual({ ok: false, reason: 'The camera picture did not arrive in time.' });
     expect(Date.now() - t0).toBeGreaterThanOrEqual(300 + 300 - 50);
   }, 15_000);
 });

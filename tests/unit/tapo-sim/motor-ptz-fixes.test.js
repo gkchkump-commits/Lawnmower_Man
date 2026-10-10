@@ -146,7 +146,16 @@ describe('calibration without GetStatus', () => {
       await ptz.probe();
       let last = { x: 0, y: 0 };
       const wizardPtz = { rawMove: async (x, y) => { last = { x, y }; return ptz.rawMove(x, y); }, stopAll: (r) => ptz.stopAll(r) };
-      const vision = { ref: async () => {}, measure: async () => ({ dx: last.x / SIM_TRUTH.viewUnitsX, dy: last.y / SIM_TRUTH.viewUnitsY, score: 0.9, settledMs: 0 }) };
+      // a current picture: the reference and each measurement name frames from after the move
+      // (updated on purpose for the gated protocol: an unstamped answer is no longer trusted)
+      let refAt = 0;
+      const vision = {
+        ref: async ({ after }) => {
+          refAt = after + 1;
+          return { ok: true, at: refAt };
+        },
+        measure: async ({ after }) => ({ dx: last.x / SIM_TRUTH.viewUnitsX, dy: last.y / SIM_TRUTH.viewUnitsY, score: 0.9, settledMs: 0, at: after + 1, refAt }),
+      };
       const w = new CalibrationWizard({ ptz: wizardPtz, vision, canStart: () => null, current: () => ({ ...settings }), save: (r) => Object.assign(settings, r), delay: async () => {} });
       w.start();
       await new Promise((resolve) => { const t = setInterval(() => { if (!w.running) { clearInterval(t); resolve(); } }, 100); });

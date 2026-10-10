@@ -141,7 +141,9 @@ export class CalibrationDialog {
       h('div', { class: 'calib-step' }, s.step === 'ask' ? tapoIcon('help', 'icon') : h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', null, STEP_TEXT[/** @type {keyof typeof STEP_TEXT} */ (s.step)] || s.step)),
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct }, h('div', { class: 'progress-bar', style: { width: `${pct}%` } })));
     if (s.step === 'ask') {
-      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the camera turn?'), h('p', { class: 'calib-small' }, 'The picture was too dark or too plain to measure. Watch the live view behind this window, then choose.'));
+      // main says why the picture could not tell (too plain, lagging behind, disagreeing with itself)
+      const why = typeof s.note === 'string' && s.note ? s.note : 'The picture was too dark or too plain to measure.';
+      this.body.append(h('p', { class: 'calib-q' }, s.question || 'Which way did the camera turn?'), h('p', { class: 'calib-small' }, `${why} Watch the live view behind this window, then choose.`));
       // only the answers main asks for (the axis it just moved), about the camera, as the question is
       const answers = Array.isArray(s.answers) && s.answers.length ? s.answers : ['left', 'right', 'none'];
       const pad = h('div', { class: 'calib-pad', role: 'group', 'aria-label': 'The camera turned' });

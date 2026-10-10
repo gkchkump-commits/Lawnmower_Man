@@ -203,6 +203,8 @@ const SWAY = { yaw: 1.0 / DEG, pitch: 0.45 / DEG, roll: 0.26 / DEG, fast: 0.07 /
 
 /** An accent this strong (a phrase's nuclear accent) always gets a nod; weaker ones vary. */
 export const ACCENT_ALWAYS_NODS = 0.95;
+/** After an accent's nod, a weaker accent does not nod for this long (s, drawn in the range). */
+export const NOD_REFRACTORY = Object.freeze([0.6, 1.2]);
 
 /** Probabilistic OR of 0..1 values (smooth where max() would kink). */
 const softOr = (a, b) => 1 - (1 - a) * (1 - b);
@@ -236,6 +238,7 @@ export class Director {
     /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number, size?: number, extra?: boolean }>} */
     this._kicks = [];
     this._lastAccent = -Infinity;
+    this._nodFree = -Infinity;
     this._lastCue = -Infinity;
     this._blinkDeferred = false;
     this._phraseYaw = 0;
@@ -362,15 +365,18 @@ export class Director {
       case 'accent': {
         if (t - this._lastAccent < 0.2) return;           // one gesture per syllable at most
         this._lastAccent = t;
-        // A speaker does not nod on every stressed syllable, nor the same way: a strong (nuclear)
-        // accent gets a nod; a weaker one a nod, a small turn or tilt of the head (a beat), a
-        // flick of the brows, or nothing visible. Sizes vary widely (log-normal).
+        // A speaker does not nod on every stressed syllable, nor the same way, nor in a rhythm: a
+        // strong (nuclear) accent gets a nod; a weaker one a nod now and then (never within
+        // NOD_REFRACTORY of the last nod), a turn or tilt of the head (a beat), a flick of the
+        // brows, or nothing visible. Sizes vary widely (log-normal).
         const r = this.rng2;
         const size = (0.5 + 0.5 * s) * clamp(Math.exp(0.32 * gauss(r)), 0.55, 1.7);
-        const u = s >= ACCENT_ALWAYS_NODS ? 0 : r();
-        const pNod = 0.25 + 0.5 * s;
-        if (u < pNod) this._nod(t, size);
-        else if (u < pNod + 0.55 * (1 - pNod)) {
+        const u = r();
+        const pNod = t < this._nodFree ? 0 : 0.15 + 0.35 * s;
+        if (s >= ACCENT_ALWAYS_NODS || u < pNod) {
+          this._nod(t, size);
+          this._nodFree = t + NOD_REFRACTORY[0] + (NOD_REFRACTORY[1] - NOD_REFRACTORY[0]) * r();
+        } else if (u < pNod + 0.55 * (1 - pNod)) {
           // turn and tilt together, mostly one of them; the side alternates more often than not
           this._beatSide = r() < 0.7 ? -(this._beatSide || 1) : (this._beatSide || 1);
           const turn = r();
@@ -703,10 +709,10 @@ export class Director {
     const since = time - this._errorKick;
     const shake = since >= 0 && since < 0.8 ? 0.012 * Math.sin(since * 28) * envelope(since, 0.06, 0.1, 0.6) : 0;
     const eyes = this.eyes;
-    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * (0.006 * nodYaw + 0.014 * beatYaw);
+    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * (0.006 * nodYaw + 0.024 * beatYaw);
     let pitch = pitchSway + pP + pitchPosture + eyes.hy.x / DEG
       + ex * (-0.024 * nod + 0.012 * lift + 0.012 * Math.abs(tilt) + 0.0036 * softClamp(pitchSt, -6, 8) - 0.016 * lower + 0.008 * inhaleHead);
-    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * (0.005 * nodRoll + 0.012 * beatRoll);
+    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * (0.005 * nodRoll + 0.02 * beatRoll);
     yaw = clamp(yaw, -0.35, 0.35);
     pitch = clamp(pitch, -0.25, 0.25);
     roll = clamp(roll, -0.2, 0.2);

@@ -1,7 +1,7 @@
 // Director: the lip-sync channels (press, tuck, teeth, tongue, asymmetry) and the secondary
 // speech motion driven by prosody cues (nods, brows, phrase-end blinks, micro-smiles).
 import { describe, expect, it } from 'vitest';
-import { Director, JAW_BEHIND_SEAL, MOUTH_OMEGA, createAnimState, LIP_CONTACT, lipContact } from '../../../src/avatar/director.js';
+import { Director, JAW_BEHIND_SEAL, MOUTH_OMEGA, NOD_REFRACTORY, createAnimState, LIP_CONTACT, lipContact } from '../../../src/avatar/director.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -216,6 +216,25 @@ describe('Director: prosody (secondary speech motion)', () => {
       run(d, 0.6, 60, (tt, a) => { dip = Math.max(dip, (p0 - a.headPitch) * DEG); }, t);
       expect(dip, `seed ${seed}`).toBeGreaterThan(0.3);
     }
+  });
+
+  it('weaker accents do not nod in a rhythm: none within NOD_REFRACTORY of the last nod', () => {
+    let again = 0, later = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      const { d, t } = speaking(seed);
+      const nods = () => d._kicks.filter((k) => k.kind === 'nod').length;
+      d.setProsody({ type: 'accent', strength: 1 });          // a nuclear accent: it nods
+      expect(nods()).toBe(1);
+      let tt = run(d, 0.35, 60, () => {}, t).t;
+      d.setProsody({ type: 'accent', strength: 0.9 });        // too soon for another nod
+      if (nods() > 1) again++;
+      tt = run(d, NOD_REFRACTORY[1] + 0.1, 60, () => {}, tt).t;
+      d.setProsody({ type: 'accent', strength: 0.9 });        // a while later it may nod again
+      if (nods() > 1) later++;
+    }
+    expect(again).toBe(0);
+    expect(later).toBeGreaterThan(10);
+    expect(NOD_REFRACTORY[0]).toBeGreaterThanOrEqual(0.5);
   });
 
   it('one nod per syllable at most', () => {

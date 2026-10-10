@@ -1,0 +1,199 @@
+{
+"text": "Bob, pop by at five. Maybe my mom made muffins.",
+"voice": "af_heart",
+"sampleRate": 24000,
+"durationSec": 3.5153333333333334,
+"visemes": [
+{
+"start": 0.0,
+"end": 0.023,
+"viseme": "sil"
+},
+{
+"start": 0.023,
+"end": 0.073,
+"viseme": "PP"
+},
+{
+"start": 0.073,
+"end": 0.323,
+"viseme": "aa"
+},
+{
+"start": 0.323,
+"end": 0.373,
+"viseme": "PP"
+},
+{
+"start": 0.373,
+"end": 0.498,
+"viseme": "sil"
+},
+{
+"start": 0.498,
+"end": 0.548,
+"viseme": "PP"
+},
+{
+"start": 0.548,
+"end": 0.673,
+"viseme": "aa"
+},
+{
+"start": 0.673,
+"end": 0.823,
+"viseme": "PP"
+},
+{
+"start": 0.823,
+"end": 0.868,
+"viseme": "aa"
+},
+{
+"start": 0.868,
+"end": 0.923,
+"viseme": "I"
+},
+{
+"start": 0.923,
+"end": 0.948,
+"viseme": "aa"
+},
+{
+"start": 0.948,
+"end": 1.023,
+"viseme": "DD"
+},
+{
+"start": 1.023,
+"end": 1.073,
+"viseme": "FF"
+},
+{
+"start": 1.073,
+"end": 1.238,
+"viseme": "aa"
+},
+{
+"start": 1.238,
+"end": 1.348,
+"viseme": "I"
+},
+{
+"start": 1.348,
+"end": 1.598,
+"viseme": "FF"
+},
+{
+"start": 1.598,
+"end": 1.773,
+"viseme": "sil"
+},
+{
+"start": 1.773,
+"end": 1.798,
+"viseme": "PP"
+},
+{
+"start": 1.798,
+"end": 1.858,
+"viseme": "E"
+},
+{
+"start": 1.858,
+"end": 1.898,
+"viseme": "I"
+},
+{
+"start": 1.898,
+"end": 1.948,
+"viseme": "PP"
+},
+{
+"start": 1.948,
+"end": 2.023,
+"viseme": "I"
+},
+{
+"start": 2.023,
+"end": 2.073,
+"viseme": "PP"
+},
+{
+"start": 2.073,
+"end": 2.133,
+"viseme": "aa"
+},
+{
+"start": 2.133,
+"end": 2.223,
+"viseme": "I"
+},
+{
+"start": 2.223,
+"end": 2.273,
+"viseme": "PP"
+},
+{
+"start": 2.273,
+"end": 2.423,
+"viseme": "aa"
+},
+{
+"start": 2.423,
+"end": 2.498,
+"viseme": "PP"
+},
+{
+"start": 2.498,
+"end": 2.558,
+"viseme": "E"
+},
+{
+"start": 2.558,
+"end": 2.598,
+"viseme": "I"
+},
+{
+"start": 2.598,
+"end": 2.673,
+"viseme": "DD"
+},
+{
+"start": 2.673,
+"end": 2.698,
+"viseme": "PP"
+},
+{
+"start": 2.698,
+"end": 2.823,
+"viseme": "aa"
+},
+{
+"start": 2.823,
+"end": 2.923,
+"viseme": "FF"
+},
+{
+"start": 2.923,
+"end": 3.023,
+"viseme": "I"
+},
+{
+"start": 3.023,
+"end": 3.123,
+"viseme": "DD"
+},
+{
+"start": 3.123,
+"end": 3.285,
+"viseme": "SS"
+},
+{
+"start": 3.285,
+"end": 3.515,
+"viseme": "sil"
+}
+],
+"source": "Kokoro v1.0 (kokoro-onnx 0.6.1, CPU), voice af_heart, speed 1.0, via lawnmower_voice.tts (timeline aligned with the audio): the Settings > Voice > Test lip-sync line"
+}

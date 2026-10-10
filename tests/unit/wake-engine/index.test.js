@@ -1,0 +1,228 @@
+import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createWake } from '../../../electron/wake/index.js';
+import { SettingsStore } from '../../../electron/settings.js';
+import { ADDON_FILES, MODEL_FILES } from '../../../electron/wake/config.js';
+import { fakeChannel, fakeUtilityProcess, fakeWebContents } from './fakes.js';
+
+/** A complete fake wake folder (pinned sizes) for linux-x64, optionally with the dev zh-en model. */
+function wakeDir({ zhen = false, broken = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakeidx-'));
+  const put = (rel, size) => {
+    const f = path.join(dir, ...rel.split('/'));
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, Buffer.alloc(size));
+  };
+  for (const f of ADDON_FILES['linux-x64']) if (!(broken && f.name === 'sherpa-onnx.node')) put(`sherpa-onnx/linux-x64/${f.name}`, f.size);
+  for (const f of MODEL_FILES.giga) put(`models/gigaspeech-3.3m/${f.name}`, f.size);
+  put('models/silero_vad.onnx', MODEL_FILES.vad.size);
+  if (zhen) for (const f of MODEL_FILES.zhen) put(`dev-models/zh-en-3m/${f.name}`, f.size);
+  return dir;
+}
+
+class FakeZhen extends EventEmitter {
+  constructor(o = {}) {
+    super();
+    this.state = 'unknown';
+    this.modelsDir = null;
+    this.checks = 0;
+    this.downloads = [];
+    this._check = o.check || (async () => { this.state = 'missing'; return null; });
+  }
+
+  async check() { this.checks++; return this._check(); }
+  download(o = {}) { this.downloads.push(o); this.state = 'downloading'; return { ok: true, started: true }; }
+  useDir(d) { this.dir = d; this.state = 'ok'; }
+  stop() {}
+}
+
+function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {} } = {}) {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakeud-'));
+  const settings = new SettingsStore({ dir: userData, platform: 'linux' });
+  settings.load();
+  if (enabled) settings.update({ wake: { enabled: true } });
+  const ipc = { handlers: new Map(), listeners: new Map() };
+  const ipcMain = {
+    handle: (ch, fn) => ipc.handlers.set(ch, fn),
+    removeHandler: (ch) => ipc.handlers.delete(ch),
+    on: (ch, fn) => ipc.listeners.set(ch, fn),
+    removeListener: (ch) => ipc.listeners.delete(ch),
+  };
+  const up = fakeUtilityProcess();
+  const sent = [];
+  const pm = new EventEmitter();
+  const trusted = vi.fn();
+  const z = zhenMgr || new FakeZhen();
+  const wake = createWake({
+    electron: { app: { getPath: () => path.join(userData, 'docs'), getVersion: () => '0.5.0', getAppMetrics: () => [{ pid: up.forks[0]?.child.pid, type: 'Utility', serviceName: 'Jade wake word', cpu: { percentCPUUsage: 1.5 } }] },
+      ipcMain, utilityProcess: up, MessageChannelMain: fakeChannel(), powerMonitor: pm, systemPreferences: { getMediaAccessStatus: () => 'granted' }, shell: { openPath: async () => '', openExternal: async () => {} } },
+    settings, log: () => {}, userData, appRoot: '/app', isPackaged: false,
+    env: { LAWNMOWER_WAKE_DIR: wakeDir({ zhen, broken }), LAWNMOWER_E2E: '1', ...env },
+    voice: { voiceDir: '/app/voice', venvDirs: [], getVoiceSettings: () => settings.get().voice },
+    isTrustedSender: trusted, getAvatarWindow: () => null, sendToAvatar: (ch, p) => sent.push({ ch, p }), showAvatar: () => {},
+    platform: 'linux', arch: 'x64', zhen: z,
+  });
+  return { wake, settings, up, ipc, sent, pm, trusted, z };
+}
+const until = async (fn) => {
+  for (let i = 0; i < 400 && !fn(); i++) await new Promise((r) => setTimeout(r, 5));
+  return fn();
+};
+
+describe('createWake (contract §3.2, §7.1)', () => {
+  it('starts the utility when the wake word is on, with A when the dev model is there', async () => {
+    const { wake, up, z } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    const init = up.last.posted[0].m;
+    expect(init.t).toBe('init');
+    expect(init.models.zhen).toBeTruthy();
+    expect(init.addon).toMatch(/sherpa-onnx[\\/]linux-x64[\\/]sherpa-onnx\.node$/);
+    expect(init.params).toEqual({ sensitivity: 'normal', phrase: 'hey-jade' });
+    expect(z.checks).toBe(0); // no Python needed
+    up.last.ready(['zhen', 'giga']);
+    await until(() => wake.status().engine === 'ready');
+    expect(wake.status()).toMatchObject({ engine: 'ready', models: { giga: 'ok', zhen: 'ok', vad: 'ok' }, version: '1.13.8', platform: 'linux-x64', loadMs: 2000, restarts: 0 });
+    await wake.stop();
+  });
+
+  it('is off (no utility) while settings.wake.enabled is off; turning it on starts it, off stops it', async () => {
+    const { wake, up, settings } = make({ enabled: false, zhen: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(up.forks).toHaveLength(0);
+    expect(wake.status().engine).toBe('off');
+    const prev = settings.get();
+    settings.update({ wake: { enabled: true } });
+    wake.applySettings(settings.get(), prev);
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    up.last.onStop = () => up.last.emit('exit', 0);
+    const prev2 = settings.get();
+    settings.update({ wake: { enabled: false } });
+    wake.applySettings(settings.get(), prev2);
+    await until(() => wake.status().engine === 'off');
+    expect(up.last.posted.some((p) => p.m.t === 'stop')).toBe(true);
+    await wake.stop();
+  });
+
+  it('without model A it starts on B alone and downloads A once; when A is ready it restarts with it', async () => {
+    const z = new FakeZhen();
+    const { wake, up } = make({ zhenMgr: z });
+    await until(() => up.forks.length === 1);
+    expect(up.last.posted[0].m.models.zhen).toBeNull();
+    await until(() => z.downloads.length === 1);
+    expect(z.downloads[0]).toEqual({ auto: true });
+    up.last.ready(['giga']);
+    await until(() => wake.status().engine === 'ready');
+    expect(wake.status().models.zhen).toBe('downloading');
+    expect(wake.status().detail).toMatch(/basic wake-word model; the extra one is downloading/);
+    // the download finished: a model A folder with the pinned sizes
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-zhen-'));
+    for (const f of MODEL_FILES.zhen) fs.writeFileSync(path.join(d, f.name), Buffer.alloc(f.size));
+    z.state = 'ok';
+    z.emit('ready', d);
+    await until(() => up.forks.length === 2);
+    expect(up.last.posted[0].m.models.zhen.encoder).toBe(path.join(d, 'encoder.int8.onnx'));
+    await wake.stop();
+  });
+
+  it('missing engine files → engine "missing", no utility', async () => {
+    const { wake, up } = make({ broken: true });
+    await until(() => wake.status().engine === 'missing');
+    expect(wake.status().detail).toBe('The wake-word engine is not installed; reinstall Lawnmower Man.');
+    expect(up.forks).toHaveLength(0);
+    expect(wake.trayState()).toMatchObject({ enabled: true, state: 'unavailable' });
+    await wake.stop();
+  });
+
+  it('registers the lm:wake:* channels (avatar only) and hands out ports', async () => {
+    const { wake, up, ipc, trusted } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    expect([...ipc.handlers.keys()].sort()).toEqual(['lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:save-clip', 'lm:wake:status']);
+    const wc = fakeWebContents();
+    const r = await ipc.handlers.get('lm:wake:request-port')({ sender: wc });
+    expect(r).toEqual({ ok: true, gen: 1 });
+    expect(trusted).toHaveBeenLastCalledWith({ sender: wc }, ['avatar']);
+    expect(wc.sent[0]).toMatchObject({ channel: 'lm:wake:port', payload: { gen: 1 } });
+    await expect(ipc.handlers.get('lm:wake:status')({ sender: wc }, 'x')).rejects.toThrow(/no arguments/);
+    expect(await ipc.handlers.get('lm:wake:mic-access')({ sender: wc })).toBe('unknown'); // linux
+    const clip = await ipc.handlers.get('lm:wake:save-clip')({ sender: wc }, { wav: new ArrayBuffer(10) });
+    expect(clip.ok).toBe(false);
+    // an untrusted sender is refused by main's isTrustedSender (which throws)
+    trusted.mockImplementationOnce(() => { throw new Error('IPC from an untrusted sender was rejected'); });
+    await expect(ipc.handlers.get('lm:wake:status')({ sender: {} })).rejects.toThrow(/untrusted/);
+    await wake.stop();
+    expect(ipc.handlers.size).toBe(0);
+  });
+
+  it('the renderer\'s state reaches the tray (coalesced), and the tray toggles the setting', async () => {
+    const { wake, ipc, settings } = make({ zhen: true });
+    const statusEvents = [];
+    wake.on('status', () => statusEvents.push(1));
+    ipc.listeners.get('lm:wake:state')({ sender: {} }, { state: 'waiting' });
+    ipc.listeners.get('lm:wake:state')({ sender: {} }, { state: 'attention' });
+    ipc.listeners.get('lm:wake:state')({ sender: {} }, { state: 'bogus' }); // refused, logged
+    expect(wake.trayState()).toEqual({ enabled: true, state: 'attention', reason: '' });
+    await until(() => statusEvents.length > 0);
+    wake.trayActions.setWakeWord(false);
+    expect(settings.get().wake.enabled).toBe(false);
+    expect(wake.trayState()).toEqual({ enabled: false, state: 'off', reason: '' });
+    await wake.stop();
+  });
+
+  it('forwards lock/unlock/suspend/resume to the avatar; e2e.emitPower fakes them', async () => {
+    const { wake, pm, sent } = make({ zhen: true });
+    pm.emit('lock-screen');
+    pm.emit('resume');
+    wake.e2e.emitPower('unlocked');
+    expect(sent.filter((s) => s.ch === 'lm:wake:power').map((s) => s.p.state)).toEqual(['locked', 'resumed', 'unlocked']);
+    await wake.stop();
+    pm.emit('lock-screen');
+    expect(sent.filter((s) => s.ch === 'lm:wake:power')).toHaveLength(3);
+  });
+
+  it('sends status changes to the avatar (≤ 4/s, deduplicated)', async () => {
+    const { wake, up, sent } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    await until(() => sent.some((s) => s.ch === 'lm:wake:status' && s.p.engine === 'ready'));
+    const n = sent.filter((s) => s.ch === 'lm:wake:status').length;
+    expect(n).toBeLessThanOrEqual(3);
+    await wake.stop();
+  });
+
+  it('sensitivity / phrase changes go to the running utility', async () => {
+    const { wake, up, settings } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    const prev = settings.get();
+    settings.update({ wake: { sensitivity: 'high', phrase: 'jade' } });
+    wake.applySettings(settings.get(), prev);
+    expect(up.last.posted.at(-1).m).toEqual({ t: 'settings', params: { sensitivity: 'high', phrase: 'jade' } });
+    await wake.stop();
+  });
+
+  it('personaContext: only while the wake word is on', async () => {
+    const { wake, settings } = make({ zhen: true });
+    expect(wake.personaContext()).toEqual({ wake: { enabled: true, followUp: true, bargeIn: true } });
+    settings.update({ wake: { followUpSec: 0, bargeIn: false } });
+    expect(wake.personaContext()).toEqual({ wake: { enabled: true, followUp: false, bargeIn: false } });
+    settings.update({ wake: { enabled: false } });
+    expect(wake.personaContext()).toEqual({});
+    await wake.stop();
+  });
+
+  it('e2e hooks: pid, metrics rows of the utility, a crash that supervision recovers', async () => {
+    const { wake, up } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    expect(wake.e2e.utilityPid()).toBe(up.last.pid);
+    expect(wake.e2e.metrics()).toEqual([{ pid: up.last.pid, type: 'Utility', serviceName: 'Jade wake word', name: undefined, cpu: 1.5, cumulativeCpuSec: null, memoryKB: null }]);
+    wake.e2e.restartUtility();
+    await until(() => wake.status().engine === 'starting');
+    expect(wake.status().restarts).toBe(1);
+    await wake.stop();
+  });
+});

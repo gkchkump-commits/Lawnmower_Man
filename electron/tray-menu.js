@@ -14,7 +14,34 @@
  * @property {string} [claudeProblem]    'cli-missing'|'auth'|''
  * @property {{ name: string, accelerator: string, reason: string }[]} [hotkeyConflicts]
  * @property {TapoTrayState} [tapo]       the home camera (electron/tapo); absent = no Home camera menu
+ * @property {WakeTrayState} [wake]       "Hey Jade" (electron/wake); absent = no wake-word entry
  */
+
+// ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §4.3) ----
+/**
+ * @typedef {object} WakeTrayState
+ * @property {boolean} enabled              settings.wake.enabled
+ * @property {string} state                 the renderer's WakeUiState (lm:wake:state)
+ * @property {string} [reason]
+ */
+
+const WAKE_ACTIVE = new Set(['attention', 'listening', 'followup', 'look', 'busy', 'barge']);
+
+/** The tooltip's " · Jade: …" text for a wake state. @param {WakeTrayState} w */
+export function wakeTrayText(w) {
+  if (!w.enabled) return 'mic off';
+  const s = w.state;
+  if (s === 'waiting') return 'listening for "Hey Jade"';
+  if (WAKE_ACTIVE.has(s)) return 'listening';
+  if (s === 'paused') return 'paused while hidden';
+  if (s === 'locked') return 'paused (PC locked)';
+  if (s === 'blocked') return 'microphone blocked';
+  if (s === 'muted') return 'microphone muted';
+  if (s === 'starting') return 'starting';
+  if (s === 'unavailable') return /voice/i.test(w.reason || '') ? 'needs the local voice' : 'wake word unavailable';
+  return 'mic off'; // 'off'
+}
+// ---- end "Hey Jade" ----
 
 /**
  * @typedef {object} TapoTrayState
@@ -48,6 +75,7 @@
  * @property {() => void} [tapoShow]          show the camera window (turns the feature on when it is off)
  * @property {(on: boolean) => void} [tapoArm]
  * @property {() => void} [tapoOpenClips]
+ * @property {(on: boolean) => void} [setWakeWord]   "Listen for “Hey Jade”" (electron/wake)
  */
 
 const MODE_LABELS = { chat: 'Chat (no tools)', assistant: 'Assistant (read files + web)', agent: 'Agent (all tools, asks first)' };
@@ -62,7 +90,8 @@ const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
  */
 export function trayTooltip(st) {
   const cam = st.tapo && st.tapo.enabled ? ` · Home camera: ${tapoLabel(st.tapo).toLowerCase()}` : '';
-  return `Lawnmower Man — Claude: ${claudeLabel(st)} · Voice: ${st.voiceStatus || 'unknown'}${cam}`;
+  const jade = st.wake ? ` · Jade: ${wakeTrayText(st.wake)}` : ''; // "Hey Jade" (wake word)
+  return `Lawnmower Man — Claude: ${claudeLabel(st)} · Voice: ${st.voiceStatus || 'unknown'}${cam}${jade}`;
 }
 
 /** "armed" | "arming" | "online" | "offline" … for the tooltip and the menu. @param {TapoTrayState} t */
@@ -159,6 +188,9 @@ export function buildTrayTemplate(st, a) {
     { label: 'Camera', type: 'checkbox', checked: !!s.camera?.enabled, click: (/** @type {any} */ item) => a.setCamera?.(!!item?.checked) },
     // the Tapo home camera (docs/TAPO.md)
     ...(st.tapo ? [tapoItem(st.tapo, a)] : []),
+    // ---- "Hey Jade" (wake word; docs/WAKE.md): after the camera entries ----
+    ...(st.wake ? [{ label: 'Listen for “Hey Jade”', type: 'checkbox', checked: !!st.wake.enabled, click: (/** @type {any} */ item) => a.setWakeWord?.(!!item?.checked) }] : []),
+    // ---- end "Hey Jade" ----
     { type: 'separator' },
     { label: 'Restart voice', click: () => a.restartVoice() },
     st.voiceSetup === 'running'

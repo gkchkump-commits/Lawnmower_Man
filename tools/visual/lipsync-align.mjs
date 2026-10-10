@@ -19,7 +19,7 @@
 // Negative numbers: the mouth is EARLY (leads the sound), as it should be by a few tens of ms.
 //
 //   node tools/visual/lipsync-align.mjs <dir with name.wav + name.json> [--latency 0.02]
-//        [--offset ms] [--json out.json]
+//        [--offset ms] [--json out.json] [--late]  (--late: list the releases over 20 ms late)
 //
 // --latency: the player's output latency (s): the analyser sees the audio that long before it is
 // heard; the playback clock (player.current.time) is compensated for it, as in AudioPlayer.
@@ -272,6 +272,7 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
       if (!near.length) continue;
       const run = near.reduce((x, y) => (Math.abs(y[1] - rel) < Math.abs(x[1] - rel) ? y : x));
       (r[ctx] ||= []).push(run[1] + 1 / FPS - rel);
+      if (args.includes('--late') && run[1] + 1 / FPS - rel > 0.02) console.log(`  late ${ctx.slice(3)}_ release ${basename(f, '.json')} at ${rel.toFixed(3)} s: ${((run[1] + 1 / FPS - rel) * 1000).toFixed(0)} ms (${prev?.viseme ?? '-'} PP ${tl[i + 1].viseme})`);
     }
     if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme) && s.end - s.start >= 0.06) {
       let pk = 0;

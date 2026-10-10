@@ -179,7 +179,22 @@ export function bandClosure(ac, t0, t1, minLeft = RELEASE_RISE, minRight = RELEA
     }
     return (r + off) * h;
   };
-  const on = steepest(begin, k, -1), off = steepest(k, end, 1);
+  const on = steepest(begin, k, -1);
+  let off = steepest(k, end, 1);
+  // (a gradual release — an m into a back rounded vowel, "the morning" — rises for 40-60 ms and
+  // its steepest point is late in it: the lips have parted by the time it is half way up)
+  if (Number.isFinite(off)) {
+    let peak = -Infinity;
+    for (let i = k; i <= Math.min(end, n - 1); i++) if (arr[i] > peak) peak = arr[i];
+    const half = m + 0.5 * (peak - m);
+    for (let i = k + 1; i <= Math.min(end, n - 1); i++) {
+      if (arr[i] >= half) {
+        const t = (i - 1 + (half - arr[i - 1]) / Math.max(1e-6, arr[i] - arr[i - 1])) * h;
+        if (t < off) off = t;
+        break;
+      }
+    }
+  }
   if (!Number.isFinite(on) && !Number.isFinite(off)) return null;
   return { on, off, tMin: k * h };
 }

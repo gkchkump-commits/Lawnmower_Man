@@ -59,14 +59,20 @@ for (const boundaries of [true, false]) {
     // Wait on the voice, not on a frame count: how many frames fit into it depends on the machine.
     await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 4 && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
     await waitIdle(page);
-    // ...then Settings › Voice › Test lip-sync, a line full of m / b / p. A sealed closure lasts
-    // ~0.1 s and software WebGL may draw only 2-4 frames a second, so the greeting's few closures
-    // alone can all fall between frames; with this line's dozen, some frames land on them.
+    // ...then Settings › Voice › Test lip-sync, a line full of m / b / p, again until 40 frames of
+    // speech were drawn. A sealed closure lasts ~0.1 s (about 1 frame in 7 lands on one) and
+    // software WebGL may draw only a frame or two a second, so judge frames, not lines.
     await page.locator('#btn-settings').click();
-    await page.getByRole('button', { name: 'Test lip-sync' }).click();
+    for (let i = 0; i < 6 && (await page.evaluate(() => window.__mouth.length)) < 40; i++) {
+      const before = await page.evaluate(() => window.speechSynthesis.spoken.length);
+      await page.getByRole('button', { name: 'Test lip-sync' }).click();
+      await page.waitForFunction((n) => {
+        const s = window.speechSynthesis;
+        return s.spoken.length > n && /muffins/.test(s.spoken.at(-1)) && !s.speaking;
+      }, before, { timeout: 60_000 });
+      await waitIdle(page);
+    }
     await page.keyboard.press('Escape');
-    await page.waitForFunction(() => /muffins/.test(window.speechSynthesis.spoken.at(-1)) && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
-    await waitIdle(page);
     const m = await page.evaluate(() => window.__mouth);
     expect(m.length).toBeGreaterThan(15); // sampled while speaking, even at a few fps
     const max = (k) => Math.max(...m.map((x) => x[k]));

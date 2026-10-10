@@ -522,7 +522,7 @@ export class Behavior {
     /** @type {{ at: number, brow: boolean, smile: boolean }|null} a greeting due */
     this._greet = null;
     /** the user's voice (the mic level): pauses get a nod */
-    this._voice = { on: false, onAt: -Infinity, below: NaN, floor: 0.15 };
+    this._voice = { on: false, onAt: -Infinity, below: NaN, floor: 0.15, t: NaN };
     /** @type {number|undefined} a nod due at a pause of the user's voice */
     this._nodAt = undefined;
     /** yawns in this bored stretch */
@@ -704,7 +704,11 @@ export class Behavior {
    */
   _hear(lv, t) {
     const v = this._voice;
-    v.floor += (lv - v.floor) * (lv < v.floor ? 0.2 : 0.003);
+    // (the room's noise floor: down to a quieter level within a fraction of a second, up only over
+    // half a minute, so a long stretch of talking never becomes the floor)
+    const dt = Number.isFinite(v.t) ? clamp(t - v.t, 0, 1) : 0;
+    v.t = t;
+    v.floor += (lv - v.floor) * (1 - Math.exp(-dt / (lv < v.floor ? 0.3 : 30)));
     const on = Math.max(0.3, v.floor + 0.18), off = on - 0.08;
     if (!v.on) {
       if (lv > on) { v.on = true; v.onAt = t; v.below = NaN; }

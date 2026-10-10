@@ -67,7 +67,12 @@ describe('Director: speech channels', () => {
     while (closing[closing.length - 1] < 1 && closing.length < 20) closing.push(step({ jaw: 0.1, press: 1 }));
     expect(closing.length).toBeLessThanOrEqual(5);                       // sealed within ~65 ms
     // the last step into contact is still a big one (a critically damped approach ends in tiny steps)
-    expect(closing[closing.length - 1] - closing[closing.length - 2]).toBeGreaterThan(0.15);
+    expect(closing[closing.length - 1] - closing[closing.length - 2]).toBeGreaterThan(0.1);
+    // ... but the approach takes a few frames: no frame closes more than ~40 % of the way (v0.3's
+    // 110 rad/s spring went 0 -> 0.6 in one frame: a wide-open vowel snapped shut; the lip-sync
+    // now starts the approach LIP_CLOSE_EARLY sooner instead)
+    for (let i = 1; i < closing.length; i++) expect(closing[i] - closing[i - 1]).toBeLessThan(0.4);
+    expect(closing.length).toBeGreaterThanOrEqual(4);
     for (let i = 0; i < 10; i++) step({ jaw: 0.1, press: 1 });
     const opening = [1];
     for (let i = 0; i < 4; i++) opening.push(step({ jaw: 0.5 }));
@@ -80,11 +85,13 @@ describe('Director: speech channels', () => {
     const step = (d, m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time); };
     const d1 = new Director({ seed: 3 });
     for (let i = 0; i < 30; i++) step(d1, {});
-    const p = step(d1, { press: 1 }).mouthPress;
+    let p = 0;
+    for (let i = 0; i < 3; i++) p = step(d1, { press: 1 }).mouthPress;
     const d2 = new Director({ seed: 3 });
     for (let i = 0; i < 30; i++) step(d2, {});
-    const r = step(d2, { round: 1 }).mouthRound;
-    expect(p).toBeGreaterThan(r + 0.3);
+    let r = 0;
+    for (let i = 0; i < 3; i++) r = step(d2, { round: 1 }).mouthRound;
+    expect(p).toBeGreaterThan(r + 0.3);                 // (after 50 ms; v0.3 compared one frame)
     // jaw closing: plain (vowel → rest) vs into an m
     const d3 = new Director({ seed: 4 }), d4 = new Director({ seed: 4 });
     for (let i = 0; i < 30; i++) { step(d3, { jaw: 0.7 }); step(d4, { jaw: 0.7 }); }
@@ -94,9 +101,11 @@ describe('Director: speech channels', () => {
       const a = step(d4, { jaw: 0, press: 1 });
       closure = a.jawOpen; press = a.mouthPress;
     }
-    // the lips seal at once (the rigs bring the lower lip up over a jaw still open); the jaw comes
-    // up behind them, faster than it closes into rest but without snapping shut in a frame or two
-    expect(press).toBeGreaterThan(0.95);
+    // the lips seal first (the rigs bring the lower lip up over a jaw still open): by the 4th frame
+    // of a sudden closure; the jaw comes up behind them, faster than it closes into rest but
+    // without snapping shut in a frame or two
+    expect(press).toBeGreaterThan(0.8);
+    expect(step(d4, { jaw: 0, press: 1 }).mouthPress).toBeGreaterThan(0.95);
     expect(closure).toBeLessThan(0.8 * plain);
     expect(closure).toBeGreaterThan(0.1);
     expect(plain).toBeGreaterThan(0.15);

@@ -75,15 +75,18 @@ export const EXPRESSIVENESS_MAX = 2;
 const DEG = 180 / Math.PI;
 
 /**
- * Mouth channel springs: [opening, closing] natural frequency (rad/s; t90 = 3.89 / omega). The
- * lip-sync output is already coarticulated, so these only add the inertia of real tissue: lips
- * press and tuck fast (t90 35-45 ms), rounding is slower; the jaw opens in ~70 ms and closes a
- * bit slower, a little faster into a closure (m b p, f v). The lips seal a closure on their own
- * (the rigs bring the lower lip up over a jaw still on its way), so the heavier jaw follows them
- * as it does in speech, without snapping shut within a frame.
+ * Mouth channel springs: [rising, falling] natural frequency (rad/s; t90 = 3.89 / omega). The
+ * lip-sync output is already coarticulated, so these only add the inertia of real tissue: the
+ * lips approach a closure (press m b p, tuck f v rising) over ~60 ms, meeting at speed (LIP_CONTACT;
+ * the lip-sync starts the approach LIP_CLOSE_EARLY sooner), and part abruptly (t90 40-50 ms);
+ * rounding is slower; the jaw opens in ~70 ms and closes a bit slower, a little faster into a
+ * closure. The lips seal a closure on their own (the rigs bring the lower lip up over a jaw still
+ * on its way), so the heavier jaw follows them as it does in speech, without snapping shut within
+ * a frame. (v0.3 closed the lips with a 110 rad/s spring: a wide-open vowel snapped shut in one
+ * frame, ~45 px of the relief head's aperture.)
  */
 export const MOUTH_OMEGA = Object.freeze({
-  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [110, 100], tuck: [90, 80], teeth: [50, 33], tongue: [55, 33],
+  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [48, 100], tuck: [45, 80], teeth: [50, 33], tongue: [55, 33],
 });
 /**
  * Lip contact: the lips meet while still moving (they press on into each other, they do not ease

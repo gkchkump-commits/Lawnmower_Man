@@ -94,6 +94,36 @@ export const VISEME_LEAD = 0.058;
 export const FUSED_LEAD = Object.freeze({ lips: 0.04, jaw: 0.06 });
 /** How far a closure's / tuck's lip gesture reaches beyond its (acoustic) segment, re the timeline's. */
 export const FUSED_LIP_EDGE = 0.6;
+/**
+ * The lips start closing for m b p / f v this much earlier than they part: the closing gesture is
+ * a ~60 ms approach (the director's slower closing springs), the release a burst. Press and tuck
+ * are the larger of their value now and LIP_CLOSE_EARLY ahead, so the approach starts sooner and
+ * the contact lands where it did with a fast spring, while the release keeps its time.
+ */
+export const LIP_CLOSE_EARLY = 0.028;
+
+/**
+ * Sample the segments at t with the lips' closing anticipated (LIP_CLOSE_EARLY): press and tuck
+ * are the larger of t's and t + early's. A closure whose centre lies between prevT and t (or
+ * between their early counterparts) is sampled at its centre, never skipped.
+ * @param {import('./articulation.js').Segment[]} segs @param {number} t @param {number} [prevT]
+ * @param {number} [early] @returns {number[]} CHANNELS order
+ */
+export function sampleLips(segs, t, prevT, early = LIP_CLOSE_EARLY) {
+  const at = (x, px) => {
+    if (Number.isFinite(px)) {
+      const c = closureCentreIn(segs, /** @type {number} */ (px), x);
+      if (Number.isFinite(c)) x = c;
+    }
+    return sampleSegments(segs, x);
+  };
+  const v = at(t, prevT);
+  if (!(early > 0)) return v;
+  const e = at(t + early, Number.isFinite(prevT) ? /** @type {number} */ (prevT) + early : prevT);
+  v[3] = Math.max(v[3], e[3]);
+  v[4] = Math.max(v[4], e[4]);
+  return v;
+}
 
 /** The user's lip-sync offset (settings voice.lipSyncOffsetMs, s): + moves the mouth later. */
 export const OFFSET_MAX = 0.2;
@@ -230,11 +260,12 @@ function hashText(s) {
  * Mouth shape at playback time t from a viseme timeline, with coarticulation.
  * @param {VisemeSegment[]} tl
  * @param {number} t seconds into the clip
- * @param {{ lead?: number, leadLips?: number, prevT?: number, segs?: import('./articulation.js').Segment[] }} [opts]
+ * @param {{ lead?: number, leadLips?: number, prevT?: number, closeEarly?: number, segs?: import('./articulation.js').Segment[] }} [opts]
  *   lead: the mouth leads the sound (default VISEME_LEAD); leadLips: the lips' own lead (press,
  *   tuck: default the same); prevT: the previous sample time — a closure whose centre lies in
  *   between is sampled at its centre (never skipped); segs: the timeline's segments when the
- *   caller built them itself (measured prominence, variation)
+ *   caller built them itself (measured prominence, variation); closeEarly: how much sooner the
+ *   lips start closing than they part (default LIP_CLOSE_EARLY; 0: not)
  * @returns {MouthShape}
  */
 export function mouthFromVisemes(tl, t, opts = {}) {
@@ -242,12 +273,8 @@ export function mouthFromVisemes(tl, t, opts = {}) {
   const lead = opts.lead ?? VISEME_LEAD;
   const leadLips = opts.leadLips ?? lead;
   const segs = opts.segs || segmentsFor(tl);
-  let tt = t + leadLips;
-  if (Number.isFinite(opts.prevT)) {
-    const c = closureCentreIn(segs, /** @type {number} */ (opts.prevT) + leadLips, tt);
-    if (Number.isFinite(c)) tt = c;
-  }
-  const lips = toShape(sampleSegments(segs, tt));
+  const pt = Number.isFinite(opts.prevT) ? /** @type {number} */ (opts.prevT) + leadLips : undefined;
+  const lips = toShape(sampleLips(segs, t + leadLips, pt, opts.closeEarly));
   if (leadLips === lead) return lips;
   // the jaw, spread, rounding, teeth and tongue at their own lead; the lips' closures at theirs
   const m = toShape(sampleSegments(segs, t + lead));
@@ -488,11 +515,7 @@ export class SpeechTrack {
    * @param {number} [shift] plan seconds the mouth runs behind the plan position (the user's offset)
    */
   sample(shift = 0) {
-    const segs = this.plan.segs;
-    let t = this.p - shift;
-    const c = closureCentreIn(segs, this.pPrev - shift, this.p - shift);
-    if (Number.isFinite(c)) t = c;
-    return sampleSegments(segs, t);
+    return sampleLips(this.plan.segs, this.p - shift, this.pPrev - shift, LIP_CLOSE_EARLY * this.speed);
   }
 
   /** Cues crossed since the last call. @returns {Cue[]|null} */

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  AUDIO_BANDS, BOUNDARY_LEAD, CHANNELS, LipSync, SpeechTrack, VISEME_SHAPES, countSyllables, cuesFromVisemes, mixShapes,
+  AUDIO_BANDS, BOUNDARY_LEAD, CHANNELS, LIP_CLOSE_EARLY, LipSync, SpeechTrack, VISEME_SHAPES, countSyllables, cuesFromVisemes, mixShapes,
   mouthFromAudio, mouthFromVisemes, normalizeVisemes, planSpeech, visemeIndexAt, visemeShape,
 } from '../../../src/audio/lipsync.js';
 import { LEAD_IN, REST } from '../../../src/audio/articulation.js';
@@ -72,6 +72,19 @@ describe('mouthFromVisemes', () => {
   it('shows a closure passed between two frames', () => {
     // frames at 0.31 and 0.345 straddle the PP centre (0.33): the second shows the closure
     expect(mouthFromVisemes(TL, 0.345, { ...OPTS, prevT: 0.31 }).press).toBeGreaterThan(0.9);
+  });
+
+  it('the lips start closing sooner than they part (LIP_CLOSE_EARLY); the rest keeps its time', () => {
+    const at = (t, closeEarly) => mouthFromVisemes(TL, t, { ...OPTS, closeEarly });
+    // before the closure: the press is already rising, as it would LIP_CLOSE_EARLY later
+    expect(at(0.26).press).toBeCloseTo(at(0.26 + LIP_CLOSE_EARLY, 0).press, 9);
+    expect(at(0.26).press).toBeGreaterThan(at(0.26, 0).press + 0.05);
+    // after it: the release is where it was
+    expect(at(0.39).press).toBeCloseTo(at(0.39, 0).press, 9);
+    // the jaw, spread and rounding are not moved
+    for (const k of ['jaw', 'wide', 'round']) expect(at(0.26)[k]).toBe(at(0.26, 0)[k]);
+    expect(LIP_CLOSE_EARLY).toBeGreaterThan(0.015);
+    expect(LIP_CLOSE_EARLY).toBeLessThan(0.05);
   });
 
   it('the mouth leads the audio', () => {

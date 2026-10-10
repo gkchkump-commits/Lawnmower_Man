@@ -33,7 +33,9 @@
     "dist:linux-dir": "vite build && electron-builder --linux dir --publish never",
     "test:packaged": "node scripts/electron-e2e.mjs --packaged",
     "fetch:go2rtc": "node scripts/fetch-go2rtc.mjs",
-    "probe:tapo": "node tools/tapo-probe.mjs"
+    "probe:tapo": "node tools/tapo-probe.mjs",
+    "sim:tapo": "node tools/tapo-sim --onvif-port 12020 --rtsp-port 10554 --control-port 12021",
+    "test:tapo-e2e": "node scripts/tapo-e2e.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.1.0",

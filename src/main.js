@@ -195,6 +195,8 @@ async function boot() {
   app.gaze = gaze;
   /** @type {CameraFeature|null} the camera (created after the controller) */
   let camera = null;
+  /** @type {TapoAvatarLink|null} the Home camera's link to the avatar (created after the controller) */
+  let tapoLink = null;
 
   // ---------------------------------------------------------------- controller
   controller = new Controller({
@@ -547,8 +549,6 @@ async function boot() {
   // ---------------------------------------------------------------- Home camera (src/tapo/)
   // alerts (wake, look toward the camera window, say it), the ARMED pill, the drawer section,
   // and the local commands ("camera left", "arm the camera") that need no Claude turn
-  /** @type {TapoAvatarLink|null} */
-  let tapoLink = null;
   /** @param {any} [st] */
   function refreshTapoInfo(st = tapoLink?.status) {
     if (!bridge.tapo) return;

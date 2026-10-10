@@ -6,8 +6,10 @@
 // savePreset({ name, token? }), removePreset({ token }), calibrate({ action, answer? }),
 // events.remove({ id }), events.ack({ id }), ptz(PtzCommand), test(overrides?), …
 //
-// Mock URL parameters: ?scenario=online|setup|offline|auth|privacy|noptz|h265|calib-ask and
-// &settings=<json> (tapo/security groups only).
+// Mock URL parameters: ?scenario=online|setup|offline|auth|privacy|noptz|h265|calib-ask,
+// &settings=<json> (tapo/security groups only) and &detector=mediapipe (the real person detector
+// instead of the green-figure stub; in a plain browser MediaPipe's usage logger then tries to
+// reach the internet, which the app's CSP blocks).
 /* global URLSearchParams */
 
 import { createMockCameraBridge } from '../bridge/mock-tapo.js';
@@ -37,5 +39,6 @@ export function getCameraBridge(o = {}) {
       console.warn('[tapo] ignoring invalid ?settings= JSON');
     }
   }
-  return { bridge: createMockCameraBridge({ scenario: q.get('scenario') || 'online', win, settings }), isMock: true };
+  const detector = q.get('detector') === 'mediapipe' ? 'mediapipe' : 'stub';
+  return { bridge: createMockCameraBridge({ scenario: q.get('scenario') || 'online', win, settings, detector }), isMock: true };
 }

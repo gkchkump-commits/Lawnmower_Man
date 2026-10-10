@@ -86,7 +86,7 @@ export function formatBytes(bytes) {
 }
 
 /**
- * The footer: "2304×1296 · 15 fps · 1.8 Mbit/s · hardware decode · detector 1 Hz / 24 ms".
+ * The footer: "2304×1296 · 15 fps · 1.8 Mbit/s · hardware decode · person detector 1 Hz / 24 ms".
  * @param {TapoStatus|null|undefined} st @param {any} [w] the worker's stats
  */
 export function footerText(st, w = null) {
@@ -103,11 +103,12 @@ export function footerText(st, w = null) {
   const det = w?.detector || st?.detector || {};
   if (det.state === 'on' || det.state === 'stub') {
     const hz = Number(det.rateHz) || 0;
-    parts.push(`detector ${hz ? `${hz % 1 ? hz.toFixed(1) : hz} Hz` : 'idle'}${det.lastMs ? ` / ${Math.round(det.lastMs)} ms` : ''}${det.state === 'stub' ? ' (test)' : ''}`);
+    // no detections while disarmed (unless person boxes are shown): "ready", not a rate of 0
+    parts.push(`${det.state === 'stub' ? 'test detector' : 'person detector'} ${hz ? `${hz % 1 ? hz.toFixed(1) : hz} Hz${det.lastMs ? ` / ${Math.round(det.lastMs)} ms` : ''}` : 'ready'}`);
   } else if (det.state === 'loading') {
-    parts.push('detector loading…');
+    parts.push('person detector loading…');
   } else if (det.state === 'failed') {
-    parts.push('detector unavailable');
+    parts.push('person detector unavailable');
   }
   return parts.join(' · ');
 }

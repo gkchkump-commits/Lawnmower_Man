@@ -499,6 +499,10 @@ export function createMockTapoCore(o) {
     if (kind === 'person' && ev.kind === 'motion') {
       ev.kind = 'person';
       ev.sources = [...new Set([...ev.sources, 'local-person'])];
+      if (!security.recording && sec.record !== 'off') {
+        security.recording = true;
+        emitStatus();
+      }
       changed = true;
     }
     if (score > (ev.maxScore || 0)) {
@@ -700,6 +704,16 @@ function paintRoom(g, W, H) {
   grad.addColorStop(1, '#7c756b');
   g.fillStyle = grad;
   g.fillRect(0, 0, W, floorY);
+  // wallpaper: faint stripes above a chair rail, a lighter panelled wall below it
+  g.fillStyle = 'rgba(255,255,255,0.035)';
+  for (let x = 0; x < W; x += 46) g.fillRect(x, 0, 18, H * 0.52);
+  g.fillStyle = 'rgba(255,248,236,0.08)';
+  g.fillRect(0, H * 0.52, W, floorY - H * 0.52);
+  g.fillStyle = '#b5ad9f';
+  g.fillRect(0, H * 0.52 - 5, W, 8);
+  g.strokeStyle = 'rgba(0,0,0,0.12)';
+  g.lineWidth = 2;
+  for (let x = 30; x < W; x += 180) g.strokeRect(x, H * 0.56, 140, floorY - H * 0.6);
   // ceiling shadow and cornice
   g.fillStyle = 'rgba(0,0,0,0.25)';
   g.fillRect(0, 0, W, H * 0.06);
@@ -795,7 +809,7 @@ function paintRoom(g, W, H) {
   roundRect(g, sx + 270, floorY - 172, 85, 66, 16);
   g.fill();
   // pictures above the sofa
-  for (const [px, py, pw, ph, c] of [[sx + 60, H * 0.2, 120, 90, '#88a3b8'], [sx + 220, H * 0.16, 90, 120, '#c4a46b'], [sx + 340, H * 0.22, 80, 80, '#8fae8b']]) {
+  for (const [px, py, pw, ph, c] of [[sx + 60, H * 0.33, 120, 90, '#88a3b8'], [sx + 220, H * 0.29, 90, 120, '#c4a46b'], [sx + 340, H * 0.35, 80, 80, '#8fae8b']]) {
     g.fillStyle = '#2a2724';
     g.fillRect(px - 8, py - 8, pw + 16, ph + 16);
     g.fillStyle = c;
@@ -840,7 +854,7 @@ function paintRoom(g, W, H) {
   g.fillRect(kx + 38, floorY - 170, 4, 50);
   // the window (right): sky, frame, curtains
   const wx = v(0.78);
-  const wy = H * 0.14;
+  const wy = H * 0.22;
   const ww = 300;
   const wh = 260;
   grad = g.createLinearGradient(0, wy, 0, wy + wh);
@@ -882,15 +896,15 @@ function paintRoom(g, W, H) {
   // a wall clock, a light switch, a radiator
   g.fillStyle = '#efe9dc';
   g.beginPath();
-  g.arc(v(0.69), H * 0.2, 34, 0, Math.PI * 2);
+  g.arc(v(0.69), H * 0.34, 34, 0, Math.PI * 2);
   g.fill();
   g.strokeStyle = '#333';
   g.lineWidth = 3;
   g.beginPath();
-  g.moveTo(v(0.69), H * 0.2);
-  g.lineTo(v(0.69) + 18, H * 0.2 - 10);
-  g.moveTo(v(0.69), H * 0.2);
-  g.lineTo(v(0.69) - 4, H * 0.2 - 24);
+  g.moveTo(v(0.69), H * 0.34);
+  g.lineTo(v(0.69) + 18, H * 0.34 - 10);
+  g.moveTo(v(0.69), H * 0.34);
+  g.lineTo(v(0.69) - 4, H * 0.34 - 24);
   g.stroke();
   g.fillStyle = '#e8e2d4';
   g.fillRect(dx + dw + 24, floorY - 190, 22, 34);
@@ -981,8 +995,9 @@ class MockPicture {
   _person(g, sx, sy, k) {
     this.walk += 1 / MOCK_FPS;
     const floorY = this.ph * 0.68;
-    const span = this.pw * 0.2;
-    const px = this.pw * 0.2 + (Math.sin(this.walk * 0.6) * 0.5 + 0.5) * span;
+    // in front of the sofa, so the default view (and the tests) see it
+    const span = this.pw * 0.16;
+    const px = this.pw * 0.42 + (Math.sin(this.walk * 0.6) * 0.5 + 0.5) * span;
     const x = (px - sx) * k;
     const feet = (floorY + 30 - sy) * k;
     const hgt = 290 * k;
@@ -1002,7 +1017,7 @@ class MockPicture {
 // window.lawnmowerCamera
 
 /**
- * @param {{ scenario?: string, win?: any, settings?: Record<string, any> }} [o]
+ * @param {{ scenario?: string, win?: any, settings?: Record<string, any>, detector?: 'stub'|'mediapipe' }} [o]
  * @returns {any} the window.lawnmowerCamera API (+ __mock)
  */
 export function createMockCameraBridge(o = {}) {
@@ -1131,7 +1146,7 @@ export function createMockCameraBridge(o = {}) {
     port = ch.port1;
     port.onmessage = (/** @type {MessageEvent} */ e) => fromWorker(e.data);
     port.start?.();
-    toWorker({ t: 'hello', detector: 'stub', ...assets() });
+    toWorker({ t: 'hello', detector: o.detector === 'mediapipe' ? 'mediapipe' : 'stub', ...assets() });
     toWorker(armedMsg());
     if (scenario === 'h265') {
       toWorker({ t: 'config', gen: 1, codec: 'hvc1.1.6.L120.B0', description: new ArrayBuffer(0), width: 2304, height: 1296 });

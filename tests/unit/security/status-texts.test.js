@@ -64,8 +64,10 @@ describe('viewPlaceholder', () => {
 describe('footer and formats', () => {
   it('footer: size · fps · bitrate · decode · detector', () => {
     const w = { fps: 14.6, decoding: 'hardware', hasFrame: true, detector: { state: 'on', rateHz: 1, lastMs: 24.4 } };
-    expect(footerText(online(), w)).toBe('2304×1296 · 15 fps · 1.8 Mbit/s · hardware decode · detector 1 Hz / 24 ms');
-    expect(footerText(online(), { hasFrame: true, detector: { state: 'loading' } })).toMatch(/detector loading/);
+    expect(footerText(online(), w)).toBe('2304×1296 · 15 fps · 1.8 Mbit/s · hardware decode · person detector 1 Hz / 24 ms');
+    expect(footerText(online(), { hasFrame: true, detector: { state: 'loading' } })).toMatch(/person detector loading/);
+    expect(footerText(online(), { hasFrame: true, detector: { state: 'on', rateHz: 0 } })).toMatch(/person detector ready$/);
+    expect(footerText(online(), { hasFrame: true, detector: { state: 'stub', rateHz: 1 } })).toMatch(/test detector 1 Hz$/);
   });
   it('formats', () => {
     expect(formatBitrate(640)).toBe('640 kbit/s');

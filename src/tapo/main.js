@@ -11,7 +11,7 @@
 /* global ClipboardItem, createImageBitmap, Worker */
 
 import { withDefaults } from '../app/settings-defaults.js';
-import { h, clear } from '../ui/dom.js';
+import { clear, h, isControlTarget } from '../ui/dom.js';
 import { getCameraBridge } from './bridge.js';
 import { capitalize, footerText, formatBytes, ptzMessage, viewPlaceholder } from './status.js';
 import { CalibrationDialog } from './ui/calibrate.js';
@@ -323,6 +323,8 @@ async function boot() {
 
   /** opened by itself because the camera is not set up (closes by itself once it is) */
   let setupAuto = false;
+  /** right after Save, a status from before the password arrived must not reopen it */
+  let autoOpenBlockedUntil = 0;
   /** @param {{ focus?: 'password'|'host', auto?: boolean }} [o] */
   function openSetup(o = {}) {
     setupAuto = !!o.auto;
@@ -334,6 +336,7 @@ async function boot() {
   /** @param {boolean} [force] also when the camera is not set up yet (right after Save) */
   function closeSetup(force = false) {
     if (!status?.configured && !force) return; // nothing else to show yet
+    if (force) autoOpenBlockedUntil = Date.now() + 4000;
     setupAuto = false;
     setup.hide();
     body.dataset.view = 'live';
@@ -458,6 +461,8 @@ async function boot() {
       return;
     }
     if (document.querySelector('dialog[open]') || setup.shown) return;
+    // Space / Enter on a focused button presses that button (keyboard users)
+    if ((e.key === ' ' || e.key === 'Enter') && isControlTarget(e.target)) return;
     e.preventDefault();
     switch (c.type) {
       case 'arrow':
@@ -515,7 +520,7 @@ async function boot() {
   tapo.onStatus((/** @type {any} */ st) => {
     status = st;
     setup.update(status, settings);
-    if (!st?.configured && !setup.shown) openSetup({ auto: true });
+    if (!st?.configured && !setup.shown && Date.now() > autoOpenBlockedUntil) openSetup({ auto: true });
     else if (st?.configured && setup.shown && setupAuto) closeSetup();
     refresh();
   });

@@ -83,8 +83,15 @@ const DEG = 180 / Math.PI;
  * as it does in speech, without snapping shut within a frame.
  */
 export const MOUTH_OMEGA = Object.freeze({
-  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [110, 55], tuck: [90, 50], teeth: [50, 33], tongue: [55, 33],
+  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [110, 100], tuck: [90, 80], teeth: [50, 33], tongue: [55, 33],
 });
+/**
+ * Lip contact: the lips meet while still moving (they press on into each other, they do not ease
+ * to a stop just touching), and a stop's release is abrupt. So the shown press / tuck saturate
+ * before their springs arrive: contact at ~80 % of the way, at more than half the peak speed.
+ */
+export const LIP_CONTACT = 1.25;
+const contact = (x) => clamp01(x * LIP_CONTACT);
 /** The jaw's closing spring into a closure (t90 78 ms; the lips have sealed by then). */
 const JAW_INTO_CLOSURE = 50;
 const MOUTH_IN = /** @type {const} */ (['jaw', 'wide', 'round', 'press', 'tuck', 'teeth', 'tongue']);
@@ -570,7 +577,8 @@ export class Director {
       const s = this._sm[c];
       const [up, down] = MOUTH_OMEGA[c];
       const om = mt[c] > s.x ? up : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
-      o[MOUTH_OUT[c]] = clamp01(sp(s, mt[c], om));
+      const v = sp(s, mt[c], om);
+      o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? contact(v) : clamp01(v);
     }
     // a little lopsided while talking (never at rest: the rest pose stays the reference)
     const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
@@ -855,7 +863,7 @@ export class Director {
     o.listen = w.listening; o.think = w.thinking; o.speak = w.speaking; o.error = w.error; o.sleep = w.sleep;
     const idleW = clamp01(1 - (w.listening + w.thinking + w.speaking + w.error + w.sleep));
     o.speech = this._speechTarget;
-    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = this._mouth[c];
+    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? contact(this._mouth[c]) : this._mouth[c];
     o.mouthAsym = 0;
     const ex = this.expressiveness;
     this._phraseYawS = this._phraseYaw * w.speaking;

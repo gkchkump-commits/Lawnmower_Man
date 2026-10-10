@@ -1,7 +1,7 @@
 // Director: the lip-sync channels (press, tuck, teeth, tongue, asymmetry) and the secondary
 // speech motion driven by prosody cues (nods, brows, phrase-end blinks, micro-smiles).
 import { describe, expect, it } from 'vitest';
-import { Director, MOUTH_OMEGA, createAnimState } from '../../../src/avatar/director.js';
+import { Director, MOUTH_OMEGA, createAnimState, LIP_CONTACT } from '../../../src/avatar/director.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -50,9 +50,29 @@ describe('Director: speech channels', () => {
     }
     let a;
     for (let i = 2; i < 30; i++) { d.setMouth(target); a = d.update(1 / 60, 0.5 + i / 60); }
-    for (const [m, k] of Object.entries(CH)) expect(a[k], k).toBeCloseTo(target[m], 2);
+    // (pressing and tucking lips meet in contact: their shown value saturates, LIP_CONTACT)
+    const shown = (m) => (m === 'press' || m === 'tuck' ? Math.min(1, LIP_CONTACT * target[m]) : target[m]);
+    for (const [m, k] of Object.entries(CH)) expect(a[k], k).toBeCloseTo(shown(m), 2);
     for (let i = 30; i < 70; i++) { d.setMouth({}); a = d.update(1 / 60, 0.5 + i / 60); }
     for (const k of Object.values(CH)) expect(a[k], k).toBeLessThan(0.01);
+  });
+
+  it('the lips meet in contact (still moving fast, not easing to a touch) and part abruptly', () => {
+    let time = 0;
+    const d = new Director({ seed: 5, idleMotion: 0 });
+    d.setState('speaking');
+    const step = (m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time).mouthPress; };
+    for (let i = 0; i < 30; i++) step({ jaw: 0.5 });
+    const closing = [0];
+    while (closing[closing.length - 1] < 1 && closing.length < 20) closing.push(step({ jaw: 0.1, press: 1 }));
+    expect(closing.length).toBeLessThanOrEqual(5);                       // sealed within ~65 ms
+    // the last step into contact is still a big one (a critically damped approach ends in tiny steps)
+    expect(closing[closing.length - 1] - closing[closing.length - 2]).toBeGreaterThan(0.15);
+    for (let i = 0; i < 10; i++) step({ jaw: 0.1, press: 1 });
+    const opening = [1];
+    for (let i = 0; i < 4; i++) opening.push(step({ jaw: 0.5 }));
+    expect(opening[3]).toBeLessThan(0.35);                               // parted within 50 ms
+    expect(LIP_CONTACT).toBeGreaterThan(1);
   });
 
   it('presses and tucks fast, rounds slower; the jaw follows into a closure faster than into rest', () => {

@@ -9,6 +9,9 @@ Thumbs.db
 coverage/
 test-results/
 playwright-report/
+# end-to-end reports, screenshots and kept run folders (scripts/tapo-e2e.mjs, scripts/wake-e2e.mjs in CI)
+tapo-e2e/
+wake-e2e/
 # Python
 voice/.venv/
 .venv/

@@ -36,8 +36,19 @@ jobs:
         run: python -m pip install -e "./voice[dev]"
       - name: Lint
         run: npx eslint .
+      # ---- "Hey Jade" (docs/WAKE.md): the engine for the unit tests ----
+      - name: Cache the wake-word engine (vendor/wake; the pins are in these files)
+        uses: actions/cache@v4
+        with:
+          path: vendor/wake
+          key: wake-engine-${{ runner.os }}-${{ hashFiles('scripts/fetch-wake.mjs', 'electron/wake/config.js') }}
+      - name: Fetch the wake-word engine (pinned SHA-256; zh-en for tests only, never packaged)
+        run: npm run fetch:wake -- --with-zhen
+      # ---- end "Hey Jade" ----
       - name: Unit tests
         run: npx vitest run
+        env:
+          WAKE_ENGINE_REQUIRED: '1' # "Hey Jade": the engine test over the fixtures must not skip
       - name: Build renderer
         run: npx vite build
       - name: Install Playwright Chromium
@@ -95,6 +106,62 @@ jobs:
           path: tapo-e2e/
           retention-days: 7
 
+  # ---- "Hey Jade" ----
+  wake-e2e-linux:
+    # "Hey Jade" end to end in the real Electron app: the "Jade wake word" utility with the real
+    # sherpa-onnx addon and both keyword models, Chromium's fake microphone playing the committed
+    # Kokoro fixtures, stage 2 on the fake voice server, the fake Claude CLI (docs/WAKE.md, "Tests").
+    name: Hey Jade (Electron e2e, real wake-word engine) — Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # this job needs the Electron binary (the workflow-wide setting skips it)
+      ELECTRON_SKIP_BINARY_DOWNLOAD: ''
+      # a missing piece (engine, models, Python) fails the job instead of skipping it
+      WAKE_ENGINE_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install npm dependencies (with the Electron binary)
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+      - name: Install the voice package (its fake engines answer /stt and /tts)
+        run: python -m pip install -e "./voice[dev]"
+      - name: System libraries for Electron, and Xvfb
+        run: |
+          npx playwright install-deps chromium
+          command -v xvfb-run || sudo apt-get install -y xvfb
+          # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox uses
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Cache the wake-word engine (vendor/wake; the pins are in these files)
+        uses: actions/cache@v4
+        with:
+          path: vendor/wake
+          key: wake-engine-${{ runner.os }}-${{ hashFiles('scripts/fetch-wake.mjs', 'electron/wake/config.js') }}
+      - name: Fetch the wake-word engine (pinned SHA-256)
+        run: npm run fetch:wake -- --with-zhen
+      - name: Build renderer
+        run: npx vite build
+      - name: End-to-end, both keyword models (xvfb)
+        run: xvfb-run -a node scripts/wake-e2e.mjs --report wake-e2e/report.json --shots wake-e2e/shots --work wake-e2e/run
+      - name: End-to-end, the basic model alone (a PC before the zh-en download) (xvfb)
+        run: xvfb-run -a node scripts/wake-e2e.mjs --b-only --report wake-e2e/report-b-only.json --work wake-e2e/run-b-only
+      - name: Upload the reports, screenshots and the app's logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-e2e
+          path: wake-e2e/
+          retention-days: 7
+  # ---- end "Hey Jade" ----
+
   app-windows:
     name: App (unit tests) — Windows
     runs-on: windows-latest
@@ -107,8 +174,21 @@ jobs:
           cache: npm
       - name: Install npm dependencies
         run: npm ci
+      # ---- "Hey Jade": the real Windows load of sherpa-onnx.node and its DLLs ----
+      - name: Cache the wake-word engine (vendor/wake; the pins are in these files)
+        uses: actions/cache@v4
+        with:
+          path: vendor/wake
+          key: wake-engine-${{ runner.os }}-${{ hashFiles('scripts/fetch-wake.mjs', 'electron/wake/config.js') }}
+      - name: Fetch the wake-word engine for Windows (pinned SHA-256; zh-en for tests only)
+        run: npm run fetch:wake -- --platform win32-x64 --with-zhen
+      - name: Wake-word engine smoke test (the addon loads under Node 22 and hears the fixtures)
+        run: node scripts/wake-smoke.mjs
+      # ---- end "Hey Jade" ----
       - name: Unit tests
         run: npx vitest run
+        env:
+          WAKE_ENGINE_REQUIRED: '1' # "Hey Jade": the engine test over the fixtures must not skip
       - name: Build renderer
         run: npx vite build
 

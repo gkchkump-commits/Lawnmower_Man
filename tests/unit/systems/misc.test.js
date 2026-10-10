@@ -20,7 +20,7 @@ import { DEFAULT_SETTINGS, cloneSettings } from '../../../electron/settings.js';
 describe('persona', () => {
   it('chat mode is a complete spoken-assistant system prompt', () => {
     const p = buildPersona('chat', { platform: 'win32', now: new Date('2026-10-03T12:00:00Z') });
-    expect(p).toMatch(/You are Claude/);
+    expect(p).toMatch(/You are Jade\b.*You run on Claude, an AI model made by Anthropic/); // Jade (contract-wake §10.1)
     expect(p).toMatch(/read aloud/);
     expect(p).toMatch(/one to three sentences/);
     expect(p).toMatch(/no headings, bullet or numbered lists, tables/i);

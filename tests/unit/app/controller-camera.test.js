@@ -203,7 +203,7 @@ describe('Controller: hidden prompts (camera greeting)', () => {
     feat.applySettings(settings);
     await waitFor(() => feat.active);
     // what CameraFeature._greet sends
-    c.sendText(greetingPrompt(12), { source: 'camera', hidden: true, note: "You're back after 12 min, so the camera asked Claude to say hello." });
+    c.sendText(greetingPrompt(12), { source: 'camera', hidden: true, note: "You're back after 12 min, so the camera asked Jade to say hello." });
     await waitFor(() => sends(bridge).length === 1);
     expect(sends(bridge)[0]).toEqual(['send', greetingPrompt(12)]); // no images argument
     expect(capture).not.toHaveBeenCalled();

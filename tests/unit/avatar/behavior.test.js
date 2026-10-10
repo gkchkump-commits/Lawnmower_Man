@@ -223,6 +223,25 @@ describe('behaviour: by situation', () => {
     expect(Math.max(...r.squint)).toBeGreaterThan(0.2);
   });
 
+  it('thinking: one look at a time: while a search holds a spot, the director\'s own small shifts pause', () => {
+    const tx = [], on = [];
+    const { log } = run({ seed: 7 }, 180, (t, d) => {
+      if (t >= 1 && d.state !== 'thinking') d.setState('thinking');
+      tx.push(d._tg?.x ?? 0); on.push(!!d._B?.gaze.on);
+    });
+    const searches = kinds(log, 'search');
+    expect(searches.length / 3).toBeLessThan(4.5);        // per minute (it was 8)
+    expect(searches.length).toBeGreaterThan(2);
+    // the target the eyes are sent to holds still within a search fixation (it used to dart
+    // between the search's spot and the director's micro-shifts on top of it)
+    let moved = 0, held = 0;
+    for (let i = 2; i < tx.length; i++) {
+      if (on[i] && on[i - 1] && on[i - 2]) { held++; if (Math.abs(tx[i] - tx[i - 1]) > 0.5) moved++; }
+    }
+    expect(held).toBeGreaterThan(60);
+    expect(moved / (held / 60)).toBeLessThan(0.4);      // jumps per second of a held search (the lane before: 1.1-1.4)
+  });
+
   it('typing: glances down at the chat now and then and leans in', () => {
     const { r, log } = run({ seed: 8 }, 30, (t, d) => {
       // keystrokes 5-25 s

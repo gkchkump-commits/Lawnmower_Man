@@ -249,6 +249,9 @@ export class CalibrationWizard extends EventEmitter {
     if (this._answer && this._state.step === 'ask' && (this._state.answers || []).includes(a)) {
       const f = this._answer;
       this._answer = null;
+      // taken: no longer asking (the dialog would otherwise show the question again until the
+      // next state arrives)
+      this._set({ step: (this._state.answers || []).includes('up') ? 'tilt' : 'pan', progress: this._state.progress });
       f(a);
     }
     return this.state;

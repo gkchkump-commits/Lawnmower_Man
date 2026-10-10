@@ -866,3 +866,15 @@ describe('CalibrationWizard', () => {
     expect(r.moves).toEqual([]);
   });
 });
+
+describe('CalibrationWizard: answering', () => {
+  it('a taken answer is no longer a question (the dialog does not show it again)', async () => {
+    const r = rig({ score: 0.05 });
+    r.wiz.start();
+    expect((await r.finished()).step).toBe('ask');
+    expect(r.wiz.answer('up').step).toBe('ask'); // not an answer to this question
+    expect(r.wiz.answer('left').step).toBe('pan');
+    expect((await r.finished()).answers).toEqual(['up', 'down', 'none']);
+    expect(r.wiz.answer('down').step).toBe('tilt');
+  });
+});

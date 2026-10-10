@@ -29,10 +29,12 @@ class Cancelled extends Error {}
 
 /**
  * @typedef {object} CalibrationOptions
- * @property {{ rawMove: (x: number, y: number) => Promise<{ settledMs: number, measured?: boolean }>, stopAll: (reason: string) => Promise<void> }} ptz
+ * @property {{ rawMove: (x: number, y: number) => Promise<{ settledMs: number, measured?: boolean, moved?: boolean }>, stopAll: (reason: string) => Promise<void> }} ptz
  *   `measured: false`: the move ended with the app's timed Stop (no GetStatus), so `settledMs` is
  *   the app's own estimate, not the camera's travel time
- * @property {{ ref: () => Promise<void>, measure: (o: { timeoutMs: number }) => Promise<Shift> }} vision
+ * @property {{ ref: () => Promise<void>, measure: (o: { timeoutMs: number, expectMove?: boolean }) => Promise<Shift> }} vision
+ *   `expectMove`: the camera reported that it moved, so the picture must move too: wait for it
+ *   (up to timeoutMs) however late the video is, instead of giving up after a short wait
  * @property {() => string|null} canStart     null, or why it cannot start now
  * @property {() => CalibrationResult} current the settings in force (kept for what cannot be measured)
  * @property {(r: CalibrationResult & { calibratedAt: string }) => void} save
@@ -183,10 +185,13 @@ export class CalibrationWizard extends EventEmitter {
       // timed Stop's time is msPerUnit itself and would feed back into it on every calibration
       const settledMs = mv.measured === false ? 0 : mv.settledMs;
       this._check(run);
-      const m = await this._o.vision.measure({ timeoutMs: 6000 });
+      // (a real camera's video lags the motor by a second or two: if it says it moved, wait for
+      // the picture to move)
+      const m = await this._o.vision.measure({ timeoutMs: 6000, expectMove: mv.moved === true });
       this._check(run);
       const d = axis === 'x' ? m.dx : m.dy;
       const reliable = Number.isFinite(d) && m.score >= MIN_SCORE;
+      this._log('info', `[tapo] calibration ${axis} +${amount}: shift ${Number(d).toFixed(3)} (score ${Number(m.score).toFixed(2)}, picture settled after ${m.settledMs ?? '?'} ms, camera ${mv.moved === true ? 'reported the move' : mv.measured ? 'reported no move' : 'cannot report'})`);
       if (reliable && Math.abs(d) >= MIN_SHIFT) {
         await this._move(run, axis === 'x' ? -amount : 0, axis === 'y' ? -amount : 0);
         return { d, amount, settledMs: settledMs > 0 ? Math.max(settledMs, m.settledMs || 0) : 0 };
@@ -237,8 +242,8 @@ export class CalibrationWizard extends EventEmitter {
         let found = null;
         for (const s of [0.02, 0.05, 0.1]) {
           await this._ref(run, false);
-          await this._move(run, s, 0);
-          const m = await this._o.vision.measure({ timeoutMs: 6000 });
+          const mv = await this._move(run, s, 0);
+          const m = await this._o.vision.measure({ timeoutMs: 6000, expectMove: mv.moved === true });
           await this._move(run, -s, 0);
           if (m.score >= MIN_SCORE && Math.abs(m.dx) > 0.01) {
             found = s;

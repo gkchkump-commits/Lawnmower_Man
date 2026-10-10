@@ -170,11 +170,15 @@ describe('calibration without GetStatus', () => {
       await ptz.probe();
       const r = await ptz.rawMove(0.2, 0);
       expect(r.measured).toBe(true);
+      expect(r.moved).toBe(true); // the reported position changed: the picture will move too
       await ptz.rawMove(-0.2, 0);
+      expect((await ptz.rawMove(0.01, 0)).moved).toBe(false); // below the firmware's minimum step
+      await ptz.rawMove(-0.01, 0);
       sim.set({ quirks: { getStatusFails: true } });
       await ptz.probe();
       const blind = await ptz.rawMove(0.2, 0);
       expect(blind.measured).toBe(false);
+      expect(blind.moved).toBeUndefined(); // nothing to go by
       await ptz.rawMove(-0.2, 0);
       await ptz.dispose();
       client.close();

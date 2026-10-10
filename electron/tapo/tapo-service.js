@@ -44,6 +44,8 @@ const TICK_MS = 500;
 const SNAPSHOT_STREAM_MS = 30_000;
 const DET_PER_SEC = 10;
 /** How often the camera's health is looked at. */
+/** How much longer than its own timeout main waits for the worker's calibration measurement. */
+export const SHIFT_SLACK_MS = 6000;
 export const HEALTH_EVERY_MS = 2000;
 /** The video gone this long (while it is wanted), or the camera's events failing: is the camera still there? */
 export const PROBE_AFTER_MS = 10_000;
@@ -182,7 +184,7 @@ export class TapoService extends EventEmitter {
     this._calibrating = false;
     this.calibration = new CalibrationWizard({
       ptz: { rawMove: (x, y) => this._ptzOrThrow().rawMove(x, y), stopAll: (r) => this.ptzCtl?.stopAll(r) || Promise.resolve() },
-      vision: { ref: () => this._shiftRef(), measure: (m) => this._shiftMeasure(m.timeoutMs) },
+      vision: { ref: () => this._shiftRef(), measure: (m) => this._shiftMeasure(m.timeoutMs, !!m.expectMove) },
       canStart: () => this._calibrationBlocker(),
       current: () => {
         const t = this._tapo();
@@ -847,10 +849,20 @@ export class TapoService extends EventEmitter {
     this._post({ t: 'shift-ref' });
   }
 
-  /** @param {number} timeoutMs */
-  async _shiftMeasure(timeoutMs) {
-    const r = await this._request({ t: 'shift-measure', timeoutMs }, timeoutMs + 3000);
-    return { dx: r.dx, dy: r.dy, score: r.score, settledMs: r.settledMs };
+  /**
+   * The worker's picture shift. A worker that answers too late (a busy PC: its frames queue up)
+   * is "not measurable", so the wizard asks the user instead of giving up.
+   * @param {number} timeoutMs @param {boolean} [expectMove]
+   */
+  async _shiftMeasure(timeoutMs, expectMove = false) {
+    if (!this._port) throw new Error('The camera window is not running, so there is no picture.');
+    try {
+      const r = await this._request({ t: 'shift-measure', timeoutMs, expectMove }, timeoutMs + SHIFT_SLACK_MS);
+      return { dx: r.dx, dy: r.dy, score: r.score, settledMs: r.settledMs };
+    } catch (err) {
+      this._log('info', `[tapo] calibration: no picture measurement (${/** @type {Error} */ (err).message})`);
+      return { dx: 0, dy: 0, score: 0, settledMs: 0 };
+    }
   }
 
   /** @param {{ action: 'start'|'answer'|'cancel', answer?: string }} req */

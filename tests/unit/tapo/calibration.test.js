@@ -18,18 +18,20 @@ function rig(o = {}) {
   const overrides = [...(o.overrides || [])];
   const saved = [];
   const states = [];
+  const measures = [];
   const wiz = new CalibrationWizard({
     ptz: {
       rawMove: async (x, y) => {
         moves.push([x, y]);
         last = { x: Math.abs(x) >= minEffective ? x : 0, y: Math.abs(y) >= minEffective ? y : 0 };
-        return { settledMs: 1200 };
+        return { settledMs: 1200, ...(o.reportsMoves ? { measured: true, moved: !!(last.x || last.y) } : {}) };
       },
       stopAll: async () => {},
     },
     vision: {
       ref: async () => {},
-      measure: async () => {
+      measure: async (m) => {
+        measures.push(m);
         if (overrides.length) return overrides.shift();
         // camera turns right (+x) → scene moves left (−dx); tilt up (+y) → scene moves down (+dy)
         return { dx: -last.x * gainX * (mirrorPan ? -1 : 1), dy: last.y * gainY * (invertTilt ? -1 : 1), score: o.score ?? 0.6, settledMs: 1500 };
@@ -47,8 +49,25 @@ function rig(o = {}) {
     check();
   });
   const net = () => moves.reduce((a, [x, y]) => ({ x: a.x + x, y: a.y + y }), { x: 0, y: 0 });
-  return { wiz, moves, saved, states, finished, net };
+  return { wiz, moves, saved, states, finished, net, measures };
 }
+
+describe('CalibrationWizard: video lag', () => {
+  it('tells the picture to wait for a move the camera reported (a real camera\'s video lags the motor)', async () => {
+    const r = rig({ reportsMoves: true });
+    r.wiz.request({ action: 'start' });
+    expect((await r.finished()).step).toBe('done');
+    expect(r.measures.length).toBeGreaterThan(2);
+    // the first pan and tilt measures follow a move the camera reported
+    expect(r.measures[0]).toEqual({ timeoutMs: 6000, expectMove: true });
+    // the min-step probe's 0.02 is below what this firmware acts on: no move, no waiting
+    expect(r.measures.some((m) => m.expectMove === false)).toBe(true);
+    const plain = rig();
+    plain.wiz.request({ action: 'start' });
+    await plain.finished();
+    expect(plain.measures.every((m) => m.expectMove === false)).toBe(true); // no GetStatus: nothing to go by
+  });
+});
 
 describe('CalibrationWizard', () => {
   it('measures signs, view units, min step and speed for a standard camera', async () => {

@@ -39,6 +39,8 @@ export const HOLD_LIMIT_EPS = 0.01;
 export const PRIVACY_MS = 60_000;
 /** While privacy mode is suspected, a cheap PTZ read this often: the first normal answer clears it. */
 export const PRIVACY_RECHECK_MS = 5000;
+/** A reported position change larger than this is a move (rawMove's `moved`). */
+export const MOVED_EPS = 0.005;
 export const CENTER_DEADBAND = 0.04;
 
 export const PRIVACY_HINT = 'The camera seems to be in privacy mode. Turn privacy mode off in the Tapo app.';
@@ -549,14 +551,17 @@ export class PtzController extends EventEmitter {
    * has settled (MoveStatus, else the time estimate). The watchdog still applies. `measured`:
    * the camera reported the end (MoveStatus IDLE), so `settledMs` is its travel time; otherwise it
    * is only the app's own Stop estimate (msPerUnit) and must not be fed back into msPerUnit.
+   * `moved`: the reported position changed (only with GetStatus), so the picture will move too,
+   * however late the video shows it.
    * @param {number} x @param {number} y @param {{ maxWaitMs?: number }} [o]
-   * @returns {Promise<{ settledMs: number, measured: boolean }>}
+   * @returns {Promise<{ settledMs: number, measured: boolean, moved?: boolean }>}
    */
   async rawMove(x, y, o = {}) {
     if (!this.caps.available) throw new Error('Pan and tilt are not available.');
     if (this.privacySuspected) throw new Error(PRIVACY_HINT);
     const s = this._s();
     const t0 = this._now();
+    const p0 = this.position;
     let seq = -1;
     const r = await this._runExclusive(async () => {
       await this._sendMove(() => {
@@ -568,7 +573,9 @@ export class PtzController extends EventEmitter {
     if (!r.ok) throw new Error(r.error || 'The camera could not move.');
     await this.waitIdle(o.maxWaitMs ?? 6000);
     const measured = !!this._lastEnd && this._lastEnd.seq === seq && this._lastEnd.by === 'idle';
-    return { settledMs: this._now() - t0, measured };
+    const p1 = this.position;
+    const moved = measured && p0 && p1 ? Math.max(Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y)) > MOVED_EPS : undefined;
+    return { settledMs: this._now() - t0, measured, ...(moved !== undefined ? { moved } : {}) };
   }
 
   /**

@@ -554,11 +554,15 @@ export class SecurityPipeline {
       .finally(() => ref.release());
   }
 
-  /** @param {{ id: any, timeoutMs?: number }} msg */
+  /**
+   * expectMove: the camera reported that it moved, so wait for the picture to move (the video lags
+   * the motor, by more than SHIFT_MIN_WAIT_MS on a real camera over Wi-Fi), up to the timeout.
+   * @param {{ id: any, timeoutMs?: number, expectMove?: boolean }} msg
+   */
   _shiftMeasure(msg) {
     this._clearTimeout(this.shift.measure?.timer);
     const timeout = Math.min(MAX_SHIFT_TIMEOUT_MS, Math.max(200, Number(msg.timeoutMs) || 6000));
-    const m = { id: msg.id, startedAt: this.now(), prev: /** @type {Uint8Array|null} */ (null), latest: /** @type {Uint8Array|null} */ (null), stable: 0, moved: false, timer: null };
+    const m = { id: msg.id, startedAt: this.now(), prev: /** @type {Uint8Array|null} */ (null), latest: /** @type {Uint8Array|null} */ (null), stable: 0, moved: false, expectMove: msg.expectMove === true, timer: null };
     m.timer = this._setTimeout(() => {
       if (this.shift.measure === m) this._finishShift(m, m.latest);
     }, timeout);
@@ -590,7 +594,7 @@ export class SecurityPipeline {
         m.latest = luma;
         // settled: still for SETTLE_FRAMES comparisons, after the picture moved (or long enough
         // that a camera which did not move at all is not waited for until the timeout)
-        if (m.stable >= SETTLE_FRAMES && (m.moved || this.now() - m.startedAt >= SHIFT_MIN_WAIT_MS)) this._finishShift(m, luma);
+        if (m.stable >= SETTLE_FRAMES && (m.moved || (!m.expectMove && this.now() - m.startedAt >= SHIFT_MIN_WAIT_MS))) this._finishShift(m, luma);
       })
       .catch((err) => console.warn('[tapo-worker] shift sample failed', err?.message || err))
       .finally(() => {

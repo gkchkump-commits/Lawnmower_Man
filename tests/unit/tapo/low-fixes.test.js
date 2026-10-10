@@ -1,12 +1,13 @@
 // Regression tests for low findings (fixer round), at the service level: an ended event keeps its
 // duration in the list row and the player, and a clip that finishes after its event ended is no
-// new "update" of a live event (the camera window toasted it as "seen just now" again).
+// new "update" of a live event (the camera window toasted it as "seen just now" again), and a
+// calibration measurement that comes too late makes the wizard ask instead of fail.
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
-import { TapoService } from '../../../electron/tapo/tapo-service.js';
+import { SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeRelay, FakeSidecar, memorySafeStorage, tempSettings } from './helpers/fakes.js';
 
 /** @type {Array<() => Promise<void>>} */
@@ -70,4 +71,19 @@ describe('an ended event', () => {
     service._onClipEnd({ id, rel: `2026-10-10/150000-person-${id.slice(-4)}.mp4`, bytes: 10 });
     expect(events.map((e) => e.phase)).toEqual(['update']);
   });
+});
+
+describe('calibration on a busy PC', () => {
+  it('a picture measurement that comes too late is "not measurable" (the wizard asks), not a failed calibration', async () => {
+    const { service } = await offlineService(() => Date.now());
+    const sent = [];
+    service._port = { postMessage: (m) => sent.push(m), close() {} }; // a worker that never answers
+    const t0 = Date.now();
+    const r = await service._shiftMeasure(100, true);
+    expect(r).toEqual({ dx: 0, dy: 0, score: 0, settledMs: 0 });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(100 + SHIFT_SLACK_MS - 50);
+    expect(sent).toEqual([expect.objectContaining({ t: 'shift-measure', timeoutMs: 100, expectMove: true })]);
+    service._port = null;
+    await expect(service._shiftMeasure(100)).rejects.toThrow(/camera window is not running/);
+  }, 15_000);
 });

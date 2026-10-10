@@ -238,6 +238,22 @@ describe('SecurityPipeline: calibration shift', () => {
     expect(Math.abs(r.dx)).toBeLessThan(0.01);
   });
 
+  it('the camera reported a move: the late picture is waited for, past the minimum wait (video lag)', async () => {
+    const s = setup();
+    await s.feed(1, () => room());
+    s.main({ t: 'shift-ref' });
+    await s.feed(1, () => room());
+    s.main({ t: 'shift-measure', id: 4, timeoutMs: 6000, expectMove: true });
+    // the motor has stopped, but the video still shows the old view for 2.5 s
+    await s.feed(Math.ceil(SHIFT_MIN_WAIT_MS / 100) + 10, () => room());
+    expect(s.of(s.toMain, 'shift')).toHaveLength(0);
+    await s.feed(6, () => room({ offset: 0.12 }));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r.id).toBe(4);
+    expect(r.dx).toBeLessThan(-0.08);
+    expect(r.score).toBeGreaterThan(0.15);
+  });
+
   it('no frames: the timeout answers with score 0', async () => {
     const s = setup();
     s.main({ t: 'shift-ref' });

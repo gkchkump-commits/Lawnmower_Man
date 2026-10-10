@@ -65,9 +65,17 @@ function fakeSpawn(lines = [], { exitAfterMs = 0 } = {}) {
     child.exitCode = null;
     child.signalCode = null;
     const auth = `Basic ${Buffer.from(`${opts.env.LM_G2R_USER}:${opts.env.LM_G2R_PASS}`).toString('base64')}`;
+    // the log lines come once the API has answered (as with the real go2rtc, which only pulls the
+    // source for a consumer): on a busy machine a fixed 30 ms after spawn could beat the readiness
+    // check and make start() race the auth-failed stop
+    let logged = false;
     const srv = http.createServer((req, res) => {
       res.writeHead(req.headers.authorization === auth ? 200 : 401);
       res.end('{}');
+      if (!logged) {
+        logged = true;
+        setTimeout(() => { for (const l of lines) child.stdout.write(`${l}\n`); }, 30);
+      }
     }).listen(Number(opts.env.LM_G2R_PORT), '127.0.0.1');
     const exit = (code, signal) => {
       if (child.exitCode !== null || child.signalCode !== null) return;
@@ -78,7 +86,6 @@ function fakeSpawn(lines = [], { exitAfterMs = 0 } = {}) {
     };
     child.kill = () => exit(null, 'SIGTERM');
     spawned.push({ cmd, args, env: opts.env, child });
-    setTimeout(() => { for (const l of lines) child.stdout.write(`${l}\n`); }, 30);
     if (exitAfterMs) setTimeout(() => exit(1, null), exitAfterMs);
     return child;
   };

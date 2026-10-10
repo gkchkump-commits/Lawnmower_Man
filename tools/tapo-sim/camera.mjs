@@ -44,6 +44,9 @@ export const QUIRK_PRESETS = Object.freeze({
     rtspAdvertiseTimeout: true,
     rtspAcceptBasic: false,
     privacyKillsStream: false, // privacy mode: placeholder picture (false) or no frames at all (true)
+    // the picture shows where the lens pointed this long ago (a video that lags the motor before
+    // it reaches the app: the camera's encoder, Wi-Fi, go2rtc on a busy PC); GetStatus is current
+    videoLagMs: 0,
     rebootMs: 3000,
   }),
   ideal: Object.freeze({
@@ -76,6 +79,7 @@ export const QUIRK_PRESETS = Object.freeze({
     rtspAdvertiseTimeout: true,
     rtspAcceptBasic: false,
     privacyKillsStream: false,
+    videoLagMs: 0,
     rebootMs: 3000,
   }),
 });

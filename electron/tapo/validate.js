@@ -245,6 +245,9 @@ export const MAX_JPEG_BYTES = 2 * 1024 * 1024;
 export function validateWorkerMessage(m) {
   if (!m || typeof m !== 'object' || typeof m.t !== 'string') return null;
   switch (m.t) {
+    case 'ack':
+      if (!Number.isSafeInteger(m.seq) || m.seq < 0) return null;
+      return { t: 'ack', seq: m.seq };
     case 'ready':
       if (!['on', 'stub', 'failed'].includes(m.detector)) return null;
       return { t: 'ready', detector: m.detector, ...(m.error ? { error: shortText(m.error, 300) } : {}) };

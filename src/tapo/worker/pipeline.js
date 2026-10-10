@@ -35,6 +35,9 @@ export const RATES = Object.freeze({
   overlayHz: 1,
 });
 export const STATS_MS = 2000;
+/** The worker tells main which video chunk it has handled every ACK_EVERY chunks or ACK_EVERY_MS. */
+export const ACK_EVERY = 4;
+export const ACK_EVERY_MS = 250;
 /** The longest PTZ move main watches (30 s) plus its settle time: see security-engine.js. */
 export const PTZ_MAX_SUPPRESS_MS = 35_000;
 /** The image counts as settled after this many consecutive frames with < 1 % change. */
@@ -129,6 +132,8 @@ export class SecurityPipeline {
     this._detectorKey = '';
     this._loadTimer = null;
     this.armed = { on: false, people: true, sensitivity: 'medium' };
+    this._ackedSeq = 0;
+    this._ackedAt = 0;
     this.ptz = { moving: false, settleUntil: 0, since: 0 };
     this.boostUntil = 0;
     this.overlay = false;
@@ -168,6 +173,8 @@ export class SecurityPipeline {
       } catch { /* gone */ }
     }
     this.port = port;
+    this._ackedSeq = 0; // main numbers the chunks of each port from 1
+    this._ackedAt = 0;
     this.decoder.reset(-1); // main sends hello + config on the new port
     port.onmessage = (/** @type {MessageEvent} */ e) => this.onMain(e.data);
     port.start?.();
@@ -202,7 +209,10 @@ export class SecurityPipeline {
           if (!ok) this.postStats();
         }, (err) => this.postMain({ t: 'error', fatal: false, message: String(err?.message || err) }));
         return undefined;
-      case 'chunk': return this.decoder.chunk(msg);
+      case 'chunk':
+        this.decoder.chunk(msg);
+        this._ack(msg.seq);
+        return undefined;
       case 'reset':
         this.decoder.reset(Number(msg.gen));
         this._needReseed = true;
@@ -552,6 +562,22 @@ export class SecurityPipeline {
       .then((r) => post({ t: 'snap-ok', id: msg.id, jpeg: r.jpeg, width: r.width, height: r.height, frameTs: ref.ts }, [r.jpeg]))
       .catch((err) => post({ t: 'snap-err', id: msg.id, message: String(err?.message || err) }, []))
       .finally(() => ref.release());
+  }
+
+  /**
+   * Tell main which chunk was handled (flow control: main stops sending when this falls behind),
+   * every ACK_EVERY chunks or ACK_EVERY_MS. @param {unknown} seq
+   */
+  _ack(seq) {
+    if (!Number.isSafeInteger(seq)) return;
+    const n = /** @type {number} */ (seq);
+    const now = this.now();
+    if (n < this._ackedSeq) this._ackedSeq = 0; // a new port counts from 1 again
+    if (n - this._ackedSeq >= ACK_EVERY || now - this._ackedAt >= ACK_EVERY_MS) {
+      this._ackedSeq = n;
+      this._ackedAt = now;
+      this.postMain({ t: 'ack', seq: n });
+    }
   }
 
   /**

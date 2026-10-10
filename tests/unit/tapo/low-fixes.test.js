@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
-import { SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
+import { MAX_CHUNKS_BEHIND, SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeRelay, FakeSidecar, memorySafeStorage, tempSettings } from './helpers/fakes.js';
 
 /** @type {Array<() => Promise<void>>} */
@@ -86,4 +86,39 @@ describe('calibration on a busy PC', () => {
     service._port = null;
     await expect(service._shiftMeasure(100)).rejects.toThrow(/camera window is not running/);
   }, 15_000);
+});
+
+describe('a PC that cannot decode in real time', () => {
+  it('main stops sending video chunks once the worker is MAX_CHUNKS_BEHIND behind, and resumes at a key frame', async () => {
+    const { service } = await offlineService(() => Date.now());
+    const sent = [];
+    const port = { postMessage: (m) => sent.push(m), close() {} };
+    service._port = port;
+    service._flow = { seq: 0, acked: 0, acks: false, skipping: false, dropped: 0 };
+    let n = 0;
+    const sample = () => {
+      const i = n++;
+      service._onSample({ gen: 1, key: i % 15 === 0, pts: i * 6000, duration: 6000, data: Buffer.alloc(8), fragIndex: 0 });
+    };
+    const chunks = () => sent.filter((m) => m.t === 'chunk');
+    // a worker that never acknowledges (an older one): everything goes out, as before
+    for (let i = 0; i < 40; i++) sample();
+    expect(chunks()).toHaveLength(40);
+    // a worker that acknowledges, then falls behind
+    service._onWorkerMessage(port, { t: 'ack', seq: 40 });
+    for (let i = 0; i < 60; i++) sample(); // nothing acknowledged meanwhile
+    const after = chunks().slice(40);
+    expect(after.length).toBeLessThanOrEqual(MAX_CHUNKS_BEHIND + 1);
+    expect(service._flow.dropped).toBeGreaterThan(30);
+    // it catches up: the next chunk sent is a key frame
+    service._onWorkerMessage(port, { t: 'ack', seq: service._flow.seq });
+    const before = chunks().length;
+    while (chunks().length === before) sample();
+    expect(chunks().at(-1).key).toBe(true);
+    sample();
+    expect(chunks().at(-1).key).toBe(false); // and the deltas after it again
+    // an acknowledgement from the future is ignored
+    service._onWorkerMessage(port, { t: 'ack', seq: 1e9 });
+    expect(service._flow.acked).toBeLessThanOrEqual(service._flow.seq);
+  });
 });

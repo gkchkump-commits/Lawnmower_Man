@@ -46,6 +46,13 @@ const DET_PER_SEC = 10;
 /** How often the camera's health is looked at. */
 /** How much longer than its own timeout main waits for the worker's calibration measurement. */
 export const SHIFT_SLACK_MS = 6000;
+/**
+ * Video chunks the worker may be behind before main stops sending (≈ 1.6 s at 15 fps). A PC that
+ * cannot decode in real time would otherwise queue chunks without bound in the MessagePort: the
+ * live view, the detector and calibration then run seconds (tapo-e2e: 14 s) behind the camera.
+ * Main skips to the next key frame instead (the worker acknowledges what it has handled).
+ */
+export const MAX_CHUNKS_BEHIND = 24;
 export const HEALTH_EVERY_MS = 2000;
 /** The video gone this long (while it is wanted), or the camera's events failing: is the camera still there? */
 export const PROBE_AFTER_MS = 10_000;
@@ -205,6 +212,8 @@ export class TapoService extends EventEmitter {
     this._mcpHttp = createMcpHttpServer({ handle: (m) => this._mcp.handle(m), log: this._log });
 
     /** @type {NodeJS.Timeout|null} */
+    /** main → worker video chunks: sent, acknowledged, skipping to a key frame @type {{ seq: number, acked: number, acks: boolean, skipping: boolean, dropped: number }} */
+    this._flow = { seq: 0, acked: 0, acks: false, skipping: false, dropped: 0 };
     this._statusTimer = null;
     this._lastStatusAt = 0;
 
@@ -656,8 +665,21 @@ export class TapoService extends EventEmitter {
   _onSample(s) {
     this.recorder.onSample(s);
     if (!this._port) return;
+    // flow control (only with a worker that acknowledges): behind → drop up to the next key frame
+    const f = this._flow;
+    if (f.acks) {
+      const behind = f.seq - f.acked;
+      if (behind > MAX_CHUNKS_BEHIND) f.skipping = true;
+      if (f.skipping) {
+        if (!s.key || behind > MAX_CHUNKS_BEHIND / 2) {
+          f.dropped++;
+          return;
+        }
+        f.skipping = false;
+      }
+    }
     const ts = this.relay.init?.timescale || 90000;
-    this._post({ t: 'chunk', gen: s.gen, key: s.key, ts: Math.round((s.pts * 1e6) / ts), dur: Math.round((s.duration * 1e6) / ts), data: toArrayBuffer(s.data) });
+    this._post({ t: 'chunk', seq: ++f.seq, gen: s.gen, key: s.key, ts: Math.round((s.pts * 1e6) / ts), dur: Math.round((s.duration * 1e6) / ts), data: toArrayBuffer(s.data) });
   }
 
   /**
@@ -688,6 +710,7 @@ export class TapoService extends EventEmitter {
     try { this._port?.close(); } catch { /* closed */ }
     const { port1, port2 } = new MCM();
     this._port = port1;
+    this._flow = { seq: 0, acked: 0, acks: false, skipping: false, dropped: 0 };
     this._detector = 'loading';
     port1.on('message', (/** @type {any} */ e) => this._onWorkerMessage(port1, e.data));
     port1.on('close', () => {
@@ -768,6 +791,11 @@ export class TapoService extends EventEmitter {
       case 'stats':
         this._workerStats = m;
         this._statusSoon();
+        return;
+      case 'ack':
+        // the newest chunk the worker has handled (it can only move forward)
+        this._flow.acks = true;
+        if (m.seq <= this._flow.seq) this._flow.acked = Math.max(this._flow.acked, m.seq);
         return;
       case 'error':
         this._log(m.fatal ? 'warn' : 'debug', `[tapo] worker: ${m.message}`);

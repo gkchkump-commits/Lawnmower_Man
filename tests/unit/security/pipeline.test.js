@@ -273,6 +273,19 @@ describe('SecurityPipeline: calibration shift', () => {
   });
 });
 
+describe('SecurityPipeline: flow control', () => {
+  it('acknowledges the video chunks it has handled (every 4, or every 250 ms)', () => {
+    const s = setup();
+    for (let seq = 1; seq <= 10; seq++) s.main({ t: 'chunk', seq, gen: 0, key: seq === 1, ts: seq * 66_000, data: new ArrayBuffer(4) });
+    expect(s.of(s.toMain, 'ack').map((m) => m.seq)).toEqual([1, 5, 9]);
+    s.clock.advance(300);
+    s.main({ t: 'chunk', seq: 11, gen: 0, key: false, ts: 11 * 66_000, data: new ArrayBuffer(4) });
+    expect(s.of(s.toMain, 'ack').at(-1).seq).toBe(11);
+    s.main({ t: 'chunk', gen: 0, key: false, ts: 0, data: new ArrayBuffer(4) }); // no seq (an old main): no ack
+    expect(s.of(s.toMain, 'ack')).toHaveLength(4);
+  });
+});
+
 describe('SecurityPipeline: ports', () => {
   it('a new port replaces the old one', () => {
     const s = setup();

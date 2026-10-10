@@ -385,7 +385,10 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
   video stops. go2rtc's config and environment hold no camera credentials. Main parses the fMP4 (`fmp4.js`) and relays
   frames over a `MessagePortMain` to a worker in the hidden camera window, which decodes with
   WebCodecs `VideoDecoder` (hardware first). The renderer never opens a socket; the CSP and the
-  loopback-only request filter are unchanged.
+  loopback-only request filter are unchanged. Main numbers the chunks and the worker
+  acknowledges them; a PC that cannot decode in real time falls at most 24 chunks (≈ 1.6 s)
+  behind, then main skips to the next key frame, so the live view, the detector and calibration
+  stay close to real time instead of queueing seconds of video.
 * **Detection:** the camera's PullPoint events (`events.js`: renew, not recreate; de-noised) and
   the worker's local motion and person detection (MediaPipe ObjectDetector, EfficientDet-Lite0
   int8) are fused in `security-engine.js`, a pure state machine (exit delay, suppression while

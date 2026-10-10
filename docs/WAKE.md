@@ -253,6 +253,28 @@ never be cancelled; that is what the name check and *Sensitivity* are for.
 | "Jade can't hear anything" | the microphone delivers silence (a driver, a privacy switch, a hardware mute key) | check the input in Windows' sound settings |
 | She answers "Yes?" to nothing / starts mid-sentence | normal: the call is removed before Claude sees your words | — |
 
+**Checking it on your PC** (once, after installing; the shipped settings were tuned on synthetic
+voices, so these checks tell whether they suit your voice, room and microphone):
+
+1. *Settings › Voice*: the Hey Jade box says **Echo cancellation: all apps** (Windows 11 removes
+   every app's sound from the microphone) or **this app**. Run **Test my echo** with the speakers at
+   your usual volume.
+2. Say "Hey Jade" 20 times at the desk, 20 times from about 3 m away and 20 times with the TV on:
+   she should miss at most about 1, 2 and 2 of them.
+3. Play the song "Hey Jude" three times from another device, and once on this PC (YouTube): she
+   should not wake up (on the PC not even flicker, with *all apps* echo cancellation).
+4. Interrupt a long answer with "Hey Jade", then "Hey Jade, stop"; after an answer, ask "And
+   tomorrow?" without her name.
+5. Turn *Let desktop apps access your microphone* off: the chip says the microphone is blocked and
+   the settings offer **Open Windows microphone settings**. Try the microphone mute key, and unplug
+   and replug a USB microphone: she comes back on her own.
+6. Play music (Spotify) with "Hey Jade" on and watch the Volume Mixer: if the music gets quieter,
+   set *Communications* to **Do nothing** (above).
+7. Task Manager: the "Jade wake word" process of Lawnmower Man uses about 0 % while it is quiet and
+   a few % while people talk.
+8. **Record a test clip (30 s)…**: say "Hey Jade" about 5 times, near and across the room, and send
+   the two files from `Documents\Lawnmower Man\Hey Jade tests`.
+
 ---
 
 ## 10. How it works

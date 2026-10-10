@@ -304,8 +304,10 @@ export class TapoService extends EventEmitter {
     if (this._statusTimer) clearTimeout(this._statusTimer);
     if (this._healthTimer) clearInterval(this._healthTimer);
     this._tick = this._retention = this._statusTimer = this._retryTimer = this._healthTimer = null;
+    // quitting mid-calibration: it puts the camera back where it started first (within the bound)
+    const calibration = this.calibration.running ? (this.calibration.cancel(), this.calibration.idle()) : Promise.resolve();
     const work = Promise.allSettled([
-      this.ptzCtl ? this.ptzCtl.stopAll('quit', { force: true }) : null,
+      this.ptzCtl ? calibration.then(() => this.ptzCtl?.stopAll('quit', { force: true })) : null,
       this.monitor ? this.monitor.stop() : null,
       this.recorder.close(),
       this._mcpHttp.stop(),

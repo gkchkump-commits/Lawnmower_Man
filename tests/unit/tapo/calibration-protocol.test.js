@@ -138,6 +138,28 @@ describe('shift-measure: an answer without the gate is not measurable', () => {
 });
 
 describe('the wizard through the service', () => {
+  it('quitting mid-calibration puts the camera back where it started (within the quit bound)', async () => {
+    const { s } = await service();
+    const moves = [];
+    let pos = { x: 0, y: 0 };
+    s.ptzCtl = /** @type {any} */ ({ caps: { available: true }, privacySuspected: false, moving: false, settleUntil: 0, idleMs: Infinity,
+      command: async () => ({ ok: true }), readPosition: async () => ({ ...pos }), stopAll: async () => {}, dispose: async () => {},
+      rawMove: async (x, y) => { moves.push([x, y]); pos = { x: pos.x + x, y: pos.y + y }; return { settledMs: 900, measured: true, moved: true, travel: { x, y } }; } });
+    s._conn = { state: 'online', detail: '' };
+    // a worker that answers the reference, then never the measurement: the camera is turned when the app quits
+    s._post = (m) => {
+      if (m.t === 'shift-ref') setTimeout(() => s._onWorkerMessage(s._port, { t: 'shift-ref-ok', id: m.id, gated: true, ok: true, still: true, at: m.after + 1 }), 5);
+    };
+    s.calibration.start();
+    for (let i = 0; i < 300 && !moves.length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(moves).toEqual([[0.2, 0]]);
+    const t0 = Date.now();
+    await s.stop();
+    expect(Date.now() - t0).toBeLessThan(4500);
+    expect(pos.x).toBeCloseTo(0);
+    expect(s.calibration.running).toBe(false);
+  }, 15_000);
+
   it('while it runs, other camera moves are refused (the D-pad, keys, click-to-center, Claude\'s camera_look), then allowed again', async () => {
     const { s } = await service();
     const commands = [];

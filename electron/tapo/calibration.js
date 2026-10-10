@@ -176,6 +176,8 @@ export class CalibrationWizard extends EventEmitter {
     this._answer = null;
     /** start again once a cancelled run has put the camera back */
     this._again = false;
+    /** the current run's end (the camera put back) @type {Promise<void>} */
+    this._ended = Promise.resolve();
     this._reset();
   }
 
@@ -203,6 +205,11 @@ export class CalibrationWizard extends EventEmitter {
 
   get running() {
     return !!this._run;
+  }
+
+  /** Resolves once no run is active any more (after a cancel: once the camera is back). */
+  idle() {
+    return this._ended;
   }
 
   /** @param {CalibrationState} s */
@@ -244,7 +251,7 @@ export class CalibrationWizard extends EventEmitter {
     // (a move just before the calibration, by the user: its pictures are not the start either)
     this._after = this._clock();
     this._set({ step: 'pan', progress: 0.05 });
-    this._sequence(run).catch(() => {});
+    this._ended = this._sequence(run).catch(() => {});
     return this.state;
   }
 

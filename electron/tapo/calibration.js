@@ -214,13 +214,8 @@ export class CalibrationWizard extends EventEmitter {
       if (!first || attempt > 1) await this._delay(1000);
       this._check(run);
       const after = this._after;
-      /** @type {RefAnswer|undefined} */
-      let r;
-      try {
-        r = await this._o.vision.ref({ after });
-      } catch (err) {
-        r = { ok: false, reason: /** @type {Error} */ (err).message };
-      }
+      // (a thrown error, such as no live stream at all, ends the calibration with its message)
+      const r = await this._o.vision.ref({ after });
       this._check(run);
       if (r && r.ok === true && typeof r.at === 'number' && r.at > after) {
         if (r.still === false) this._log('info', '[tapo] calibration: the reference picture never stood still (the scene moves); using the newest one');

@@ -189,6 +189,18 @@ describe('CalibrationWizard: a picture that is not current is never used', () =>
     expect(r.net().x).toBeCloseTo(0);
   });
 
+  it('no live stream at all (the reference request throws) fails with that message, nothing moved', async () => {
+    const r = rig({ ...C211, vision: () => ({
+      ref: async () => { throw new Error('No live picture, so the camera cannot be calibrated.'); },
+      measure: async () => { throw new Error('must not measure'); },
+    }) });
+    r.wiz.start();
+    const st = await r.finished();
+    expect(st).toMatchObject({ step: 'failed', error: 'No live picture, so the camera cannot be calibrated.' });
+    expect(r.moves).toEqual([]);
+    expect(r.saved).toEqual([]);
+  });
+
   it('a reference that comes on the second request is used', async () => {
     let n = 0;
     let refAt = 0;

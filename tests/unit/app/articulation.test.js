@@ -2,9 +2,10 @@
 // closures, anticipatory rounding, timing.
 import { describe, expect, it } from 'vitest';
 import {
-  CHANNELS, LEAD_IN, PAUSES, REST, VISEME_IDS, VISEME_SHAPES, closureCentreIn, makeSegment, planSpeech,
-  sampleSegments, segmentsFromVisemes, sentenceFriendliness, toShape, visemeSegment,
+  CHANNELS, LEAD_IN, PAUSES, REST, SHORT_VOWEL, VISEME_IDS, VISEME_SHAPES, closureCentreIn, makeSegment, nextLipClosure, planSpeech,
+  sampleSegments, segmentsFromVisemes, sentenceFriendliness, shortVowelClosures, toShape, visemeSegment,
 } from '../../../src/audio/articulation.js';
+import { LIP_CLOSE_EARLY, sampleLips } from '../../../src/audio/lipsync.js';
 import { textToWords } from '../../../src/audio/g2p.js';
 import { Director } from '../../../src/avatar/director.js';
 import { rigUniforms } from '../../../src/avatar/heads/relief/rig.js';
@@ -73,12 +74,15 @@ describe('dominance blending', () => {
     expect(sampleSegments(segs, NaN)).toEqual(new Array(CHANNELS.length).fill(0));
   });
 
-  it('closes a 50 ms bilabial between two open vowels (press >= 0.8, jaw <= 0.06)', () => {
+  it('closes a 50 ms bilabial between two open vowels (press >= 0.8, the jaw nearly closed)', () => {
     for (const vowel of ['aa', 'E', 'O']) {
       const tl = timeline([['sil', 0.2], [vowel, 0.14], ['PP', 0.05], [vowel, 0.14], ['sil', 0.2]]);
       const m = at(segmentsFromVisemes(tl), 0.2 + 0.14 + 0.025);
       expect(m.press, vowel).toBeGreaterThanOrEqual(0.8);
-      expect(m.jaw, vowel).toBeLessThanOrEqual(0.06);
+      // (v0.4: the lips own the closure, the jaw only rises toward it: it stays a little open and
+      // is already lowering toward the next vowel, so the release is abrupt; the rigs seal the
+      // lips over it. It used to be forced shut, <= 0.06.)
+      expect(m.jaw, vowel).toBeLessThanOrEqual(0.12);
       expect(m.teeth, vowel).toBeLessThan(0.1);
       // and the vowels around it still open
       expect(at(segmentsFromVisemes(tl), 0.27).jaw).toBeGreaterThan(0.3);
@@ -130,6 +134,58 @@ describe('dominance blending', () => {
     expect(closureCentreIn(segs, 0.11, 0.14)).toBeCloseTo(0.125, 9);
     expect(closureCentreIn(segs, 0.13, 0.16)).toBeNaN();
     expect(closureCentreIn(segs, 0.0, 0.5)).toBeNaN(); // a jump, not a frame step
+  });
+});
+
+describe('short vowels between two closures ("Maybe my", "Bobby", "paper")', () => {
+  it('the closure after one takes less of the early approach, and the lip gestures facing it reach less far', () => {
+    const segs = segmentsFromVisemes(timeline([['sil', 0.3], ['aa', 0.15], ['PP', 0.06], ['I', 0.07], ['PP', 0.06], ['aa', 0.15], ['sil', 0.3]]));
+    const [b, m] = segs.filter((s) => s.viseme === 'PP');
+    expect(b.earlyK).toBeUndefined();                       // after a long vowel: all of it
+    expect(m.earlyK).toBeCloseTo((0.07 - 0.06) / (SHORT_VOWEL - 0.06), 9);
+    const plain = makeSegment(0, 0.06, 'PP', 'PP', 'PP');
+    expect(b.tc[ch('press')]).toBeCloseTo(plain.tc[ch('press')] * (0.07 / SHORT_VOWEL), 9);
+    expect(m.ta[ch('press')]).toBeCloseTo(plain.ta[ch('press')] * (0.07 / SHORT_VOWEL), 9);
+    expect(b.ta[ch('press')]).toBe(plain.ta[ch('press')]);
+    // the other channels and the shared decay tables are untouched
+    expect(m.ta[ch('jaw')]).toBe(plain.ta[ch('jaw')]);
+    expect(makeSegment(0, 0.06, 'PP', 'PP', 'PP').ta[ch('press')]).toBe(plain.ta[ch('press')]);
+    // a vowel of SHORT_VOWEL or longer, or one after another consonant, changes nothing
+    const long = segmentsFromVisemes(timeline([['aa', 0.15], ['PP', 0.06], ['I', SHORT_VOWEL + 0.005], ['PP', 0.06], ['aa', 0.15]]));
+    expect(long.filter((s) => s.viseme === 'PP').every((s) => s.earlyK === undefined)).toBe(true);
+    const after = segmentsFromVisemes(timeline([['aa', 0.15], ['DD', 0.06], ['I', 0.07], ['PP', 0.06], ['aa', 0.15]]));
+    expect(after.find((s) => s.viseme === 'PP').earlyK).toBeUndefined();
+    expect(shortVowelClosures([])).toEqual([]);
+    expect(nextLipClosure(segs, 0.4).start).toBeCloseTo(0.45, 9);
+    expect(nextLipClosure(segs, 0.5)).toBe(m);
+    expect(nextLipClosure(segs, 0.6)).toBe(m);
+  });
+
+  it('a 60-80 ms vowel between two closures opens the relief lips at least 5 plate px (as the lip-sync samples it)', () => {
+    const RIG = { faceH: 651.945 / 1168, mouthHalfW: 100.261 / 1168, px: 1 / 1168, plateW: 784 / 1168, lidTravel: 0,
+      eyes: { L: { height: 0.02, irisR: 0.02 }, R: { height: 0.02, irisR: 0.02 } } };
+    for (const [v, d] of [['I', 0.06], ['I', 0.07], ['E', 0.08], ['aa', 0.07]]) {
+      const tl = timeline([['sil', 0.5], ['aa', 0.15], ['PP', 0.06], [v, d], ['PP', 0.06], ['aa', 0.15], ['sil', 0.3]]);
+      const segs = segmentsFromVisemes(tl);
+      const dr = new Director({ seed: 3, idleMotion: 0 });
+      dr.setState('speaking');
+      let prev = NaN, best = 0;
+      const sealed = [];
+      for (let t = 0; t < 1.4; t += 1 / 60) {
+        // (the lip-sync's sampling: its lead, the early approach, closures never skipped)
+        dr.setMouth(toShape(sampleLips(segs, t + 0.058, prev, LIP_CLOSE_EARLY)));
+        prev = t + 0.058;
+        const a = dr.update(1 / 60, t);
+        const u = rigUniforms(RIG, a, {});
+        const ap = (Math.max(0, u.upperLift) + Math.max(0, u.jawDrop + u.lowerDrop)) / RIG.px;
+        if (t > 0.65 + 0.03 - 0.058 && t < 0.71 + d - 0.058 + 0.01) best = Math.max(best, ap);
+        if (ap < 1) sealed.push(t);
+      }
+      expect(best, `${v} ${d * 1000} ms`).toBeGreaterThanOrEqual(5);
+      // and both closures still seal
+      expect(sealed.some((t) => t > 0.6 && t < 0.7), `${v}: first closure`).toBe(true);
+      expect(sealed.some((t) => t > 0.65 + d && t < 0.8 + d), `${v}: second closure`).toBe(true);
+    }
   });
 });
 

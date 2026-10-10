@@ -86,11 +86,25 @@ harness played them (ffmpeg).
 ## lipsync-align.mjs — lip-sync timing on real speech
 
 ```bash
-node tools/visual/lipsync-align.mjs out/clips [--latency 0.02]
+node tools/visual/lipsync-align.mjs out/clips [--latency 0.02] [--offset ms] [--json out.json] [--late]
 ```
 
-Plays every clip of a folder (`name.wav` + `name.json`) through the real LipSync and Director at
-60 Hz in Node and compares the mouth with the sound: the fullest closure of m / b / p between
-vowels vs the level dip in the audio, the jaw opening after a pause vs the acoustic onset, and
-the lag of the best jaw / level correlation (negative = the mouth leads). Use it after changing
-the timeline, the lead or the smoothing.
+Plays every clip of a folder (`name.wav` + `name.json`) through the real LipSync (with its
+acoustic analysis and fusion, run synchronously in Node) and Director at 60 Hz and compares the
+mouth with the sound: the fullest closure of m / b / p between vowels vs the level dip in the
+audio; when the relief head's lips are sealed (rendered aperture under 1 px, the reference pack's
+real rig) vs the acoustic closure (the dip below half its depth), at its start and its end, and
+how many closures seal at all; the jaw opening after a pause vs the acoustic onset; and the lag of
+the best jaw / level correlation (negative = the mouth leads). `--offset` applies *Settings →
+Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`). Use it after changing the timeline, the
+leads, the fusion or the smoothing; the seal is the number to watch (the lips meet and part in a
+frame or two, so their "fullest" closure is a plateau and its time says little).
+
+It also scores **every** release of an m / b / p into a vowel (or r, w, y), not only the closures
+between vowels with a level dip: when the lips part vs the steepest rise of the 0.8-5 kHz band out
+of the closure (its own zero-phase band-pass and 10 ms Hann power, independent of the app's
+analysis), split by what precedes it — a vowel, a consonant ("and Pam", "it back") or a pause —
+with the share more than 20 ms late (`--late` lists them); and every vowel of 60 ms or more on
+the timeline (40 ms early to 10 ms late) is checked to open the rendered lips at least 5 px. A
+stop before an m ("made muffins") can read late: there the band's steepest rise is the stop's
+burst into the m's murmur.

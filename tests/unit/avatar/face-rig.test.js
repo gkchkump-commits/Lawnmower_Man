@@ -71,19 +71,30 @@ describe('relief: face regions', () => {
     expect(press.lipWarp[0]).toBeCloseTo(RIG_LIMITS.pressThin, 9); // a closure wins
     const open = rigUniforms(rig, pose({ jawOpen: 0.6 }), {});
     expect(open.upperLift).toBeCloseTo(0.6 * RIG_LIMITS.jawUpperLipFh * rig.faceH, 9);
-    // about a third of the lower lip's drop (the upper incisors show on open vowels)
-    expect(open.upperLift).toBeGreaterThan(0.25 * open.jawDrop);
-    expect(open.upperLift).toBeLessThan(0.4 * open.jawDrop);
+    // about a fifth of the lower lip's drop (the upper incisors show on open vowels; v0.4: it was a
+    // third, which opened every vowel alike)
+    expect(open.upperLift).toBeGreaterThan(0.15 * open.jawDrop);
+    expect(open.upperLift).toBeLessThan(0.3 * open.jawDrop);
     expect(rigUniforms(rig, pose({ jawOpen: 0.6, mouthPress: 1 }), {}).upperLift).toBe(0);
   });
 
-  it('the opening is a lens: it spans the corners where they are now, narrow for O / U', () => {
+  it('the opening is a lens: it spans the corners where they are now, narrower still for O / U', () => {
     const rest = rigUniforms(rig, pose({}), {});
     expect(rest.lens[0]).toBe(1);
     expect(rest.lens[1]).toBe(RIG_LIMITS.cornerJawShare);
-    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeCloseTo(1 - RIG_LIMITS.roundCornerHw, 9);
+    // (rounded lips protrude and meet beside a small orifice, narrower than the corners: an 'oo'
+    // about half an 'ah''s width. It used to span the corners, 74 % of an 'ah''s width: a slit)
+    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeCloseTo((1 - RIG_LIMITS.roundCornerHw) * (1 - RIG_LIMITS.roundLensHw), 9);
+    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeLessThan(0.5);
     expect(rigUniforms(rig, pose({ mouthWide: 1 }), {}).lens[0]).toBeGreaterThan(1);
-    expect(RIG_CHUNK).toMatch(/uniform vec2 uLens;/);
+    expect(RIG_CHUNK).toMatch(/uniform vec4 uLens;/);
+    // its outline: a slender almond at rest and for a rounded opening, fuller toward the corners
+    // (a smaller profile exponent) for an open or a spread vowel
+    expect([rest.lens[2], rest.lens[3]]).toEqual([0.75, 0.55]);
+    const openE = rigUniforms(rig, pose({ jawOpen: 0.7 }), {}), roundE = rigUniforms(rig, pose({ jawOpen: 0.7, mouthRound: 1 }), {});
+    expect(openE.lens[2]).toBeLessThan(0.6);
+    expect(openE.lens[3]).toBeLessThan(rest.lens[3]);
+    expect(roundE.lens[2]).toBeCloseTo(0.75, 9);
     expect(RIG_CHUNK).toMatch(/\(1\.0 - fLo\) \* nearLo/); // the lower lip's jaw share tapers at the corners
   });
 

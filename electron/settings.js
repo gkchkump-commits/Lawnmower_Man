@@ -36,6 +36,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // 'synth' (default) | 'vocoder' | 'robot' | 'natural' (unprocessed); fxAmount 0..1
     character: 'synth',
     fxAmount: 0.6,
+    // the mouth's timing against the voice, on top of the built-in compensation (ms; + = the mouth
+    // later): for output paths whose delay the system does not report (Bluetooth headphones)
+    lipSyncOffsetMs: 0,
   },
   avatar: {
     renderer: 'relief', // 'relief' | 'procedural' | 'placeholder'
@@ -266,6 +269,7 @@ const SCHEMA = {
     speakReplies: bool(),
     character: oneOf(['natural', 'synth', 'vocoder', 'robot']),
     fxAmount: num(0, 1),
+    lipSyncOffsetMs: num(-200, 200),
   },
   avatar: {
     renderer: oneOf(['relief', 'procedural', 'placeholder']),

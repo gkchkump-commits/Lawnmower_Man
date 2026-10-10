@@ -31,6 +31,8 @@ const NC = CHANNELS.length;
  * @property {number[]} A      dominance strength per channel
  * @property {number[]} ta     anticipatory decay (s) per channel (influence BEFORE the segment)
  * @property {number[]} tc     carry-over decay (s) per channel (influence AFTER the segment)
+ * @property {number} [earlyK] closures / tucks after a short vowel: the share of the lips' early
+ *   approach they may take (shortVowelClosures; default all)
  */
 
 /** @param {number[]} v @returns {MouthShape} */
@@ -42,12 +44,12 @@ export function toShape(v) {
 const T = {
   sil: /*      */ [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00],
   // vowels
-  AA: /*       */ [0.72, 0.18, 0.00, 0.00, 0.00, 0.30, 0.05],
-  AE: /*       */ [0.62, 0.45, 0.00, 0.00, 0.00, 0.45, 0.05],
-  AH: /*       */ [0.50, 0.20, 0.00, 0.00, 0.00, 0.35, 0.05],
+  AA: /*       */ [0.80, 0.18, 0.00, 0.00, 0.00, 0.30, 0.05],
+  AE: /*       */ [0.68, 0.45, 0.00, 0.00, 0.00, 0.45, 0.05],
+  AH: /*       */ [0.55, 0.20, 0.00, 0.00, 0.00, 0.35, 0.05],
   AX: /* schwa */ [0.28, 0.12, 0.00, 0.00, 0.00, 0.25, 0.00],
-  AO: /*       */ [0.56, 0.00, 0.62, 0.00, 0.00, 0.12, 0.00],
-  EH: /*       */ [0.44, 0.48, 0.00, 0.00, 0.00, 0.55, 0.00],
+  AO: /*       */ [0.60, 0.00, 0.62, 0.00, 0.00, 0.12, 0.00],
+  EH: /*       */ [0.44, 0.48, 0.00, 0.00, 0.00, 0.45, 0.00],
   ER: /*       */ [0.26, 0.00, 0.38, 0.00, 0.00, 0.20, 0.00],
   IH: /*       */ [0.26, 0.58, 0.00, 0.00, 0.00, 0.60, 0.00],
   IY: /*       */ [0.16, 0.82, 0.00, 0.00, 0.00, 0.85, 0.00],
@@ -78,7 +80,7 @@ const A = {
   spread: /**/ [1.0, 1.0, 1.0, 0.4, 0.4, 0.8, 0.3], // i e: resist rounding
   rounded: /**/ [1.0, 0.8, 2.0, 0.4, 0.4, 0.6, 0.3],
   schwa: /*  */ [0.6, 0.4, 0.4, 0.3, 0.3, 0.4, 0.2],
-  PP: /*    */ [16, 0.3, 0.3, 16, 1.0, 3.0, 2.0],
+  PP: /*    */ [4.5, 0.3, 0.3, 16, 1.0, 3.0, 2.0],
   FF: /*    */ [6.0, 0.4, 0.3, 3.0, 12, 2.0, 2.0],
   TH: /*    */ [1.6, 0.4, 0.3, 1.0, 1.0, 1.2, 6.0],
   DD: /*    */ [0.8, 0.3, 0.2, 0.6, 0.6, 0.6, 1.0],
@@ -234,15 +236,24 @@ export function durationJawScale(s, medianDur) {
   return clamp(0.72 + 0.3 * ((s.end - s.start) / (medianDur || 0.1)), 0.7, 1.08);
 }
 
+/** The target (CHANNELS order) of a contract viseme id on its own. @param {string} id @returns {number[]} */
+export function visemeTarget(id) {
+  return (T[(VISEME[id] || VISEME.sil)[0]] || T.sil).slice();
+}
+
 /**
  * Segments from a voice-server viseme timeline ({start, end, viseme}, seconds). Vowel
  * prominence (and so the jaw) is estimated from duration — long vowels are the stressed ones —
- * unless `o.jawScale` measures it (e.g. from the audio). `o.vary` (a seed) gives every sound a
- * small deterministic variation of its jaw, spread and rounding, as no speaker says the same
- * syllable twice exactly alike. Rest segments are added before and after, so the mouth closes
- * at the edges.
+ * unless `o.jawScale` measures it (e.g. from the audio), or `o.amounts` gives a vowel's measured
+ * jaw / spread / rounding / teeth outright (fusion.js: from its formants and loudness). `o.vary`
+ * (a seed) gives every sound a small deterministic variation of its jaw, spread and rounding, as
+ * no speaker says the same syllable twice exactly alike. Rest segments are added before and
+ * after, so the mouth closes at the edges.
  * @param {Array<{start:number,end:number,viseme:string}>} tl
- * @param {{ jawScale?: (s: {start:number,end:number,viseme:string}, medianDur: number) => number, vary?: number }} [o]
+ * @param {{ jawScale?: (s: {start:number,end:number,viseme:string}, medianDur: number) => number, vary?: number,
+ *   amounts?: (s: {start:number,end:number,viseme:string}, i: number) => ({ jaw: number, wide: number, round: number, teeth: number }|null),
+ *   lipEdge?: number }} [o] lipEdge: scales how far the lip gesture of a closure (m b p) or a
+ *   tuck (f v) whose segment is its acoustic closure (`exact`, fusion.js) reaches beyond it
  * @returns {Segment[]}
  */
 export function segmentsFromVisemes(tl, o = {}) {
@@ -252,15 +263,73 @@ export function segmentsFromVisemes(tl, o = {}) {
   const jawScale = o.jawScale || durationJawScale;
   const out = [visemeSegment(tl[0].start - 0.3, tl[0].start, 'sil')];
   tl.forEach((s, i) => {
+    const amt = o.amounts ? o.amounts(s, i) : null;
     let js = 1;
-    if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = jawScale(s, median);
+    if (!amt && ['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = jawScale(s, median);
     const seg = visemeSegment(s.start, s.end, s.viseme, js);
+    const ex = /** @type {any} */ (s);
+    if (o.lipEdge && o.lipEdge !== 1 && (ex.exact || ex.exactStart || ex.exactEnd) && (s.viseme === 'PP' || s.viseme === 'FF')) {
+      // (per edge: the lips close sharply where the closure's start is its acoustic onset, part
+      // sharply where its end is the release)
+      const c = s.viseme === 'PP' ? 3 : 4;
+      seg.ta = seg.ta.slice(); seg.tc = seg.tc.slice();
+      if (ex.exact || ex.exactStart) seg.ta[c] *= o.lipEdge;
+      if (ex.exact || ex.exactEnd) seg.tc[c] *= o.lipEdge;
+    }
+    if (amt) {
+      seg.T[0] = clamp(amt.jaw, 0, 1);
+      seg.T[1] = clamp(amt.wide, 0, 1);
+      seg.T[2] = clamp(amt.round, 0, 1);
+      seg.T[5] = clamp(amt.teeth, 0, 1);
+    }
     if (Number.isFinite(o.vary) && s.viseme !== 'sil') varySegment(seg, o.vary * 7919 + i);
     out.push(seg);
   });
   const last = tl[tl.length - 1];
   out.push(visemeSegment(last.end, last.end + 0.3, 'sil'));
-  return out;
+  return shortVowelClosures(out);
+}
+
+const VOWEL_IDS = new Set(['aa', 'E', 'I', 'O', 'U']);
+/** A vowel between two lip closures shorter than this (s) makes room for itself (shortVowelClosures). */
+export const SHORT_VOWEL = 0.14;
+
+/**
+ * Lip closures around a short vowel — one between two closures / tucks: "Maybe my", "Bobby",
+ * "paper", "bumpy map". The lips must part for it, however briefly. Each closure / tuck after
+ * such a vowel gets `earlyK` (0..1): the share of the lips' early approach (LIP_CLOSE_EARLY,
+ * lipsync.js) it may take out of the vowel — none from a vowel of 60 ms or less, all from
+ * SHORT_VOWEL on — and the two lip gestures facing the vowel reach less far into it (their taus on
+ * that side scale with the vowel's length, down to half). Mutates (and returns) the segments.
+ * @param {Segment[]} segs @returns {Segment[]}
+ */
+export function shortVowelClosures(segs) {
+  const lip = (v) => v === 'PP' || v === 'FF';
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    if (!lip(s.viseme)) continue;
+    let j = i - 1, dv = 0;
+    while (j >= 0 && VOWEL_IDS.has(segs[j].viseme)) { dv += segs[j].end - segs[j].start; j--; }
+    if (!(dv > 0) || dv >= SHORT_VOWEL || j < 0 || !lip(segs[j].viseme)) continue;
+    s.earlyK = clamp((dv - 0.06) / (SHORT_VOWEL - 0.06), 0, 1);
+    const sc = clamp(dv / SHORT_VOWEL, 0.5, 1);
+    const c = s.viseme === 'PP' ? 3 : 4, cp = segs[j].viseme === 'PP' ? 3 : 4;
+    s.ta = s.ta.slice(); s.ta[c] *= sc;
+    segs[j].tc = segs[j].tc.slice(); segs[j].tc[cp] *= sc;
+  }
+  return segs;
+}
+
+/**
+ * The next closure / tuck (m b p / f v) whose centre is after t, within REACH; null if none.
+ * @param {Segment[]} segs @param {number} t @returns {Segment|null}
+ */
+export function nextLipClosure(segs, t) {
+  for (let i = Math.max(0, lastStartingBefore(segs, t)); i < segs.length && segs[i].start < t + REACH; i++) {
+    const s = segs[i];
+    if ((s.viseme === 'PP' || s.viseme === 'FF') && 0.5 * (s.start + s.end) > t) return s;
+  }
+  return null;
 }
 
 /** Hash → [-1, 1). @param {number} n */
@@ -415,7 +484,7 @@ export function planSpeech(text) {
   const duration = t;
   pushSeg(segs, makeSegment(t, t + TAIL, 'sil', 'sil', 'sil'));
   cues.sort((a, b) => a.t - b.t);
-  return { text: String(text || ''), words: pw, segs, cues, duration };
+  return { text: String(text || ''), words: pw, segs: shortVowelClosures(segs), cues, duration };
 }
 
 /** Append, merging a repeat of the same target (e.g. "m p" → one closure, two pauses). */

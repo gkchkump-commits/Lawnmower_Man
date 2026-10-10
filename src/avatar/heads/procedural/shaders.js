@@ -183,6 +183,7 @@ uniform vec4 uGrid;        // meridians around the head, latitude step (rad), li
 uniform vec3 uMouthC;
 uniform vec4 uMouth;       // rest lip seam y(dx) = x + y dx^2 + z dx^4 (dx from the mouth centre), w = half width
 uniform vec4 uMouthX;      // press thinning, press roll-in, tuck draw-back, tongue tip amount
+uniform vec2 uTeethVis;    // how much of the upper / lower teeth the lips reveal (src/avatar/heads/teeth.js)
 uniform vec3 uNoseTip;
 uniform vec3 uNoseBridge;
 uniform vec3 uPulseOrigin;
@@ -446,8 +447,10 @@ void main() {
     // lit from the front, shadowed under the lip and toward the corners
     float shadeU = (0.45 + 0.55 * smoothstep(seamY - 0.0012, seamY - upLen * 0.7, vDef.y)) * (0.55 + 0.45 * lens);
     float inMouth = smoothstep(0.0, 0.04, s);
-    c = mix(c, enamel * 0.28 * lens * glow, loT * gap * centre * inMouth * (1.0 - upT));
-    c = mix(c, enamel * shadeU * glow, upT * gap * centre * inMouth);
+    // (rounded, protruded lips hide the teeth; the lower row shows only as the jaw opens wide)
+    float visU = smoothstep(0.0, 0.25, uTeethVis.x), visL = smoothstep(0.0, 0.6, uTeethVis.y);
+    c = mix(c, enamel * 0.28 * lens * glow, loT * gap * centre * inMouth * (1.0 - upT) * visL);
+    c = mix(c, enamel * shadeU * glow, upT * gap * centre * inMouth * visU);
     // tongue tip (th, l): at the edge of the upper incisors, in front of the lower row
     if (uMouthX.w > 0.004) {
       float top = seamY - upLen;

@@ -9,9 +9,9 @@
 // noise that never repeats; blinks have an asymmetric lid profile and log-normal intervals.
 // Settled renders (fixed time, visual diffs) keep the original closed-form rest pose exactly.
 
-import { clamp, clamp01, fbm1, lerp, mulberry32, noise1 } from './noise.js';
+import { clamp, clamp01, fbm1, lerp, mulberry32, noise1, smoothstep } from './noise.js';
 import { EyeController, GAZE_DEG } from './eyes.js';
-import { Spring, envelope, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
+import { Spring, envelope, gauss, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
 
 /** @typedef {'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'} AvatarState */
 
@@ -75,16 +75,53 @@ export const EXPRESSIVENESS_MAX = 2;
 const DEG = 180 / Math.PI;
 
 /**
- * Mouth channel springs: [opening, closing] natural frequency (rad/s; t90 = 3.89 / omega). The
- * lip-sync output is already coarticulated, so these only add the inertia of real tissue: lips
- * press and tuck fast (t90 35-45 ms), rounding is slower; the jaw opens in ~70 ms and closes a
- * bit slower, a little faster into a closure (m b p, f v). The lips seal a closure on their own
- * (the rigs bring the lower lip up over a jaw still on its way), so the heavier jaw follows them
- * as it does in speech, without snapping shut within a frame.
+ * Mouth channel springs: [rising, falling] natural frequency (rad/s; t90 = 3.89 / omega). The
+ * lip-sync output is already coarticulated, so these only add the inertia of real tissue: the
+ * lips approach a closure (press m b p, tuck f v rising) over ~60 ms, meeting at speed (LIP_CONTACT;
+ * the lip-sync starts the approach LIP_CLOSE_EARLY sooner), and part abruptly (t90 40-50 ms);
+ * rounding is slower; the jaw opens in ~70 ms and closes a bit slower, a little faster into a
+ * closure. The lips seal a closure on their own (the rigs bring the lower lip up over a jaw still
+ * on its way), so the heavier jaw follows them as it does in speech, without snapping shut within
+ * a frame. (v0.3 closed the lips with a 110 rad/s spring: a wide-open vowel snapped shut in one
+ * frame, ~45 px of the relief head's aperture.)
  */
 export const MOUTH_OMEGA = Object.freeze({
-  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [110, 55], tuck: [90, 50], teeth: [50, 33], tongue: [55, 33],
+  jaw: [45, 38], wide: [42, 28], round: [33, 24], press: [48, 70], tuck: [45, 80], teeth: [50, 33], tongue: [55, 33],
 });
+/**
+ * Lip contact: the lips meet while still moving (they press on into each other, they do not ease
+ * to a stop just touching). So while the lips are closing for a sound (its press / tuck target
+ * near full, LIP_CONTACT_GATE) the shown press / tuck saturate before their springs arrive:
+ * contact at ~80 % of the way, at more than half the peak speed. Once the target falls (a release,
+ * or a short vowel between two closures: "Maybe my") the spring shows as it is, so the lips part
+ * as soon as they move instead of staying sealed until the spring is back under 80 %.
+ */
+export const LIP_CONTACT = 1.25;
+/** Press / tuck targets over which the contact mapping fades in (below: none, above: all). */
+export const LIP_CONTACT_GATE = Object.freeze([0.5, 0.85]);
+/**
+ * The shown press / tuck of a lip spring at `v` whose target is `target`; `jaw` (the jaw's
+ * opening) sets how far the lips have to travel: from a small opening ("Maybe my": an /i/ between
+ * b and m) they meet sooner, from 55 % of the spring's way at a closed jaw to 80 % (LIP_CONTACT)
+ * from jaw 0.5 on.
+ * @param {number} v @param {number} target @param {number} [jaw]
+ */
+export function lipContact(v, target, jaw = 1) {
+  const g = smoothstep(LIP_CONTACT_GATE[0], LIP_CONTACT_GATE[1], target);
+  const k = Math.max(LIP_CONTACT, 1 / clamp(0.55 + 0.5 * jaw, 0.55, 0.8));
+  // (the last bit of the way is the touch itself: they are in contact, not 1-2 % short of it)
+  const c = v * k >= 0.97 ? 1 : v * k;
+  return clamp01(v + (c - v) * g);
+}
+/**
+ * Behind sealed lips the jaw stays this high at most (jawOpen): it helps make the closure and
+ * lowers for the next vowel as the lips part, so a release into an open vowel opens the mouth over
+ * a few frames instead of popping a jaw that was already down (v0.4 before this: the jaw at 83 %
+ * of an open vowel's target inside the closure, +30 px of the relief head's opening in one frame).
+ */
+export const JAW_BEHIND_SEAL = 0.4;
+/** The press / tuck rising spring (rad/s) from a nearly closed jaw (MOUTH_OMEGA's from jaw 0.45 on). */
+export const LIP_CLOSE_SMALL = 64;
 /** The jaw's closing spring into a closure (t90 78 ms; the lips have sealed by then). */
 const JAW_INTO_CLOSURE = 50;
 const MOUTH_IN = /** @type {const} */ (['jaw', 'wide', 'round', 'press', 'tuck', 'teeth', 'tongue']);
@@ -164,6 +201,11 @@ const BLINK_MEDIAN = { idle: 2.8, listening: 4.0, thinking: 2.4, speaking: 2.3, 
  * 0.5 deg/s mean yaw speed), and a faint fast tremor (0.07 deg). */
 const SWAY = { yaw: 1.0 / DEG, pitch: 0.45 / DEG, roll: 0.26 / DEG, fast: 0.07 / DEG };
 
+/** An accent this strong (a phrase's nuclear accent) always gets a nod; weaker ones vary. */
+export const ACCENT_ALWAYS_NODS = 0.95;
+/** After an accent's nod, a weaker accent does not nod for this long (s, drawn in the range). */
+export const NOD_REFRACTORY = Object.freeze([0.6, 1.2]);
+
 /** Probabilistic OR of 0..1 values (smooth where max() would kink). */
 const softOr = (a, b) => 1 - (1 - a) * (1 - b);
 
@@ -196,6 +238,7 @@ export class Director {
     /** @type {Array<{ at: number, kind: string, amp: number, dir?: number, dur?: number, k?: number, yaw?: number, roll?: number, size?: number, extra?: boolean }>} */
     this._kicks = [];
     this._lastAccent = -Infinity;
+    this._nodFree = -Infinity;
     this._lastCue = -Infinity;
     this._blinkDeferred = false;
     this._phraseYaw = 0;
@@ -319,11 +362,29 @@ export class Director {
     const vary = () => 0.8 + 0.4 * this.rng2();
     this._lastCue = t;
     switch (cue.type) {
-      case 'accent':
-        if (t - this._lastAccent < 0.2) return;           // one nod per syllable at most
+      case 'accent': {
+        if (t - this._lastAccent < 0.2) return;           // one gesture per syllable at most
         this._lastAccent = t;
-        this._nod(t, (0.5 + 0.5 * s) * vary());
+        // A speaker does not nod on every stressed syllable, nor the same way, nor in a rhythm: a
+        // strong (nuclear) accent gets a nod, a weaker one now and then, but never within
+        // NOD_REFRACTORY of the last nod; otherwise a turn or tilt of the head (a beat), a flick
+        // of the brows, or nothing visible. Sizes vary widely (log-normal).
+        const r = this.rng2;
+        const size = (0.5 + 0.5 * s) * clamp(Math.exp(0.32 * gauss(r)), 0.55, 1.7);
+        const u = r();
+        const free = t >= this._nodFree;
+        const pNod = free ? 0.15 + 0.35 * s : 0;
+        if ((free && s >= ACCENT_ALWAYS_NODS) || u < pNod) {
+          this._nod(t, size);
+          this._nodFree = t + NOD_REFRACTORY[0] + (NOD_REFRACTORY[1] - NOD_REFRACTORY[0]) * r();
+        } else if (u < pNod + 0.55 * (1 - pNod)) {
+          // turn and tilt together, mostly one of them; the side alternates more often than not
+          this._beatSide = r() < 0.7 ? -(this._beatSide || 1) : (this._beatSide || 1);
+          const turn = r();
+          this._kick({ at: t, kind: 'beat', amp: size, k: 0.85 + 0.35 * r(), yaw: this._beatSide * turn, roll: this._beatSide * (1 - turn) * (r() < 0.5 ? -1 : 1) });
+        } else if (u < pNod + 0.8 * (1 - pNod)) this._kick({ at: t, kind: 'brow', amp: 0.22 * size });
         break;
+      }
       case 'emphasis':
         this._kick({ at: t, kind: 'brow', amp: 0.6 * s });
         this._nod(t, 0.8 * s * vary());
@@ -519,6 +580,7 @@ export class Director {
 
     // ---- speech prosody: nods, phrase lifts, question tilts, brows, micro-smiles, breaths --------
     let nod = 0, nodYaw = 0, nodRoll = 0, lift = 0, tilt = 0, browK = 0, smileK = 0, lower = 0, inhale = 0, inhaleHead = 0;
+    let beatYaw = 0, beatRoll = 0;
     if (this._kicks.length) {
       this._kicks = this._kicks.filter((q) => time - q.at < 3);
       for (const q of this._kicks) {
@@ -528,6 +590,10 @@ export class Director {
           // down in ~170 ms, back in ~310 ms (each nod 0.88-1.18 x as long)
           const v = q.amp * pulse(x, 0.17 * k, 0.31 * k);
           nod += v; nodYaw += v * (q.yaw ?? 0); nodRoll += v * (q.roll ?? 0);
+        } else if (q.kind === 'beat') {
+          // a small turn / tilt of the head on a stressed syllable, out in ~0.2 s and back
+          const v = q.amp * pulse(x, 0.2 * k, 0.38 * k);
+          beatYaw += v * (q.yaw ?? 0); beatRoll += v * (q.roll ?? 0);
         } else if (q.kind === 'lift') lift += q.amp * pulse(x, 0.2 * k, 0.36 * k);
         else if (q.kind === 'tilt') tilt += q.amp * (q.dir || 1) * envelope(x, 0.25, 0.45, 0.6);
         else if (q.kind === 'brow') browK = softOr(browK, q.amp * envelope(x, 0.12, 0.3, 0.45));
@@ -566,11 +632,20 @@ export class Director {
     // into a closure (lips pressing for m b p, tucking for f v) the jaw rises a little faster
     // behind the lips (which seal a 50 ms "m" by themselves)
     const closing = clamp01(Math.max(mt.press, mt.tuck) * 1.6 - 0.4);
+    // (while the lips close for a sound, or are still sealed from it, the jaw waits behind them:
+    // JAW_BEHIND_SEAL; the jaw's target runs ahead of the lips', so its opening for the next vowel
+    // would otherwise start while they are still shut)
+    const sealed = Math.max(smoothstep(0.7, 0.95, Math.max(mt.press, mt.tuck)), smoothstep(0.65, 0.9, Math.max(this._sm.press.x, this._sm.tuck.x)));
+    if (sealed > 0) mt.jaw = Math.min(mt.jaw, lerp(mt.jaw, JAW_BEHIND_SEAL, sealed));
+    const jaw0 = this._sm.jaw.x;
     for (const c of MOUTH_IN) {
       const s = this._sm[c];
       const [up, down] = MOUTH_OMEGA[c];
-      const om = mt[c] > s.x ? up : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
-      o[MOUTH_OUT[c]] = clamp01(sp(s, mt[c], om));
+      // (lips close faster from a small opening: the same gesture over a shorter way)
+      const rise = c === 'press' || c === 'tuck' ? lerp(LIP_CLOSE_SMALL, up, smoothstep(0.15, 0.45, jaw0)) : up;
+      const om = mt[c] > s.x ? rise : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
+      const v = sp(s, mt[c], om);
+      o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? lipContact(v, mt[c], jaw0) : clamp01(v);
     }
     // a little lopsided while talking (never at rest: the rest pose stays the reference)
     const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
@@ -635,10 +710,10 @@ export class Director {
     const since = time - this._errorKick;
     const shake = since >= 0 && since < 0.8 ? 0.012 * Math.sin(since * 28) * envelope(since, 0.06, 0.1, 0.6) : 0;
     const eyes = this.eyes;
-    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * 0.006 * nodYaw;
+    let yaw = yawSway + pY + shake + this._s.phraseYaw.x * ex + eyes.hx.x / DEG + ex * (0.006 * nodYaw + 0.024 * beatYaw);
     let pitch = pitchSway + pP + pitchPosture + eyes.hy.x / DEG
       + ex * (-0.024 * nod + 0.012 * lift + 0.012 * Math.abs(tilt) + 0.0036 * softClamp(pitchSt, -6, 8) - 0.016 * lower + 0.008 * inhaleHead);
-    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * 0.005 * nodRoll;
+    let roll = rollSway + rollPosture + 0.03 * tilt * ex + ex * (0.005 * nodRoll + 0.02 * beatRoll);
     yaw = clamp(yaw, -0.35, 0.35);
     pitch = clamp(pitch, -0.25, 0.25);
     roll = clamp(roll, -0.2, 0.2);
@@ -855,7 +930,7 @@ export class Director {
     o.listen = w.listening; o.think = w.thinking; o.speak = w.speaking; o.error = w.error; o.sleep = w.sleep;
     const idleW = clamp01(1 - (w.listening + w.thinking + w.speaking + w.error + w.sleep));
     o.speech = this._speechTarget;
-    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = this._mouth[c];
+    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? lipContact(this._mouth[c], this._mouth[c]) : this._mouth[c];
     o.mouthAsym = 0;
     const ex = this.expressiveness;
     this._phraseYawS = this._phraseYaw * w.speaking;

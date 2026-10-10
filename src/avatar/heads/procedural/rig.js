@@ -6,8 +6,9 @@ export const PROC_LIMITS = Object.freeze({
   jawAngle: 0.15,          // jaw rotation at jawOpen = 1 (lower lip drops ~0.055 units)
   wideJawAngle: 0.025,     // lips part a little for wide visemes (E / I / S)
   wideCornerHw: 0.12,      // corners outward for mouthWide = 1
+  jawCornerInHw: 0.06,     // the corners draw in a little as the jaw opens wide (the lips stretch down)
   wideLipFh: 0.006,        // upper lip lift / lower lip drop for wide
-  roundCornerHw: 0.24,     // corners inward for mouthRound = 1
+  roundCornerHw: 0.4,      // corners inward for mouthRound = 1 (the opening spans them: an 'oo' about half an 'ah''s width)
   roundPushFh: 0.03,       // lips forward for round
   smileUpFh: 0.03,         // corners up for smile
   smileOutHw: 0.09,
@@ -24,6 +25,7 @@ export const PROC_LIMITS = Object.freeze({
   tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)
   tuckRaiseFh: 0.004,      // the lower lip rises to the upper teeth...
   tuckBackFh: 0.012,       // ...and draws back under them
+  tuckShapeLift: 0.5,      // share of the neighbouring vowel's upper-lip lift kept under a full tuck (as the relief head)
   pressThinFh: 0.005,      // pressed lips thin toward the seam...
   pressInFh: 0.004,        // ...and flatten (the seam itself stays: the cavity must not show)
   jawLipK: 0.37,           // lower-lip drop per radian of jaw rotation (cancelled by a closure)
@@ -165,7 +167,7 @@ export function procRigUniforms(rig, a, u) {
   u.jawAngle = L.jawAngle * jaw + L.wideJawAngle * wide * (1 - jaw);
   u.jawRot = rotationX(u.jawAngle, u.jawRot || new Float32Array(9));
   u.headRot = rotationYPR(a.headYaw, a.headPitch, a.headRoll, u.headRot || new Float32Array(9));
-  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile) * hw;
+  const out = (L.wideCornerHw * wide - L.roundCornerHw * round + L.smileOutHw * smile - L.jawCornerInHw * jaw * jaw) * hw;
   const up = (L.smileUpFh * smile - 0.004 * round) * fh;
   const back = (-L.smileBackFh * smile + 0.01 * round) * fh;
   const tilt = L.asymFh * clamp(a.mouthAsym ?? 0, -1, 1) * fh;
@@ -179,7 +181,7 @@ export function procRigUniforms(rig, a, u) {
   // the square of the press (as on the relief head: a half-released press still seals).
   const lift0 = (L.wideLipFh * wide + 0.004 * smile + L.teethLiftFh * teeth + L.jawUpperLipFh * jaw) * fh;
   const openK = (1 - press) * (1 - press);
-  u.lips[0] = lift0 * openK + L.tuckLiftFh * tuck * fh;      // upper lift
+  u.lips[0] = lift0 * openK * (1 - (1 - L.tuckShapeLift) * tuck) + L.tuckLiftFh * tuck * fh;      // upper lift
   u.lips[1] = L.wideLipFh * 1.2 * wide * fh * Math.max(0, openK - tuck)    // lower drop
     - (press + tuck) * L.jawLipK * u.jawAngle - L.tuckRaiseFh * tuck * fh;
   u.lips[2] = L.roundPushFh * round * fh;                         // push forward

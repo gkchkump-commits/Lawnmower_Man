@@ -181,6 +181,27 @@ describe('Controller: speech pipeline', () => {
     expect(avatar.mouths.at(-1).press).toBe(0.9);
   });
 
+  it('hands every synthesized clip to the lip-sync early, and the user\'s lip-sync timing', async () => {
+    const bridge = fakeBridge();
+    const player = fakePlayer({ clipMs: 20 });
+    const prepared = [], offsets = [];
+    const lipsync = {
+      update: () => ({ jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0, source: 'none', cues: null }),
+      prepare: (clip) => { prepared.push(clip); return Promise.resolve(null); },
+      setOffset: (s) => offsets.push(s),
+      dispose() {},
+    };
+    const c = new Controller({ bridge, view: fakeView(), player, tts: fakeTts(), stt: fakeStt(), mic: fakeMic(), avatar: fakeAvatar(), lipsync, sleepAfterMs: 0 });
+    await c.start();
+    c.applySettings({ voice: { lipSyncOffsetMs: 40 } });
+    expect(offsets.at(-1)).toBeCloseTo(0.04, 9);
+    c.applySettings({ voice: {} });
+    expect(offsets.at(-1)).toBe(0);
+    expect(c.say('Hello there.')).toBe(true);
+    await waitFor(() => prepared.length === 1);
+    expect(prepared[0]).toMatchObject({ text: 'Hello there.' });
+  });
+
   it('a spoken cue when Claude uses a tool without saying anything first', async () => {
     const { c, bridge, tts } = setup();
     await c.start();

@@ -319,6 +319,7 @@ function speechSimulation(text) {
   let now = -0.6; // pre-roll: the avatar is already in its speaking state when the voice starts
   let ev = 0;
   const lipsync = new LipSync({ player, now: () => now });
+  if (q.has('offset')) lipsync.setOffset(num('offset', 0) / 1000);
   avatar.setState('speaking');
   const caption = flag('caption', false) ? document.getElementById('caption') : null;
   if (caption) caption.hidden = false;
@@ -394,6 +395,11 @@ async function clipSimulation(urls) {
   };
   let now = -pre;
   const lipsync = new LipSync({ player, now: () => now });
+  if (q.has('offset')) lipsync.setOffset(num('offset', 0) / 1000);
+  // the clips' acoustics, analysed in the worker as the app's speech queue has them analysed while
+  // earlier clips play (awaited here, so every run is the same); acoustics=0: the timeline alone
+  if (flag('acoustics', true)) await Promise.all(items.map((it) => lipsync.prepare(it.clip)));
+  else lipsync.acoustics = null;
   avatar.setState('thinking');
   const caption = flag('caption', false) ? document.getElementById('caption') : null;
   if (caption) caption.hidden = false;

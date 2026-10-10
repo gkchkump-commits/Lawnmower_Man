@@ -1,7 +1,7 @@
 // Director: the lip-sync channels (press, tuck, teeth, tongue, asymmetry) and the secondary
 // speech motion driven by prosody cues (nods, brows, phrase-end blinks, micro-smiles).
 import { describe, expect, it } from 'vitest';
-import { Director, MOUTH_OMEGA, createAnimState } from '../../../src/avatar/director.js';
+import { Director, JAW_BEHIND_SEAL, MOUTH_OMEGA, NOD_REFRACTORY, createAnimState, LIP_CONTACT, lipContact } from '../../../src/avatar/director.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -50,9 +50,65 @@ describe('Director: speech channels', () => {
     }
     let a;
     for (let i = 2; i < 30; i++) { d.setMouth(target); a = d.update(1 / 60, 0.5 + i / 60); }
-    for (const [m, k] of Object.entries(CH)) expect(a[k], k).toBeCloseTo(target[m], 2);
+    // (pressing and tucking lips meet in contact: their shown value saturates, lipContact; with
+    // the lips closed for a sound the jaw waits behind them, JAW_BEHIND_SEAL: a 0.6 jaw under a
+    // 0.9 press is held at 0.4 — v0.4 let it drop behind the sealed lips, so the release popped)
+    const shown = (m) => (m === 'press' || m === 'tuck' ? lipContact(target[m], target[m], JAW_BEHIND_SEAL)
+      : m === 'jaw' ? Math.min(target.jaw, JAW_BEHIND_SEAL) : target[m]);
+    for (const [m, k] of Object.entries(CH)) expect(a[k], k).toBeCloseTo(shown(m), 2);
+    expect(a.mouthPress).toBeGreaterThan(Math.min(1, LIP_CONTACT * target.press) - 0.02);   // in contact
     for (let i = 30; i < 70; i++) { d.setMouth({}); a = d.update(1 / 60, 0.5 + i / 60); }
     for (const k of Object.values(CH)) expect(a[k], k).toBeLessThan(0.01);
+  });
+
+  it('the lips meet in contact (still moving fast, not easing to a touch) and part abruptly', () => {
+    let time = 0;
+    const d = new Director({ seed: 5, idleMotion: 0 });
+    d.setState('speaking');
+    const step = (m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time).mouthPress; };
+    for (let i = 0; i < 30; i++) step({ jaw: 0.5 });
+    const closing = [0];
+    while (closing[closing.length - 1] < 1 && closing.length < 20) closing.push(step({ jaw: 0.1, press: 1 }));
+    expect(closing.length).toBeLessThanOrEqual(5);                       // sealed within ~65 ms
+    // the last step into contact is still a big one (a critically damped approach ends in tiny steps)
+    expect(closing[closing.length - 1] - closing[closing.length - 2]).toBeGreaterThan(0.1);
+    // ... but the approach takes a few frames: no frame closes more than ~40 % of the way (v0.3's
+    // 110 rad/s spring went 0 -> 0.6 in one frame: a wide-open vowel snapped shut; the lip-sync
+    // now starts the approach LIP_CLOSE_EARLY sooner instead)
+    for (let i = 1; i < closing.length; i++) expect(closing[i] - closing[i - 1]).toBeLessThan(0.4);
+    expect(closing.length).toBeGreaterThanOrEqual(4);
+    for (let i = 0; i < 10; i++) step({ jaw: 0.1, press: 1 });
+    const opening = [1];
+    for (let i = 0; i < 4; i++) opening.push(step({ jaw: 0.5 }));
+    expect(opening[3]).toBeLessThan(0.35);                               // parted within 50 ms
+    expect(LIP_CONTACT).toBeGreaterThan(1);
+  });
+
+  it('the lips hold contact only while closing for a sound; the jaw waits behind them', () => {
+    // contact while the target is full; a falling target (a release, a short vowel between two
+    // closures) shows the spring as it is, so the lips part as soon as they move
+    expect(lipContact(0.85, 1, 0.5)).toBe(1);
+    expect(lipContact(0.85, 0.2, 0.5)).toBeCloseTo(0.85, 9);
+    expect(lipContact(0, 1, 0.5)).toBe(0);
+    // from a small opening the lips meet sooner (a shorter way)
+    expect(lipContact(0.6, 1, 0)).toBe(1);
+    expect(lipContact(0.6, 1, 0.5)).toBeCloseTo(0.6 * LIP_CONTACT, 9);
+    // the jaw: an open vowel's target behind sealed lips waits at JAW_BEHIND_SEAL, then opens
+    // over several frames as they part
+    let time = 0;
+    const d = new Director({ seed: 7, idleMotion: 0 });
+    d.setState('speaking');
+    const step = (m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time); };
+    for (let i = 0; i < 40; i++) step({ jaw: 0.1, press: 1 });
+    let a;
+    for (let i = 0; i < 6; i++) a = step({ jaw: 0.8, press: 1 });
+    expect(a.jawOpen).toBeLessThan(JAW_BEHIND_SEAL + 0.01);
+    expect(a.mouthPress).toBe(1);
+    const jaws = [a.jawOpen], presses = [a.mouthPress];
+    for (let i = 0; i < 12; i++) { a = step({ jaw: 0.8 }); jaws.push(a.jawOpen); presses.push(a.mouthPress); }
+    expect(presses[2]).toBeLessThan(0.6);                  // parted within two frames
+    expect(jaws.at(-1)).toBeGreaterThan(0.72);             // then the jaw goes on to the vowel
+    for (let i = 1; i < jaws.length; i++) expect(jaws[i] - jaws[i - 1]).toBeLessThan(0.17);
   });
 
   it('presses and tucks fast, rounds slower; the jaw follows into a closure faster than into rest', () => {
@@ -60,11 +116,13 @@ describe('Director: speech channels', () => {
     const step = (d, m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time); };
     const d1 = new Director({ seed: 3 });
     for (let i = 0; i < 30; i++) step(d1, {});
-    const p = step(d1, { press: 1 }).mouthPress;
+    let p = 0;
+    for (let i = 0; i < 3; i++) p = step(d1, { press: 1 }).mouthPress;
     const d2 = new Director({ seed: 3 });
     for (let i = 0; i < 30; i++) step(d2, {});
-    const r = step(d2, { round: 1 }).mouthRound;
-    expect(p).toBeGreaterThan(r + 0.3);
+    let r = 0;
+    for (let i = 0; i < 3; i++) r = step(d2, { round: 1 }).mouthRound;
+    expect(p).toBeGreaterThan(r + 0.3);                 // (after 50 ms; v0.3 compared one frame)
     // jaw closing: plain (vowel → rest) vs into an m
     const d3 = new Director({ seed: 4 }), d4 = new Director({ seed: 4 });
     for (let i = 0; i < 30; i++) { step(d3, { jaw: 0.7 }); step(d4, { jaw: 0.7 }); }
@@ -74,9 +132,11 @@ describe('Director: speech channels', () => {
       const a = step(d4, { jaw: 0, press: 1 });
       closure = a.jawOpen; press = a.mouthPress;
     }
-    // the lips seal at once (the rigs bring the lower lip up over a jaw still open); the jaw comes
-    // up behind them, faster than it closes into rest but without snapping shut in a frame or two
-    expect(press).toBeGreaterThan(0.95);
+    // the lips seal first (the rigs bring the lower lip up over a jaw still open): by the 4th frame
+    // of a sudden closure; the jaw comes up behind them, faster than it closes into rest but
+    // without snapping shut in a frame or two
+    expect(press).toBeGreaterThan(0.8);
+    expect(step(d4, { jaw: 0, press: 1 }).mouthPress).toBeGreaterThan(0.95);
     expect(closure).toBeLessThan(0.8 * plain);
     expect(closure).toBeGreaterThan(0.1);
     expect(plain).toBeGreaterThan(0.15);
@@ -126,12 +186,68 @@ describe('Director: prosody (secondary speech motion)', () => {
     expect(Math.abs(r.a.headPitch - p0)).toBeLessThan(0.004); // back
   });
 
+  it('weaker accents vary: nods of many sizes, turns and tilts, brow flicks, or nothing; strong ones nod', () => {
+    const DEG = 180 / Math.PI;
+    const outcomes = { nod: 0, beat: 0, still: 0 }, nods = [];
+    for (let seed = 1; seed <= 60; seed++) {
+      const { d, t } = speaking(seed);
+      const p0 = d.out.headPitch, y0 = d.out.headYaw, r0 = d.out.headRoll;
+      d.setProsody({ type: 'accent', strength: 0.45 });
+      let dip = 0, turn = 0;
+      run(d, 0.6, 60, (tt, a) => {
+        dip = Math.max(dip, (p0 - a.headPitch) * DEG);
+        turn = Math.max(turn, Math.abs(a.headYaw - y0) * DEG, Math.abs(a.headRoll - r0) * DEG);
+      }, t);
+      if (dip > 0.15) { outcomes.nod++; nods.push(dip); } else if (turn > 0.15) outcomes.beat++; else outcomes.still++;
+    }
+    expect(outcomes.nod).toBeGreaterThan(18);
+    expect(outcomes.nod).toBeLessThan(42);
+    expect(outcomes.beat).toBeGreaterThan(5);
+    expect(outcomes.still).toBeGreaterThan(3);
+    const mean = nods.reduce((a, b) => a + b, 0) / nods.length;
+    const sd = Math.sqrt(nods.reduce((a, b) => a + (b - mean) ** 2, 0) / nods.length);
+    expect(sd / mean).toBeGreaterThan(0.2);          // (they used to be within +-20 %, sd/mean ~0.11)
+    // a phrase's nuclear accent always nods
+    for (let seed = 1; seed <= 12; seed++) {
+      const { d, t } = speaking(seed);
+      const p0 = d.out.headPitch;
+      d.setProsody({ type: 'accent', strength: 1 });
+      let dip = 0;
+      run(d, 0.6, 60, (tt, a) => { dip = Math.max(dip, (p0 - a.headPitch) * DEG); }, t);
+      expect(dip, `seed ${seed}`).toBeGreaterThan(0.3);
+    }
+  });
+
+  it('weaker accents do not nod in a rhythm: none within NOD_REFRACTORY of the last nod', () => {
+    let again = 0, later = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      const { d, t } = speaking(seed);
+      const nods = () => d._kicks.filter((k) => k.kind === 'nod').length;
+      d.setProsody({ type: 'accent', strength: 1 });          // a nuclear accent: it nods
+      expect(nods()).toBe(1);
+      let tt = run(d, 0.35, 60, () => {}, t).t;
+      d.setProsody({ type: 'accent', strength: 0.9 });        // too soon for another nod
+      if (nods() > 1) again++;
+      tt = run(d, NOD_REFRACTORY[1] + 0.1, 60, () => {}, tt).t;
+      d.setProsody({ type: 'accent', strength: 0.9 });        // a while later it may nod again
+      if (nods() > 1) later++;
+    }
+    expect(again).toBe(0);
+    expect(later).toBeGreaterThan(10);
+    expect(NOD_REFRACTORY[0]).toBeGreaterThanOrEqual(0.5);
+  });
+
   it('one nod per syllable at most', () => {
     const { d, t } = speaking(6);
     d.setProsody({ type: 'accent', strength: 1 });
     d.setProsody({ type: 'accent', strength: 1 });
     expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(1);
-    run(d, 0.3, 60, () => {}, t);
+    // (a strong accent 0.3 s later used to nod again; now it waits out NOD_REFRACTORY: no
+    // nod-per-syllable rhythm, it gets a beat or a brow instead)
+    const tt = run(d, 0.3, 60, () => {}, t).t;
+    d.setProsody({ type: 'accent', strength: 1 });
+    expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(1);
+    run(d, NOD_REFRACTORY[1], 60, () => {}, tt);
     d.setProsody({ type: 'accent', strength: 1 });
     expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(2);
   });

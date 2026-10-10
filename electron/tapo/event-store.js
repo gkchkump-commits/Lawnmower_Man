@@ -119,6 +119,7 @@ export class EventStore extends EventEmitter {
     this._scanning = null;
     /** ids written during the running scan @type {Set<string>|null} */
     this._touched = null;
+    this._tmpSeq = 0;
   }
 
   get dir() {
@@ -252,11 +253,14 @@ export class EventStore extends EventEmitter {
     if (!rec) return null;
     const rel = `${rec.base}.jpg`;
     const file = path.join(this.dir, ...rel.split('/'));
+    // two snapshots of one event can be on their way at once (alert + best): own temp names
+    const tmp = `${file}.${process.pid}-${++this._tmpSeq}.tmp`;
     try {
       await this._fs.mkdir(path.dirname(file), { recursive: true });
-      await this._fs.writeFile(`${file}.tmp`, jpeg);
-      await this._fs.rename(`${file}.tmp`, file);
+      await this._fs.writeFile(tmp, jpeg);
+      await this._fs.rename(tmp, file);
     } catch (err) {
+      await this._fs.rm(tmp, { force: true }).catch(() => {});
       this._log('warn', `[tapo] could not save the snapshot: ${/** @type {Error} */ (err).message}`);
       return null;
     }

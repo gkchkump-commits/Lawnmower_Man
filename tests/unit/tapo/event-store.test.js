@@ -64,6 +64,10 @@ describe('EventStore', () => {
     expect(await jpg).toBe(path.join(dir, '2026-10-10', '140000-person-aaaa.jpg'));
     expect(s.get(id)?.snapshot).toBe('2026-10-10/140000-person-aaaa.jpg');
     expect((await s.list()).total).toBe(2);
+    // two snapshots of one event at once (the alert one and the best one): both land, no temp left
+    const both = await Promise.all([s.writeSnapshot(id, Buffer.from([0xff, 0xd8, 0xff, 1])), s.writeSnapshot(id, Buffer.from([0xff, 0xd8, 0xff, 2]))]);
+    expect(both).toEqual([path.join(dir, '2026-10-10', '140000-person-aaaa.jpg'), path.join(dir, '2026-10-10', '140000-person-aaaa.jpg')]);
+    expect(fs.readdirSync(path.join(dir, '2026-10-10')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 
   it('a rescan keeps records written or removed while it runs', async () => {

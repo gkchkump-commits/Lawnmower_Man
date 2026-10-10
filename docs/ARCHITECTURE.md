@@ -630,10 +630,15 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   and in some tapo-e2e runs blocked the worker for ~16 s while the calibration dialog was open
   (measured with temporary instrumentation; the integrator's a71cdd1 shows the same failure).
   Main's chunk flow control keeps the backlog bounded, the worker confirms a still reference
-  picture before the camera moves, and main waits for a stalled worker's measurement (25 s), so
-  calibration now copes (tapo-e2e passed at load 7–9 after that); a longer stall still makes it
-  ask the user. Reading the Y plane with `VideoFrame.copyTo()` (asynchronous) would avoid the
-  stall itself.
+  picture before the camera moves, and main waits for a stalled worker's measurement (25 s). A
+  stalled worker decodes frames that left the camera before the last move, which once made
+  calibration store a mirrored pan the wrong way round; so main stamps every relayed sample with
+  its monotonic receive time, the calibration's `shift-ref` / `shift-measure` carry `after` (when
+  the last move ended) and the worker uses only frames that reached main later, naming the one it
+  used; main ignores answers without that gate, never measures without a reference picture, and
+  checks each axis on the way back (TAPO.md §10.1). A longer stall makes it ask the user, never
+  guess. Reading the Y plane with `VideoFrame.copyTo()` (asynchronous) would avoid the stall
+  itself.
 * **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
   Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
   `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the

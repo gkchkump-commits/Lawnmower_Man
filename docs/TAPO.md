@@ -373,10 +373,23 @@ main: onvif-client · ptz (+ calibration, watchdogs) · events (PullPoint) · se
   signs and the units per view. The reference picture is a still one (the worker confirms it
   before the camera moves), and when the camera reports that it moved (GetStatus position), the
   worker waits for the picture to move too (up to 6 s), so a video that lags the motor by a second
-  or two is still measured; a worker that answers late (a busy PC) makes the wizard ask instead
-  of failing. msPerUnit comes from the camera's reported travel time (not from the picture,
-  which lags); without GetStatus it keeps its previous value. Each
-  measurement is logged (`[tapo] calibration x +0.2: shift …`).
+  or two is still measured. msPerUnit comes from the camera's reported travel time (not from the
+  picture, which lags); without GetStatus it keeps its previous value. Each measurement is
+  logged (`[tapo] calibration x +0.2: shift …`, `x -0.2 (back): …`).
+  A wrong calibration turns the D-pad, the keys, click-to-center and Claude's `camera_look` the
+  wrong way, so the wizard concludes nothing from a picture that is not provably current. A
+  stalled worker (synchronous readback under software GL, a busy PC) keeps decoding frames that
+  left the camera *before* the last move, and a still picture is no proof of a current one, so:
+  main stamps every relayed sample with its own monotonic receive time (`rx`, kept per decoded
+  frame); `shift-ref` / `shift-measure` carry `after`, main's time when the last move ended (the
+  MoveStatus answer or the Stop), and the worker uses only frames that reached main later (the
+  stillness and settle checks run over those frames only) and names the frame it used (`at`,
+  `refAt`). An answer without that gate (an older camera window) is not used. No reference
+  picture → nothing is measured: it is asked for once more, then the user is asked. Every axis is
+  measured both ways (a new reference at the turned position, then the move back must shift the
+  picture the other way by 0.5×–2× as much); if not, the axis is measured once more, then the user
+  is asked, while the camera is turned, with the reason (too plain, lagging, disagreeing). The
+  min-step probe takes a step only when it went the way the pan did and its way back confirms it.
 * **Video:** the bundled **go2rtc 1.9.14** (`scripts/fetch-go2rtc.mjs`, SHA-256 pinned) pulls one
   RTSP session only while the stream is needed (window visible, armed, calibrating, recording or
   a snapshot) and serves fragmented MP4 on loopback behind random Basic credentials; modules

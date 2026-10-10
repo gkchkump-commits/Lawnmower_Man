@@ -1,4 +1,4 @@
-/* global PointerEvent, getComputedStyle */
+/* global MutationObserver, PointerEvent, getComputedStyle */
 // End-to-end tests of the renderer app against `vite preview` with the mock bridge
 // (src/bridge/mock.js). Chromium renders WebGL with SwiftShader (software), so the avatar runs
 // at quality=low and viewports stay small. Screenshots go to $LM_SHOTS_DIR.
@@ -24,16 +24,26 @@ test.describe('app (mock bridge)', () => {
   });
 
   test('typing a message streams a reply; state goes thinking → speaking → idle', async ({ page }, testInfo) => {
-    await boot(page, { mockDelay: 45 });
+    // The short states are recorded by the page itself (boot's __states, and the moment the reply
+    // passes 8 words): Playwright polls, and the transcript draws on animation frames, which
+    // software WebGL may draw too few of to catch a short phase. The words come slowly enough
+    // (~4 s for the reply) that a slow page still draws it mid-reply.
+    await page.addInitScript(() => {
+      new MutationObserver((_, observer) => {
+        const md = document.querySelector('.msg-claude .md');
+        if (!md || md.textContent.split(' ').length <= 8) return;
+        window.__midReply = { state: document.body.dataset.state, streaming: md.closest('.msg-claude').classList.contains('streaming') };
+        observer.disconnect();
+      }).observe(document, { childList: true, subtree: true, characterData: true });
+    });
+    await boot(page, { mockDelay: 150 });
     await send(page, 'Hello there!');
     await expect(page.locator('.msg-user .msg-text')).toHaveText('Hello there!');
     await expect(page.locator('#input')).toHaveValue('');
-    await expect(page.locator('body')).toHaveAttribute('data-state', 'thinking');
-    // mid-reply
-    await page.waitForFunction(() => document.querySelector('.msg-claude .md')?.textContent.split(' ').length > 8);
-    await expect(page.locator('body')).toHaveAttribute('data-state', 'speaking');
-    await expect(page.locator('.msg-claude')).toHaveClass(/streaming/);
-    await shot(page, testInfo, 'app-mid-reply');
+    await expect.poll(() => page.evaluate(() => window.__states.slice(0, 2))).toEqual(['idle', 'thinking']);
+    await page.waitForFunction(() => window.__midReply);
+    expect(await page.evaluate(() => window.__midReply)).toEqual({ state: 'speaking', streaming: true });
+    if (await page.locator('.msg-claude.streaming').count()) await shot(page, testInfo, 'app-mid-reply');
     await waitIdle(page);
     await expect(page.locator('.msg-claude .md')).toHaveText(MOCK_REPLIES.greeting);
     await expect(page.locator('.msg-claude')).not.toHaveClass(/streaming/);

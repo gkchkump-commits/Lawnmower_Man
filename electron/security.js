@@ -33,16 +33,20 @@ export function validateDevServerUrl(raw) {
  */
 export function buildCsp(o = {}) {
   const connect = ["'self'", 'http://127.0.0.1:*', 'blob:', 'data:'];
+  // the home camera's clips and snapshots are served by app://lawnmower/__clips/ (app-protocol.js
+  // mounts): 'self' covers that in production; the dev server page needs it spelled out
+  const clips = [];
   if (o.devServerUrl) {
     const u = new URL(o.devServerUrl);
     connect.push(`ws://${u.host}`, `wss://${u.host}`);
+    clips.push(APP_ORIGIN);
   }
   return [
     "default-src 'self'",
     "script-src 'self' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
-    "media-src 'self' data: blob: mediastream:",
+    ["img-src 'self' data: blob:", ...clips].join(' '),
+    ["media-src 'self' data: blob: mediastream:", ...clips].join(' '),
     "font-src 'self' data:",
     `connect-src ${connect.join(' ')}`,
     "worker-src 'self' blob:",

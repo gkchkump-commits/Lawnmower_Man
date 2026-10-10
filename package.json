@@ -31,7 +31,9 @@
     "check:electron": "node scripts/check-electron.mjs",
     "dist:win": "vite build && electron-builder --win --publish never",
     "dist:linux-dir": "vite build && electron-builder --linux dir --publish never",
-    "test:packaged": "node scripts/electron-e2e.mjs --packaged"
+    "test:packaged": "node scripts/electron-e2e.mjs --packaged",
+    "fetch:go2rtc": "node scripts/fetch-go2rtc.mjs",
+    "probe:tapo": "node tools/tapo-probe.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.1.0",

@@ -426,7 +426,7 @@ a Tapo C211 on loopback for tests and development:
 | What | Where | Runs |
 |---|---|---|
 | Simulator self-tests | `tests/unit/tapo-sim/sim-self.test.js` | `npx vitest run tests/unit/tapo-sim` |
-| The app's camera modules against the simulator (ONVIF, PTZ, events, go2rtc relay, recorder) | `tests/unit/tapo-sim/*-against-sim.test.js` | same; they skip with a reason while `electron/tapo` is missing, and the relay/recorder ones without the go2rtc binary |
+| The app's camera modules against the simulator (ONVIF, PTZ, events, go2rtc relay, recorder) | `tests/unit/tapo-sim/*-against-sim.test.js` | same; the relay/recorder ones skip with a reason without the go2rtc binary |
 | MCP hosting, permissions, G2 fallback | `tests/unit/systems/claude-session-mcp.test.js` (fake CLI `tests/fixtures/fake-claude.mjs`, `FAKE_CLAUDE_IGNORE_SDK_MCP=1` emulates a CLI without G1) | `npx vitest run` |
 | Live gate | `tests/unit/systems/claude-live.test.js` | `LIVE_CLAUDE=1` only |
 | The whole feature in the real Electron app | `scripts/tapo-e2e.mjs` | `npx vite build && xvfb-run -a node scripts/tapo-e2e.mjs [--shots <dir>] [--report <file>]` |

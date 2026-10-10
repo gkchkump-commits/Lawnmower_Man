@@ -1,18 +1,18 @@
 // Integration: the app's ONVIF client (electron/tapo/onvif-client.js, contract §8.3) against the
 // camera simulator with the Tapo quirks: connect, clock skew, a wrong password (auth-failed after
 // one resync, never a loop), XAddr rewriting, the serialized control queue under concurrent401,
-// and the well-behaved `ideal` camera. Skips while lane A's modules are not present.
+// and the well-behaved `ideal` camera.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
-import { laneModules } from './helpers.js';
+import { appModules } from './helpers.js';
 
-const lane = await laneModules(['electron/tapo/onvif-client.js']);
+const lane = await appModules(['electron/tapo/onvif-client.js']);
 const mod = lane.mods['electron/tapo/onvif-client.js'];
 
 /** @param {any} sim @param {Record<string, any>} [o] */
 const clientFor = (sim, o = {}) => new mod.OnvifClient({ host: '127.0.0.1', port: sim.onvifPort, username: 'camacct', getPassword: async () => 'se&cret', log: () => {}, ...o });
 
-describe.skipIf(!lane.ok)(`OnvifClient × simulator${lane.reason}`, () => {
+describe('OnvifClient × simulator', () => {
   /** @type {Awaited<ReturnType<typeof startSim>>} */
   let sim;
   beforeAll(async () => {
@@ -98,7 +98,7 @@ describe.skipIf(!lane.ok)(`OnvifClient × simulator${lane.reason}`, () => {
   });
 });
 
-describe.skipIf(!lane.ok)(`OnvifClient × the well-behaved "ideal" camera${lane.reason}`, () => {
+describe('OnvifClient × the well-behaved "ideal" camera', () => {
   it('uses the per-service paths and the first profile that has PTZ', async () => {
     const sim = await startSim({ quirks: 'ideal' });
     try {

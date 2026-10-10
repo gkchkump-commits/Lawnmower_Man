@@ -4,15 +4,15 @@
 // home, and the motor watchdogs: a RelativeMove that runs away like a ContinuousMove is stopped
 // within the bound, a Stop ignored on the pan axis is backed up by a zero-velocity move, a hold
 // without heartbeats stops, privacy mode answers "privacy" without marking PTZ unsupported.
-// The motor must never push against an end stop. Skips while lane A's modules are not present.
+// The motor must never push against an end stop.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { startSim, SIM_TRUTH } from '../../../tools/tapo-sim/index.mjs';
 import { gridCell } from '../../../tools/tapo-sim/geometry.mjs';
-import { laneModules, sleep, until } from './helpers.js';
+import { appModules, sleep, until } from './helpers.js';
 
-const lane = await laneModules(['electron/tapo/onvif-client.js', 'electron/tapo/ptz.js']);
-const { OnvifClient } = lane.mods['electron/tapo/onvif-client.js'] || {};
-const { PtzController } = lane.mods['electron/tapo/ptz.js'] || {};
+const lane = await appModules(['electron/tapo/onvif-client.js', 'electron/tapo/ptz.js']);
+const { OnvifClient } = lane.mods['electron/tapo/onvif-client.js'];
+const { PtzController } = lane.mods['electron/tapo/ptz.js'];
 
 /** What a finished calibration writes for this camera (the simulator's truth). */
 const calibrated = () => ({
@@ -21,7 +21,7 @@ const calibrated = () => ({
   holdSpeed: 0.5, msPerUnit: 6000, homePreset: '', localPresets: [],
 });
 
-describe.skipIf(!lane.ok)(`PtzController × simulated Tapo motor${lane.reason}`, () => {
+describe('PtzController × simulated Tapo motor', () => {
   /** @type {Awaited<ReturnType<typeof startSim>>} */
   let sim;
   /** @type {any} */

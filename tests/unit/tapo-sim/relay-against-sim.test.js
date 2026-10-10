@@ -2,23 +2,23 @@
 // simulator's RTSP stream, and the app's StreamRelay (electron/tapo/stream-relay.js) reading its
 // fMP4 (contract §8.5, §8.6, §12.1): init + samples starting at a keyframe, go2rtc's keepalive
 // holding a session past the camera's 15 s timeout, the picture following a pan, and one RTSP
-// session that ends (TEARDOWN) when the stream is no longer needed. Skipped unless lane A's
-// modules and the go2rtc binary (`npm run fetch:go2rtc`, or LAWNMOWER_GO2RTC) are present.
+// session that ends (TEARDOWN) when the stream is no longer needed. Skipped unless the go2rtc
+// binary is present (`npm run fetch:go2rtc`, or LAWNMOWER_GO2RTC).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
-import { ROOT, laneModules, sleep, until } from './helpers.js';
+import { ROOT, appModules, sleep, until } from './helpers.js';
 
-const lane = await laneModules(['electron/tapo/go2rtc.js', 'electron/tapo/stream-relay.js']);
+const lane = await appModules(['electron/tapo/go2rtc.js', 'electron/tapo/stream-relay.js']);
 const g2r = lane.mods['electron/tapo/go2rtc.js'];
 const relayMod = lane.mods['electron/tapo/stream-relay.js'];
-const binary = g2r ? g2r.go2rtcBinaryPath({ isPackaged: false, resourcesPath: '', appRoot: ROOT, platform: process.platform, arch: process.arch, env: process.env }) : '';
+const binary = g2r.go2rtcBinaryPath({ isPackaged: false, resourcesPath: '', appRoot: ROOT, platform: process.platform, arch: process.arch, env: process.env });
 const haveBinary = !!binary && fs.existsSync(binary);
-const reason = lane.reason || (haveBinary ? '' : ` [SKIPPED: no go2rtc binary at ${binary || 'vendor/go2rtc'} (npm run fetch:go2rtc)]`);
+const reason = haveBinary ? '' : ` [SKIPPED: no go2rtc binary at ${binary || 'vendor/go2rtc'} (npm run fetch:go2rtc)]`;
 
-describe.skipIf(!lane.ok || !haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, () => {
+describe.skipIf(!haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, () => {
   /** @type {Awaited<ReturnType<typeof startSim>>} */
   let sim;
   /** @type {any} */

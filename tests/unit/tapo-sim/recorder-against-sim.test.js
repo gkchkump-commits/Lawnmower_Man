@@ -1,22 +1,22 @@
 // Integration: an event clip recorded from the real chain (simulator RTSP → go2rtc → StreamRelay
 // → ClipRecorder, contract §8.7) while someone walks in front of the camera: the clip starts
 // with the pre-roll ring at a keyframe (≥ 4 s before the event), parses with the app's own fMP4
-// parser, its timeline starts at 0 and it shows the person segment. Skipped unless lane A's
-// modules and the go2rtc binary are present.
+// parser, its timeline starts at 0 and it shows the person segment. Skipped unless the go2rtc
+// binary is present (`npm run fetch:go2rtc`, or LAWNMOWER_GO2RTC).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
-import { ROOT, laneModules, sleep, until } from './helpers.js';
+import { ROOT, appModules, sleep, until } from './helpers.js';
 
-const lane = await laneModules(['electron/tapo/go2rtc.js', 'electron/tapo/stream-relay.js', 'electron/tapo/recorder.js', 'electron/tapo/fmp4.js']);
+const lane = await appModules(['electron/tapo/go2rtc.js', 'electron/tapo/stream-relay.js', 'electron/tapo/recorder.js', 'electron/tapo/fmp4.js']);
 const g2r = lane.mods['electron/tapo/go2rtc.js'];
-const binary = g2r ? g2r.go2rtcBinaryPath({ isPackaged: false, resourcesPath: '', appRoot: ROOT, platform: process.platform, arch: process.arch, env: process.env }) : '';
+const binary = g2r.go2rtcBinaryPath({ isPackaged: false, resourcesPath: '', appRoot: ROOT, platform: process.platform, arch: process.arch, env: process.env });
 const haveBinary = !!binary && fs.existsSync(binary);
-const reason = lane.reason || (haveBinary ? '' : ` [SKIPPED: no go2rtc binary at ${binary || 'vendor/go2rtc'} (npm run fetch:go2rtc)]`);
+const reason = haveBinary ? '' : ` [SKIPPED: no go2rtc binary at ${binary || 'vendor/go2rtc'} (npm run fetch:go2rtc)]`;
 
-describe.skipIf(!lane.ok || !haveBinary)(`event clip from go2rtc × simulator${reason}`, () => {
+describe.skipIf(!haveBinary)(`event clip from go2rtc × simulator${reason}`, () => {
   /** @type {Awaited<ReturnType<typeof startSim>>} */
   let sim;
   /** @type {any} */

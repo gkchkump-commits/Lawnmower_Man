@@ -106,6 +106,5 @@ with a pan in the middle: `node tools/tapo-sim/capture-go2rtc-sample.mjs`).
 ## Tests
 
 `tests/unit/tapo-sim/sim-self.test.js` tests the simulator with a client of its own. The other files
-in that folder drive the app's camera modules (`electron/tapo/*`) against it and skip, saying so in
-their titles, while those modules are not present; the go2rtc parts also skip without the binary
-(`npm run fetch:go2rtc`, or `LAWNMOWER_GO2RTC=<path>`).
+in that folder drive the app's camera modules (`electron/tapo/*`) against it; the go2rtc parts skip,
+saying so in their titles, without the binary (`npm run fetch:go2rtc`, or `LAWNMOWER_GO2RTC=<path>`).

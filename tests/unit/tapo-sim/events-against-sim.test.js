@@ -3,16 +3,16 @@
 // flood with single false blips comes out as one rising and one falling edge, pulls dropped
 // with bytes after "Connection: close" keep the subscription, a subscription is renewed (never
 // re-created on top), the 4th subscription is never created, a reboot is recovered from with
-// exactly one new subscription, and stop() unsubscribes. Skips while lane A is not present.
+// exactly one new subscription, and stop() unsubscribes.
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
-import { laneModules, sleep, until } from './helpers.js';
+import { appModules, sleep, until } from './helpers.js';
 
-const lane = await laneModules(['electron/tapo/onvif-client.js', 'electron/tapo/events.js']);
-const { OnvifClient } = lane.mods['electron/tapo/onvif-client.js'] || {};
-const { PullPointMonitor } = lane.mods['electron/tapo/events.js'] || {};
+const lane = await appModules(['electron/tapo/onvif-client.js', 'electron/tapo/events.js']);
+const { OnvifClient } = lane.mods['electron/tapo/onvif-client.js'];
+const { PullPointMonitor } = lane.mods['electron/tapo/events.js'];
 
-describe.skipIf(!lane.ok)(`PullPointMonitor × simulated Tapo events${lane.reason}`, () => {
+describe('PullPointMonitor × simulated Tapo events', () => {
   /** @type {Awaited<ReturnType<typeof startSim>>} */
   let sim;
   /** @type {any} */

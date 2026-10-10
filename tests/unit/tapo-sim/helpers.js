@@ -1,6 +1,6 @@
 // Helpers for the simulator tests: a minimal ONVIF SOAP caller and RTSP client of their own (so
-// the simulator's self-tests do not depend on the app's client), and the skip rule for the
-// integration tests that drive lane A's modules (electron/tapo/*) against the simulator.
+// the simulator's self-tests do not depend on the app's client), and the loader of the app
+// modules (electron/tapo/*) the integration tests drive against the simulator.
 import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
@@ -12,36 +12,16 @@ import { digestResponse, parseAuthParams } from '../../../tools/tapo-sim/rtsp-se
 export const ROOT = path.resolve(import.meta.dirname, '../../..');
 
 /**
- * Import an app module for an integration test, or null when the file does not exist yet (the
- * lane that writes it has not been merged). Any other import error is a real failure and throws.
- * @param {string} rel path from the repository root, e.g. 'electron/tapo/onvif-client.js'
+ * Import the app modules (electron/tapo/*) an integration test drives. They are part of the tree
+ * since lane A was merged, so a missing or broken module fails the test instead of skipping it.
+ * @param {string[]} rels paths from the repository root, e.g. 'electron/tapo/onvif-client.js'
+ * @returns {Promise<{ mods: Record<string, any> }>}
  */
-export async function importIfPresent(rel) {
-  const file = path.join(ROOT, rel);
-  try {
-    return await import(pathToFileURL(file).href);
-  } catch (err) {
-    const e = /** @type {NodeJS.ErrnoException} */ (err);
-    if (e.code === 'ERR_MODULE_NOT_FOUND' && String(e.message).includes(path.basename(rel))) return null;
-    throw err;
-  }
-}
-
-/**
- * The modules an integration test needs, and a title suffix that says why it is skipped.
- * @param {string[]} rels
- */
-export async function laneModules(rels) {
+export async function appModules(rels) {
   /** @type {Record<string, any>} */
   const mods = {};
-  const missing = [];
-  for (const rel of rels) {
-    const m = await importIfPresent(rel);
-    if (m) mods[rel] = m;
-    else missing.push(rel);
-  }
-  const reason = missing.length ? ` [SKIPPED: ${missing.join(', ')} not present yet (lane A not merged)]` : '';
-  return { mods, missing, ok: missing.length === 0, reason };
+  for (const rel of rels) mods[rel] = await import(pathToFileURL(path.join(ROOT, rel)).href);
+  return { mods };
 }
 
 // ---------------------------------------------------------------------------------------------

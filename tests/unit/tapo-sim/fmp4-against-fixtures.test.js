@@ -1,16 +1,16 @@
 // Integration: the app's fMP4 parser (electron/tapo/fmp4.js, lane A) on lane C's independently
 // made fixtures (tests/fixtures/tapo, contract §11.3): the sample go2rtc 1.9.14 served when fed
 // by the simulator (tools/tapo-sim/capture-go2rtc-sample.mjs) and two B-frame encodes, one moof
-// per frame and one moof per GOP (tools/tapo-sim/make-fixtures.sh). Skipped until lane A merges.
+// per frame and one moof per GOP (tools/tapo-sim/make-fixtures.sh).
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, laneModules } from './helpers.js';
+import { ROOT, appModules } from './helpers.js';
 import { VIEW } from '../../../tools/tapo-sim/geometry.mjs';
 import { loadFixtures } from '../../../tools/tapo-sim/fixtures.mjs';
 
 const FIX = path.join(ROOT, 'tests/fixtures/tapo');
-const lane = await laneModules(['electron/tapo/fmp4.js']);
+const lane = await appModules(['electron/tapo/fmp4.js']);
 
 /** @param {string} file @returns {{ init: any, samples: any[], errors: string[] }} */
 function parse(file) {
@@ -43,7 +43,7 @@ function nalTypes(d) {
   return out;
 }
 
-describe.skipIf(!lane.ok)(`fMP4 parser × lane C fixtures${lane.reason}`, () => {
+describe('fMP4 parser × lane C fixtures', () => {
   it('go2rtc-sample.mp4: the stream go2rtc serves from the simulator, frame by frame', () => {
     const { init, samples, errors } = parse('go2rtc-sample.mp4');
     expect(errors).toEqual([]);

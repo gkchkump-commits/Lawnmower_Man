@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeOptions } from '../../../src/avatar/index.js';
 import { Particles, yprMatrix } from '../../../src/avatar/fx/particles.js';
-import { COVERAGE_GATE, HALO } from '../../../src/avatar/fx/post.js';
+import { BLOOM_GAIN, COVERAGE_GATE, HALO, haloMix } from '../../../src/avatar/fx/post.js';
 import { Projector } from '../../../src/avatar/fx/projector.js';
 import { RELIEF_LIGHT, reliefNormals } from '../../../src/avatar/heads/relief/index.js';
 import { headRotation } from '../../../src/avatar/heads/relief/rig.js';
@@ -47,7 +47,34 @@ describe('relief light', () => {
     expect(RELIEF_LIGHT.diffuse).toBeLessThanOrEqual(0.7);
     expect(COVERAGE_GATE).toEqual([0.04, 0.24]);
     expect(HALO.strength).toBeGreaterThan(0.2);
-    expect(HALO.strength).toBeLessThan(0.5);
+    expect(HALO.strength).toBeLessThan(0.4);
+    // (the rim stays the hologram's cyan and moderate: a whitened edge melts into a white desktop)
+    expect(RELIEF_LIGHT.rim).toBeLessThanOrEqual(0.6);
+    expect(BLOOM_GAIN).toBeLessThan(0.5);
+  });
+
+  it('the silhouette halo is as wide in CSS px at any display scale: its base level moves with the pixel ratio', () => {
+    // weight of each level's coverage in the final blur (the up-chain mixes level i with the coarser)
+    const weights = (m) => {
+      const w = [];
+      let k = 1;
+      for (let i = 0; i < m.length - 1; i++) { w.push(k * (1 - m[i])); k *= m[i]; }
+      w.push(k);
+      return w;
+    };
+    // the CSS width of a level's texel: 2^i / (bloomScale x pixel ratio)
+    const cssWidth = (pr, bs, n) => weights(haloMix(n, pr, bs)).reduce((s, w, i) => s + w * (2 ** i) / (bs * pr), 0);
+    // (High and Medium: 5 and 4 levels; Low: a quarter-resolution chain of 3)
+    for (const [pr, bs, n] of [[2, 0.5, 5], [1.5, 0.5, 5], [1.25, 0.5, 5], [2, 0.5, 4], [1.5, 0.5, 4], [1, 0.25, 3]]) {
+      const ref = cssWidth(1, 0.5, n === 3 ? 4 : n);
+      expect(cssWidth(pr, bs, n) / ref, `pr ${pr} bloom ${bs} levels ${n}`).toBeGreaterThan(0.75);
+      expect(cssWidth(pr, bs, n) / ref, `pr ${pr} bloom ${bs} levels ${n}`).toBeLessThan(1.33);
+    }
+    // a thin outline, not a fog: most of the weight within two levels of the base
+    const w = weights(haloMix(5, 1, 0.5));
+    expect(w[1] + w[2]).toBeGreaterThan(0.75);
+    expect(w[4]).toBeLessThan(0.1);
+    for (const m of haloMix(5, 3, 0.5)) { expect(m).toBeGreaterThanOrEqual(HALO.mix); expect(m).toBeLessThanOrEqual(1); }
   });
 });
 
@@ -85,11 +112,12 @@ describe('the aura turns with the head (parallax)', () => {
 });
 
 describe('quality tiers and options', () => {
-  it('full resolution on capable GPUs, MSAA or FXAA on every tier', () => {
-    expect(QUALITY.high.dprCap).toBeGreaterThanOrEqual(2.5);
-    for (const t of Object.values(QUALITY)) expect(t.msaa > 0 || t.fxaa).toBe(true);
-    expect(QUALITY.high.fxaa).toBe(false);
-    expect(QUALITY.low.fxaa).toBe(true);
+  it('High renders at the display\'s resolution up to 2x with MSAA; Low stays as cheap and as crisp as it was', () => {
+    expect(QUALITY.high.dprCap).toBe(2);
+    expect(QUALITY.high.msaa).toBeGreaterThanOrEqual(4);
+    expect(QUALITY.medium.msaa).toBeGreaterThan(0);
+    // (no FXAA on Low: it smeared the fine wire grid and the irises and cost a fifth more)
+    expect(QUALITY.low).toEqual({ dprCap: 1, msaa: 0, particles: 1200, bloomScale: 0.25, bloomLevels: 3, halfFloat: false });
   });
 
   it('normalizes liveliness, the projector and the glass opacity', () => {

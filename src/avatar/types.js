@@ -22,7 +22,8 @@
  * @property {number} [zoom]          camera zoom (default 1)
  * @property {Record<string,string>} [colors]  palette overrides: eye, line, rim, grid, wisp, mote (hex)
  * @property {boolean} [autoStart]    start the render loop (default true)
- * @property {boolean} [autoQuality]  step quality down one tier after ~3 s below 24 fps (default
+ * @property {boolean} [autoQuality]  after ~3 s below ~50 fps (src/avatar/quality.js
+ *           QualityGovernor) lower the resolution, then the tier, one step at a time (default
  *           true, false with fixedTime)
  */
 

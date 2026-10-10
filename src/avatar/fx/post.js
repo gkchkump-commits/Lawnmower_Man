@@ -1,8 +1,8 @@
 // Post-processing: scene render target -> cheap dual-filter bloom -> final composite that
 // outputs PREMULTIPLIED alpha derived from brightness (black = transparent desktop) or opaque black.
-// The bloom chain also carries the scene's coverage (alpha) blurred: the composite lays a soft dark
-// halo just outside the head with it, so the hologram's silhouette reads over a bright or busy
-// desktop too (over a dark one it is invisible). FXAA smooths edges where there is no MSAA.
+// The bloom chain also carries the scene's coverage (alpha) blurred: the composite lays a thin dark
+// outline just outside the head with it (a few CSS px wide at any display scale), so the
+// hologram's silhouette reads over a bright or busy desktop too (over a dark one it is invisible).
 
 import * as THREE from 'three';
 
@@ -57,7 +57,7 @@ uniform sampler2D tSrc;    // coarser level (being upsampled)
 uniform sampler2D tBase;   // finer level at this resolution
 uniform vec2 uTexel;       // texel of the coarser level
 uniform float uRadius;
-uniform float uHaloMix;    // the coverage: how much of the coarser (wider) blur each level keeps
+uniform float uHaloMix;    // the coverage: how much of the coarser (wider) blur this level keeps
 varying vec2 vUv;
 void main() {
   vec2 o = uTexel * uRadius;
@@ -84,25 +84,7 @@ uniform float uExposure;
 uniform vec2 uResolution;
 uniform float uHalo;        // the silhouette halo's strength (alpha just outside the head)
 uniform vec2 uGate;         // the glow a covered pixel needs to occlude the desktop (head-specific)
-uniform float uFxaa;        // 1: smooth the scene's edges (tiers without MSAA)
 varying vec2 vUv;
-float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-// FXAA (the classic 9-tap variant): blend along the edge where the local contrast is high
-vec3 fxaa(vec2 uv, vec3 rgbM) {
-  vec2 px = 1.0 / uResolution;
-  vec3 nw = texture2D(tScene, uv + vec2(-1.0, -1.0) * px).rgb, ne = texture2D(tScene, uv + vec2(1.0, -1.0) * px).rgb;
-  vec3 sw = texture2D(tScene, uv + vec2(-1.0, 1.0) * px).rgb, se = texture2D(tScene, uv + vec2(1.0, 1.0) * px).rgb;
-  float lNW = luma(nw), lNE = luma(ne), lSW = luma(sw), lSE = luma(se), lM = luma(rgbM);
-  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE))), lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
-  if (lMax - lMin < max(0.04, lMax * 0.16)) return rgbM;
-  vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
-  float red = max((lNW + lNE + lSW + lSE) * 0.03125, 1.0 / 128.0);
-  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + red), -8.0, 8.0) * px;
-  vec3 a = 0.5 * (texture2D(tScene, uv - dir / 6.0).rgb + texture2D(tScene, uv + dir / 6.0).rgb);
-  vec3 b = 0.5 * a + 0.25 * (texture2D(tScene, uv - dir * 0.5).rgb + texture2D(tScene, uv + dir * 0.5).rgb);
-  float lB = luma(b);
-  return (lB < lMin || lB > lMax) ? a : b;
-}
 vec3 shoulder(vec3 x) {
   // identity below 0.9, smooth roll-off above (keeps the baked plate exact, tames bloom hot spots)
   vec3 t = max(x - 0.9, 0.0);
@@ -116,7 +98,6 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.545
 float maxc(vec3 c) { return max(c.r, max(c.g, c.b)); }
 void main() {
   vec4 s = texture2D(tScene, vUv);
-  if (uFxaa > 0.5) s.rgb = fxaa(vUv, s.rgb);
   vec4 bl = texture2D(tBloom, vUv);
   vec3 c = s.rgb * uExposure + bl.rgb * uBloom;
   c = toSRGB(shoulder(c));
@@ -135,10 +116,10 @@ void main() {
       + maxc(texture2D(tScene, vUv + vec2(o.x, -o.y)).rgb) + maxc(texture2D(tScene, vUv + vec2(-o.x, -o.y)).rgb));
     float glow = max(lum, toSRGB(vec3(nb * uExposure)).r);
     float a = clamp(max(lum, s.a * uOpacity * smoothstep(uGate.x, uGate.y, glow)), 0.0, 1.0);
-    // the silhouette halo: a soft dark band just outside the head (the blurred coverage where the
-    // head itself is not), fading out over ~20 px; nothing inside the head, nothing far away
+    // the silhouette halo: a thin dark outline just outside the head (the blurred coverage where
+    // the head itself is not), gone within ~8 CSS px; nothing inside the head, nothing far away
     float wide = bl.a, own = s.a;
-    float hw = smoothstep(0.0, 0.45, wide);
+    float hw = smoothstep(0.15, 0.5, wide);
     a = max(a, uHalo * hw * sqrt(hw) * (1.0 - smoothstep(0.05, 0.6, own)));
     gl_FragColor = vec4(min(c, vec3(a)), a);   // premultiplied
   } else {
@@ -146,8 +127,27 @@ void main() {
   }
 }`;
 
-/** The silhouette halo: its peak alpha, and how wide it reaches (the coarse levels' share). */
-export const HALO = Object.freeze({ strength: 0.4, mix: 0.8 });
+/**
+ * The silhouette halo: its peak alpha, how much of the coarser levels' coverage it takes past its
+ * base level (its tail), and the base level's texel in CSS px (the level is picked by the pixel
+ * ratio and the bloom scale, so the outline is as wide at any display scale).
+ */
+export const HALO = Object.freeze({ strength: 0.3, mix: 0.45, texelCss: 4 });
+
+/**
+ * The coverage mix of each bloom level for the halo (see UP_FRAG): the finer levels than its base
+ * pass the coarser blur on in full, the base level (fractional: blended) and the coarser ones keep
+ * HALO.mix of it. @param {number} levels @param {number} pixelRatio @param {number} bloomScale
+ * @returns {number[]} per level (index 0 = the finest)
+ */
+export function haloMix(levels, pixelRatio, bloomScale) {
+  const b = Math.min(levels - 1, Math.max(0, Math.log2(HALO.texelCss * bloomScale * Math.max(0.5, pixelRatio))));
+  const out = [];
+  for (let i = 0; i < levels; i++) out.push(i < Math.floor(b) ? 1 : i === Math.floor(b) ? HALO.mix + (1 - HALO.mix) * (b - i) : HALO.mix);
+  return out;
+}
+/** The bloom's strength (x options.bloom): the brighter emissive lines and eyes carry the glow. */
+export const BLOOM_GAIN = 0.44;
 /** Default coverage gate (heads without a baked occlusion mask: only what visibly glows occludes). */
 export const COVERAGE_GATE = Object.freeze([0.04, 0.24]);
 
@@ -181,6 +181,7 @@ export class Post {
     this.energy = 0.5;
     this.width = 1;
     this.height = 1;
+    this.pixelRatio = 1;
     const ext = renderer.extensions;
     this.canHalf = renderer.capabilities.isWebGL2 &&
       (ext.has('EXT_color_buffer_float') || ext.has('EXT_color_buffer_half_float'));
@@ -207,10 +208,10 @@ export class Post {
     this.matComposite = mk(COMPOSITE_FRAG, {
       tScene: { value: null }, tBloom: { value: null }, uBloom: { value: 0.5 }, uTransparent: { value: 1 },
       uOpacity: { value: this.opacity }, uExposure: { value: 1 }, uResolution: { value: new THREE.Vector2() },
-      uHalo: { value: HALO.strength }, uFxaa: { value: 0 }, uGate: { value: new THREE.Vector2(...COVERAGE_GATE) },
+      uHalo: { value: HALO.strength }, uGate: { value: new THREE.Vector2(...COVERAGE_GATE) },
     });
     this.matComposite.premultipliedAlpha = true;
-    this.threshold = 0.72;
+    this.threshold = 0.78;
     this.knee = 0.3;
     this._build();
   }
@@ -253,8 +254,9 @@ export class Post {
     this.ups?.forEach((t) => t.dispose());
   }
 
-  /** @param {number} w device px @param {number} h device px */
-  setSize(w, h) {
+  /** @param {number} w device px @param {number} h device px @param {number} [pr] device px per CSS px */
+  setSize(w, h, pr) {
+    if (pr > 0) this.pixelRatio = pr;
     if (w === this.width && h === this.height && this.sceneRT) return;
     this.width = Math.max(1, w | 0);
     this.height = Math.max(1, h | 0);
@@ -316,12 +318,14 @@ export class Post {
         this._pass(this.matDown, this.mips[i]);
       }
       let coarse = this.mips[this.mips.length - 1];
+      const hm = haloMix(this.mips.length, this.pixelRatio, this.tier.bloomScale);
       for (let i = this.mips.length - 2; i >= 0; i--) {
         const u = this.matUp.uniforms;
         u.tSrc.value = coarse.texture;
         u.tBase.value = this.mips[i].texture;
         u.uTexel.value.set(1 / coarse.width, 1 / coarse.height);
         u.uRadius.value = 1.0;
+        u.uHaloMix.value = hm[i];
         this._pass(this.matUp, this.ups[i]);
         coarse = this.ups[i];
       }
@@ -333,12 +337,11 @@ export class Post {
     c.tScene.value = this.sceneRT.texture;
     // Bloom strength: options.bloom (0..2) x base, breathing a little with the avatar's energy.
     const levels = this.mips.length;
-    c.uBloom.value = bloomOn ? (this.bloom * 0.52 * (0.75 + 0.5 * this.energy)) / Math.max(1, levels * 0.6) : 0;
+    c.uBloom.value = bloomOn ? (this.bloom * BLOOM_GAIN * (0.75 + 0.5 * this.energy)) / Math.max(1, levels * 0.6) : 0;
     c.uTransparent.value = this.transparent ? 1 : 0;
     c.uOpacity.value = this.opacity;
     // (the halo rides on the bloom chain: none without it)
     c.uHalo.value = bloomOn ? HALO.strength : 0;
-    c.uFxaa.value = this.tier.fxaa ? 1 : 0;
     c.uResolution.value.set(this.width, this.height);
     r.setRenderTarget(null);
     r.setClearColor(0x000000, 0);

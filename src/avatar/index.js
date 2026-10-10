@@ -7,7 +7,7 @@ import { COVERAGE_GATE, Post } from './fx/post.js';
 import { Projector } from './fx/projector.js';
 import { withSlash } from './pack.js';
 import { mergePalette } from './palette.js';
-import { QUALITY, QualityGovernor, normalizeQuality } from './quality.js';
+import { DPR_STEP, QUALITY, QualityGovernor, normalizeQuality } from './quality.js';
 import { Stage, collectGLResources, forgetDisposeListeners } from './stage.js';
 
 /** @typedef {import('./types.js').AvatarOptions} AvatarOptions */
@@ -138,8 +138,12 @@ export async function createAvatar(canvas, options = {}) {
     const a = limitHeadMotion(director.update(dt, time, { settle }), motionLimits);
     for (const k in overrides) a[k] = overrides[k];
     if (opts.autoQuality && !settle && dt > 0) {
-      const next = governor.sample(performance.now() / 1000, stage.fps, stage.quality);
-      if (next) {
+      const next = governor.sample(performance.now() / 1000, stage.fps, stage.quality, { refreshHz: stage.refreshHz, dprStep: stage.canStepDpr() });
+      if (next === 'dpr') {
+        console.warn(`[avatar] sustained ${Math.round(stage.fps)} fps: lowering the resolution (${stage.quality}, pixel ratio x ${DPR_STEP})`);
+        stage.setDprScale(DPR_STEP);
+        governor.reset(performance.now() / 1000);
+      } else if (next) {
         console.warn(`[avatar] sustained ${Math.round(stage.fps)} fps: lowering quality ${stage.quality} -> ${next}`);
         applyQuality(next);
       }
@@ -159,8 +163,8 @@ export async function createAvatar(canvas, options = {}) {
       post?.render(stage.scene, stage.camera);
       while (frameWaiters.length) frameWaiters.shift()();
     },
-    onResize: (w, h) => {
-      post?.setSize(w, h);
+    onResize: (w, h, pr) => {
+      post?.setSize(w, h, pr);
       syncParticleView();
     },
     onContextLost: () => {
@@ -174,7 +178,7 @@ export async function createAvatar(canvas, options = {}) {
 
   const tier = () => QUALITY[stage.quality];
   post = new Post(stage.renderer, { tier: tier(), bloom: opts.bloom, transparent: opts.transparent, opacity: opts.opacity });
-  post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio));
+  post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio), stage.pixelRatio);
 
   const texLoader = new THREE.TextureLoader();
   /** @type {HeadContext} */
@@ -326,7 +330,7 @@ export async function createAvatar(canvas, options = {}) {
     if (normalizeQuality(q) === stage.quality) return;
     stage.setQuality(q);
     post.setTier(tier());
-    post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio));
+    post.setSize(Math.round(stage.width * stage.pixelRatio), Math.round(stage.height * stage.pixelRatio), stage.pixelRatio);
     ctx.quality = stage.quality;
     head.setOptions?.({ quality: stage.quality, tier: tier() });
     if (particlesOk) particles.setCount(baseCount());

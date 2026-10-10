@@ -11,11 +11,10 @@
 // backoff 2, 5, 10, 30, 60 s.
 
 import { EventEmitter } from 'node:events';
-import net from 'node:net';
 import nodeFs from 'node:fs';
 import path from 'node:path';
 
-import { HostError, resolveLanHost, validateHostSetting } from './host.js';
+import { HostError, resolveLanHost } from './host.js';
 import { OnvifClient } from './onvif-client.js';
 import { OnvifError } from './onvif-soap.js';
 import { PtzController, noCaps, PRIVACY_HINT } from './ptz.js';
@@ -30,26 +29,18 @@ import { SecurityEngine } from './security-engine.js';
 import { buildAvatarAlert } from './alerts.js';
 import { createCameraMcp, qualifiedToolName, SERVER_NAME } from './camera-mcp.js';
 import { createMcpHttpServer } from './mcp-http.js';
-import { rtspDescribe } from './rtsp-probe.js';
+import { connectionTest, HINTS, tcpCheck } from './connection-test.js';
 import { discover } from './discovery.js';
 import { validatePassword } from './credentials.js';
 import { validateWorkerMessage } from './validate.js';
+
+export { HINTS, tcpCheck };
 
 export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 10000, 30000, 60000]);
 const STATUS_MIN_MS = 250; // ≤ 4 status messages a second
 const TICK_MS = 500;
 const SNAPSHOT_STREAM_MS = 30_000;
 const DET_PER_SEC = 10;
-
-/** Hints for the troubleshooting cases (docs/TAPO.md §13). */
-export const HINTS = Object.freeze({
-  auth: 'Sign-in failed. Use the Camera Account from the Tapo app (camera › Settings › Advanced Settings › Camera Account), not your TP-Link login. The app does not retry by itself, so the camera does not lock it out.',
-  unreachable: 'The camera does not answer. Check its address (a DHCP reservation keeps it fixed), that it is switched on, and that the PC and the camera are on the same network (not guest Wi-Fi).',
-  clock: 'The camera clock is off; let the camera reach the internet (NTP) or restart it. The app compensates meanwhile.',
-  tapoCare: 'If nothing answers at all: Tapo Care cloud recording and a microSD card together switch RTSP/ONVIF off; turn one of them off.',
-  busy: 'The camera allows two live viewers at a time (the Tapo app on a phone counts). Close other viewers.',
-  events: 'Turn on motion and person detection in the Tapo app for the camera\'s own events; the app still detects on its own.',
-});
 
 /** @param {number} at */
 const iso = (at) => new Date(at).toISOString();
@@ -61,7 +52,7 @@ const iso = (at) => new Date(at).toISOString();
  * @property {string} [go2rtcBinary]
  * @property {(o: any) => any} [createSidecar]
  * @property {(o: any) => any} [createRelay]
- * @property {typeof rtspDescribe} [rtspDescribe]
+ * @property {typeof import('./rtsp-probe.js').rtspDescribe} [rtspDescribe]
  * @property {typeof discover} [discover]
  * @property {any} [MessageChannelMain]
  * @property {{ notify: (o: any) => boolean }} [alerts]
@@ -70,16 +61,6 @@ const iso = (at) => new Date(at).toISOString();
  * @property {{ wasmBase: string, modelUrl: string }} [assets]
  * @property {(o: { host: string, port: number, timeoutMs: number }) => Promise<boolean>} [tcpCheck]
  */
-
-/** Can we open a TCP connection? @param {{ host: string, port: number, timeoutMs: number }} o */
-export function tcpCheck(o) {
-  return new Promise((resolve) => {
-    const s = net.connect({ host: o.host, port: o.port });
-    const t = setTimeout(() => { s.destroy(); resolve(false); }, o.timeoutMs);
-    s.once('connect', () => { clearTimeout(t); s.destroy(); resolve(true); });
-    s.once('error', () => { clearTimeout(t); resolve(false); });
-  });
-}
 
 /** What a connection depends on. @param {any} t */
 const connKey = (t) => JSON.stringify([t.host, t.onvifPort, t.username]);
@@ -988,108 +969,18 @@ export class TapoService extends EventEmitter {
    */
   async test(ov = {}) {
     const t = this._tapo();
-    const host = ov.host ?? t.host;
-    const onvifPort = ov.onvifPort ?? t.onvifPort;
-    const rtspPort = ov.rtspPort ?? t.rtspPort;
-    const username = ov.username ?? t.username;
-    /** @type {any} */
-    const report = { ok: false, steps: [] };
-    /** @param {string} id @param {string} label @param {boolean|null} ok @param {string} detail @param {string} [hint] */
-    const step = (id, label, ok, detail, hint) => {
-      report.steps.push({ id, label, ok, detail, ...(hint ? { hint } : {}) });
-      return ok;
-    };
-    const skipRest = (/** @type {string[]} */ ids) => {
-      const labels = { tcp2020: 'ONVIF port', clock: 'Camera clock', auth: 'Sign-in', services: 'Services', profiles: 'Video profiles', ptz: 'Pan and tilt', events: 'Camera events', rtsp: 'Video stream' };
-      for (const id of ids) step(id, /** @type {any} */ (labels)[id], null, 'Skipped.');
-      return report;
-    };
-    const all = ['tcp2020', 'clock', 'auth', 'services', 'profiles', 'ptz', 'events', 'rtsp'];
-    // host
-    const v = validateHostSetting(host);
-    let ip;
-    if (!v.ok || !v.value) {
-      step('host', 'Camera address', false, v.ok ? 'No address entered.' : `"${String(host).slice(0, 60)}" ${v.reason}.`, 'Use the IP address shown in the Tapo app (camera › Settings › Device Info) or your router.');
-      return skipRest(all);
-    }
-    try {
-      ip = (await (this._deps.resolveHost || resolveLanHost)(v.value, { allowLoopback: this._allowLoopback })).ip;
-      step('host', 'Camera address', true, ip === v.value ? `${ip} is on your home network.` : `${v.value} is ${ip}.`);
-    } catch (err) {
-      step('host', 'Camera address', false, /** @type {Error} */ (err).message, 'Use the camera\'s IP address from the Tapo app or your router.');
-      return skipRest(all);
-    }
-    // tcp
-    const tcp = await (this._deps.tcpCheck || tcpCheck)({ host: ip, port: onvifPort, timeoutMs: 3000 });
-    if (!step('tcp2020', 'ONVIF port', tcp, tcp ? `Port ${onvifPort} answers.` : `Nothing answers on port ${onvifPort}.`, tcp ? undefined : `${HINTS.unreachable} ${HINTS.tapoCare}`)) return skipRest(all.slice(1));
-    const password = ov.password ?? (await this._cred.getPassword({ host: v.value }));
-    if (!username || !password) {
-      step('clock', 'Camera clock', null, 'Skipped.');
-      step('auth', 'Sign-in', false, !username ? 'Enter the Camera Account user name.' : 'Enter the Camera Account password.');
-      return skipRest(all.slice(3));
-    }
-    const client = (this._deps.createClient || ((/** @type {any} */ x) => new OnvifClient(x)))({ host: ip, port: onvifPort, username, getPassword: async () => password, log: this._log, now: this._now });
-    try {
-      // clock
-      try {
-        await client.syncClock();
-        const c = client.clock;
-        report.clock = { offsetSec: Math.round((c?.offsetMs || 0) / 1000), ntp: c?.ntp ?? null, warn: !!c?.warn };
-        step('clock', 'Camera clock', true, c?.warn ? `The camera clock is ${report.clock.offsetSec} s off (compensated).` : 'In time.', c?.warn ? HINTS.clock : undefined);
-      } catch (err) {
-        step('clock', 'Camera clock', false, `The camera did not tell its time (${/** @type {Error} */ (err).message}).`, HINTS.unreachable);
-        return skipRest(all.slice(2));
-      }
-      // auth + services + profiles (connect = clock, device info, capabilities, profiles)
-      try {
-        const info = await client.getDeviceInformation();
-        // never the serial number (it identifies the household's camera, §8.13)
-        const d = { manufacturer: info.manufacturer, model: info.model, firmware: info.firmware, hardwareId: info.hardwareId };
-        report.device = d;
-        const note = /C211/i.test(d.model) ? '' : ` (this app is made for the Tapo C211; other ONVIF cameras may work)`;
-        step('auth', 'Sign-in', true, `Signed in to ${d.manufacturer} ${d.model}, firmware ${d.firmware}${note}.`);
-      } catch (err) {
-        const auth = err instanceof OnvifError && err.kind === 'auth';
-        step('auth', 'Sign-in', false, auth ? 'The camera refused the user name or password.' : `The camera did not answer the sign-in (${/** @type {Error} */ (err).message}).`, auth ? HINTS.auth : HINTS.unreachable);
-        return skipRest(all.slice(3));
-      }
-      try {
-        await client.connect();
-        step('services', 'Services', true, `Media${client.xaddr.ptz ? ', pan/tilt' : ''}${client.xaddr.events ? ', events' : ''}.`);
-        report.profiles = client.profiles.map((p) => ({ token: p.token, name: p.name, encoding: p.encoding, width: p.width, height: p.height, fps: p.fps }));
-        const main = client.profiles[0];
-        step('profiles', 'Video profiles', client.profiles.length > 0, main ? client.profiles.map((p) => `${p.encoding} ${p.width}×${p.height}`).join(', ') : 'No video profile.', main && main.encoding === 'H265' ? 'The main stream is H.265; if this PC cannot decode it, use stream2 or a lower video quality in the Tapo app.' : undefined);
-      } catch (err) {
-        step('services', 'Services', false, /** @type {Error} */ (err).message);
-        return skipRest(all.slice(4));
-      }
-      // ptz (no movement)
-      const ptz = new PtzController({ client, getSettings: () => this._tapo(), log: this._log, now: this._now });
-      const caps = await ptz.probe().catch(() => noCaps());
-      report.ptz = caps;
-      step('ptz', 'Pan and tilt', caps.available, caps.available ? `Works (${caps.mode} moves${caps.canStatus ? ', reports its position' : ''}).` : ptz.privacySuspected ? PRIVACY_HINT : 'Not offered over ONVIF by this camera or firmware.', caps.available ? undefined : ptz.privacySuspected ? undefined : 'Send the probe report (npm run probe:tapo) so support for your firmware can be checked.');
-      await ptz.dispose().catch(() => {});
-      // events
-      try {
-        const topics = client.xaddr.events ? await client.getEventProperties() : [];
-        report.topics = topics;
-        const motion = topics.some((x) => /Motion/i.test(x));
-        const people = topics.some((x) => /People|Person/i.test(x));
-        step('events', 'Camera events', client.xaddr.events ? true : null, client.xaddr.events ? (motion && people ? 'Motion and person events.' : `${topics.length} topics; ${motion ? '' : 'no motion '}${people ? '' : 'no person '}events.`) : 'Not offered.', motion && people ? undefined : HINTS.events);
-      } catch (err) {
-        step('events', 'Camera events', false, /** @type {Error} */ (err).message, HINTS.events);
-      }
-      // rtsp
-      const describe = this._deps.rtspDescribe || rtspDescribe;
-      const s1 = await describe({ ip, port: rtspPort, path: '/stream1', username, password });
-      const s2 = s1.status === 401 ? null : await describe({ ip, port: rtspPort, path: '/stream2', username, password });
-      report.rtsp = { codecs: s1.ok ? s1.codecs : s2?.codecs || [] };
-      const okRtsp = s1.ok || !!s2?.ok;
-      step('rtsp', 'Video stream', okRtsp, okRtsp ? `stream1: ${s1.ok ? s1.codecs.join(', ') : s1.error}; stream2: ${s2?.ok ? s2.codecs.join(', ') : s2?.error || 'skipped'}.` : s1.error || 'No video.', okRtsp ? undefined : s1.status === 401 ? HINTS.auth : s1.status === 453 ? HINTS.busy : `${HINTS.unreachable} ${HINTS.tapoCare}`);
-      report.ok = report.steps.every((/** @type {any} */ x) => x.ok !== false);
-    } finally {
-      client.close();
-    }
+    const report = await connectionTest({
+      host: ov.host ?? t.host,
+      onvifPort: ov.onvifPort ?? t.onvifPort,
+      rtspPort: ov.rtspPort ?? t.rtspPort,
+      username: ov.username ?? t.username,
+      getPassword: async (host) => ov.password ?? (await this._cred.getPassword({ host })),
+      allowLoopback: this._allowLoopback,
+      ptzSettings: () => this._tapo(),
+      log: this._log,
+      now: this._now,
+      deps: this._deps,
+    });
     // a working sign-in fixes a failed connection (this is the Retry)
     if (report.steps.find((/** @type {any} */ x) => x.id === 'auth')?.ok && !ov.password && ['auth-failed', 'unreachable', 'error'].includes(this._conn.state)) {
       this._connect('test passed').catch(() => {});

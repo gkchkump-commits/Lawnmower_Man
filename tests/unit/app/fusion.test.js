@@ -87,6 +87,18 @@ describe('landmarks', () => {
     expect(warpTime(A, 0.2)).toBeCloseTo(0.25, 9);
     expect(warpTime(A, -0.5)).toBeCloseTo(-0.5, 9);
   });
+
+  it('a phrase that starts earlier than the timeline says does not drag the phrase before the pause', () => {
+    // "Bob, pop": the first phrase's sound matches its timeline; the second starts 60 ms early
+    const e2 = (t) => ((t >= 0.1 && t < 0.35) || (t >= 0.44 && t < 0.8) ? -20 : -80);
+    const ac2 = track(1, e2);
+    const t3 = [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.3, viseme: 'aa' }, { start: 0.3, end: 0.35, viseme: 'PP' },
+      { start: 0.35, end: 0.5, viseme: 'sil' }, { start: 0.5, end: 0.8, viseme: 'aa' }, { start: 0.8, end: 1, viseme: 'sil' }];
+    const { tl: out } = alignTimeline(t3, ac2);
+    expect(out[4].start).toBeCloseTo(0.43, 2);                 // the second phrase moves to its sound
+    expect(Math.abs(out[2].start - 0.3)).toBeLessThan(0.008);  // the first one's final b stays (it moved ~40 ms)
+    expect(Math.abs(out[3].start - 0.35)).toBeLessThan(0.005);
+  });
 });
 
 describe('vowel amounts', () => {

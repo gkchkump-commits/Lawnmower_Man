@@ -28,6 +28,8 @@ const VOCALIC = new Set(['aa', 'E', 'I', 'O', 'U', 'RR']);
 /** The jaw a vowel category allows (before stress): close U / I, mid O / E (ɛ e ə ɜ), open aa. */
 export const JAW_RANGE = Object.freeze({ U: [0.04, 0.3], I: [0.04, 0.36], O: [0.2, 0.75], E: [0.12, 0.62], aa: [0.3, 0.95] });
 
+/** Weight of the pin at a phrase's end (a pause's start): below every acoustic landmark. */
+export const PHRASE_END_PIN = 0.5;
 /** How far (s) a landmark may move a timeline boundary, and how far around it a landmark is looked for. */
 export const MAX_SHIFT = 0.09;
 /** A phrase's first sound starts this long before its acoustic onset (the gesture lands on the sound). */
@@ -149,7 +151,12 @@ export function landmarks(tl, ac) {
   const raw = [];
   for (let i = 0; i < tl.length; i++) {
     const s = tl[i];
-    if (s.viseme === 'sil') continue;
+    if (s.viseme === 'sil') {
+      // a pause pins the end of the phrase before it (weakly): the next phrase's onset moves its
+      // own start, and the pause absorbs it, instead of dragging the whole phrase before it along
+      if (i > 0 && tl[i - 1].viseme !== 'sil' && s.end - s.start >= 0.1) raw.push([s.start, s.start, PHRASE_END_PIN]);
+      continue;
+    }
     const prev = tl[i - 1];
     const phraseStart = !prev || (prev.viseme === 'sil' && prev.end - prev.start >= 0.1);
     if (phraseStart) {

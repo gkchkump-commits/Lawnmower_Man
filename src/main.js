@@ -30,6 +30,10 @@ import { copyText } from './ui/transcript.js';
 import { CameraFeature } from './vision/index.js';
 import { GazeArbiter } from './vision/gaze.js';
 import { CameraUi, cameraInfoLines } from './vision/ui.js';
+import { TapoAvatarLink } from './tapo/avatar-link.js';
+import { ArmedPill, showDescribeConsent } from './tapo/avatar-ui.js';
+import { hasDescribeConsent } from './tapo/consent.js';
+import { drawerStatusLine } from './tapo/status.js';
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -233,6 +237,7 @@ async function boot() {
     if (!settings.avatar.followCursor) gaze.releaseCursor();
     camera?.applySettings(settings);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
+    if (JSON.stringify(prev.tapo) !== JSON.stringify(settings.tapo)) refreshTapoInfo();
     if (prev.voice.systemVoice !== settings.voice.systemVoice) {
       webSpeech.setPreferred(settings.voice.systemVoice);
       drawer.setSystemVoiceOptions(webSpeech.allVoices());
@@ -255,6 +260,26 @@ async function boot() {
 
   /** @param {object} patch @param {string} path @param {any} value */
   async function saveSettings(patch, path, value) {
+    // ---- Home camera: arming goes through main's arm (the exit delay applies); Claude
+    // describing alerts sends pictures of the home to Anthropic, so it asks first
+    if (path === 'security.armed' && bridge.tapo) {
+      try {
+        await bridge.tapo.arm(!!value);
+        if (value) view.toast('Arming the camera…', 'info');
+      } catch (err) {
+        view.toast(`Could not ${value ? 'arm' : 'disarm'} the camera: ${err?.message || err}`, 'error');
+      }
+      refreshTapoInfo();
+      return;
+    }
+    if (path === 'security.describe' && value === true && !hasDescribeConsent()) {
+      drawer.close();
+      const ok = await showDescribeConsent($('cards'));
+      if (!ok) {
+        drawer.update(settings);
+        return;
+      }
+    }
     try {
       const result = await bridge.settings.set(patch);
       if (!result || typeof result !== 'object') return;
@@ -282,6 +307,13 @@ async function boot() {
     } else if (a === 'resetPosition') {
       if (typeof bridge.window.resetPosition === 'function') bridge.window.resetPosition();
       else view.toast('Restart Lawnmower Man to reset the position.', 'info');
+    } else if (a === 'openTapo' && bridge.tapo) {
+      bridge.tapo.openWindow().catch((err) => view.toast(`Could not open the camera window: ${err?.message || err}`, 'error'));
+      drawer.close();
+    } else if (a === 'openTapoClips' && bridge.tapo) {
+      bridge.tapo.openClips().then((r) => {
+        if (r && r.ok === false) view.toast(r.error || 'Could not open the clips folder.', 'warn');
+      }, (err) => view.toast(`Could not open the clips folder: ${err?.message || err}`, 'warn'));
     }
   }
 
@@ -512,9 +544,55 @@ async function boot() {
   }
   navigator.mediaDevices?.addEventListener?.('devicechange', () => camera?.refreshDevices());
 
+  // ---------------------------------------------------------------- Home camera (src/tapo/)
+  // alerts (wake, look toward the camera window, say it), the ARMED pill, the drawer section,
+  // and the local commands ("camera left", "arm the camera") that need no Claude turn
+  /** @type {TapoAvatarLink|null} */
+  let tapoLink = null;
+  /** @param {any} [st] */
+  function refreshTapoInfo(st = tapoLink?.status) {
+    if (!bridge.tapo) return;
+    drawer.setInfo('tapoInfo', [h('div', null, drawerStatusLine(st))]);
+    const on = !!settings.tapo.enabled;
+    for (const p of ['security.armed', 'security.announce', 'security.describe']) {
+      const c = drawer.controls.get(p);
+      if (c) c.row.hidden = !on;
+    }
+    drawer.setAction('openTapo', { hidden: !on });
+    drawer.setAction('openTapoClips', { hidden: !on });
+    // the segmented control shows main's state (arming counts as armed)
+    const armed = drawer.controls.get('security.armed');
+    if (armed && st) armed.set(!!(st.security?.armed || st.security?.arming));
+  }
+  if (bridge.tapo) {
+    const pill = new ArmedPill(view.status.root, { onClick: () => bridge.tapo.openWindow().catch(() => {}) });
+    tapoLink = new TapoAvatarLink({
+      bridge,
+      controller,
+      gaze,
+      getAvatar: () => avatarHost.avatar,
+      getSettings: () => settings,
+      getStage: () => $('stage').getBoundingClientRect(),
+      view: {
+        toast: (msg, level) => view.toast(msg, level),
+        setStatus: (st) => {
+          pill.update(st);
+          refreshTapoInfo(st);
+        },
+      },
+    });
+    controller.setCommandInterceptor((text, o) => tapoLink.intercept(text, o));
+    app.tapo = tapoLink;
+  } else {
+    // an older main without the Home camera: no section for it
+    /** @type {HTMLElement|null} */ (document.querySelector('[data-section="tapo"]'))?.setAttribute('hidden', '');
+  }
+
   // ---------------------------------------------------------------- start
   await controller.start();
   camera.applySettings(settings);
+  tapoLink?.start();
+  refreshTapoInfo();
   webSpeech.setPreferred(settings.voice.systemVoice);
   webSpeech.onVoicesChanged(() => {
     drawer.setSystemVoiceOptions(webSpeech.allVoices());

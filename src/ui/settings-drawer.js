@@ -100,6 +100,22 @@ export const SECTIONS = [
       { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free mode listens only while you look at the screen' },
     ],
   },
+  // ---- Home camera (a Tapo pan/tilt camera as home security; src/tapo/, docs/TAPO.md) --------
+  {
+    id: 'tapo',
+    title: 'Home camera',
+    fields: [
+      { type: 'info', id: 'tapoInfo' },
+      { type: 'toggle', path: 'tapo.enabled', label: 'Home camera', hint: 'A Tapo pan/tilt camera on your network' },
+      // armed goes through bridge.tapo.arm (src/main.js), so the exit delay applies
+      { type: 'segmented', path: 'security.armed', label: 'Security', options: [[false, 'Disarmed'], [true, 'Armed']] },
+      { type: 'toggle', path: 'security.announce', label: 'Say when someone is there', hint: '“Someone is at the camera.”' },
+      { type: 'toggle', path: 'security.describe', label: 'Claude describes alerts', hint: 'Sends the alert picture to Claude for one sentence about it (asks first)' },
+      { type: 'button', label: 'Open camera window…', action: 'openTapo' },
+      { type: 'button', label: 'Open clips folder', action: 'openTapoClips', variant: 'ghost' },
+    ],
+  },
+  // ---- end Home camera -----------------------------------------------------------------------
   {
     id: 'window',
     title: 'Window',

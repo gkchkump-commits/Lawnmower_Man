@@ -339,6 +339,176 @@ Kokoro clips), before -> after:
 
 The mouth's timing against the audio is unchanged (m / b / p closures 35 ms ahead of the sound).
 
+## Behaviour
+
+On top of the motion, `src/avatar/behavior.js` gives the avatar a person's spontaneous repertoire
+(the director calls it once a frame through one hook and adds what it returns: head offsets, a
+posture, a gaze target of its own, face channels outside speech).
+
+* **Scheduling.** Four tracks (gaze, head, face, breath), one gesture at a time on each. A free
+  track waits an exponential (random, memoryless) time drawn from the total rate of the gestures
+  that fit the situation now (the state, typing, the camera's view of the user, boredom), then
+  starts one of them picked by its rate. Each kind has a refractory period (a pick inside it does
+  not happen), and every instance draws its own durations, amplitudes and directions; a change of
+  situation draws the pending waits again, the first one in a new state half as long. Start times
+  are continuous (not frames) and every track, the posture, the activity state and the user's
+  events draw from their own random stream: 60 and 144 Hz show the same gestures at the same
+  moments for minutes on end. Nothing runs on a clock.
+* **Calm and active stretches.** People move in bursts and are still in between: a hidden slow
+  activity state alternates calm bouts (log-normal, median 40 s) with active ones (median 25 s)
+  and scales the rates (x 0.17 calm, x 2.3 active in idle, the square root of that while
+  listening or thinking; normalised to the kinds' mean). The gestures come in clusters (the Fano
+  factor of their onsets in 30 s windows is 1.2-2.5 at the default liveliness; a regular process
+  is < 1) with a calm half minute in most two-minute windows.
+* **The user comes first.** The cursor (`lookAt(..., 'cursor')`), the camera's face, the user
+  coming back into view or looking back cut the avatar's own looks short at once: the eyes are on
+  the user within ~0.1 s, the head's share of the look goes back in 0.2-0.35 s, and no new look of
+  its own starts for 1.2-2 s.
+* **Kinematics.** Minimum-jerk envelopes and pulses that start and end at rest; a look into the
+  room is a saccade of the eyes (the eye controller) with the head following in minimum-jerk steps
+  (30-50 % of it, at least what keeps the eyes within 13 deg of straight ahead in the head;
+  0.3-0.8 s, starting a moment after the eyes; the eyes counter-rotate, so the gaze holds still
+  while the head arrives). Held tilts settle back a little and wander; the posture drifts through
+  slow critically damped springs toward targets that change every 4-45 s (log-normal; longer in a
+  calm bout) and wanders 0.2-0.3 deg around them. A gesture cut short fades out, so nothing steps.
+* **Repertoire** (rates per minute at the default liveliness, before the activity scaling):
+
+| Situation | Gestures |
+|---|---|
+| idle | looks around the room (4.5: 7-17 deg, the head along, sometimes scanning two or three points, then back), head tilts (2), posture shifts, lip presses (0.6) and purses, a swallow (0.35), a deep breath (0.45), a slow neck roll (0.15); brow flashes and smiles mostly for someone: 0.25 each at nobody, 1.2 and 1.0 while the camera sees you looking |
+| the user back after a quiet minute (the cursor, typing) | a brow flash (half the time) and / or a smile (a third) 0.2-0.5 s later |
+| idle for minutes, or the camera sees nobody | bored: longer looks away, slumping, sighs, now and then a yawn (a deep inhale with the brows up, a slow gape with no rounding of the lips while the eyes squeeze half shut and the head tips back 4-6 deg, a quicker close; fewer as one bored stretch goes on: x 0.35 per yawn, never within 4 min) |
+| the user types | leans in, glances down at the chat now and then (16) |
+| listening | leans in with a slight tilt, a nod at the pauses of the user's voice (half of them: a quarter of a second into a pause after 1.2 s or more of voice, from the mic meter's level), a few more at random (2), a brow "mm-hm" on 3 nods in 10, attentive tilts, a few brow flashes |
+| thinking | the eyes settle on another spot of the averted region now and then (3, held ~1.4 s; the director's own small shifts pause meanwhile), a "hmm" (3: the head tilts, lips pressed, a squint), pressed or pursed lips, squints |
+| speaking | the prosody leads: no gestures, only a slower posture drift, and an energy wave through the hologram on each emphasis |
+| the camera sees you | engaged: fewer look-arounds (the eye contact of [CAMERA.md](CAMERA.md) leads), the head mirrors your tilt a little (28 %, a few hundred ms behind); when you look back at it after 3 s or more away, now and then (p 0.6 x smoothstep(3, 20 s) of the time away, at most once a minute) a smile with a brow flash, once its eyes are back on you |
+
+* **Liveliness.** *Settings → Avatar → Liveliness* (`avatar.liveliness`, 0..2, default 1) scales
+  the rates and (0.55 + 0.45 x liveliness) the sizes; 0 turns the behaviour off (so does
+  `idleMotion` 0, and settled renders never have it: the golden poses are unchanged). It is a
+  separate axis from *Expressiveness*, which scales the motion that comes with speech.
+* **Inputs.** `avatar.setUser({ typing })` from the chat box (`src/main.js`), `{ present, looking,
+  roll }` from the camera (`src/vision/index.js`; `roll` is the head tilt in the selfie view),
+  `{ voice }` from the controller's tick while the mic listens (the meter's level, 0..1); a
+  followed cursor counts as the user being around (no boredom).
+* New AnimState channels: `lean`, `shiftX` (the posture: the heads scale the head about its pivot
+  by up to 3 % and shift it by 2 % of the face height), `squint` (both lids narrow, the lower one
+  rises; at 1 the eyes are about half shut), `pulse`. All 0 at rest.
+
+Measured on deterministic 60 Hz traces of the director (5 seeds each: idle 600 s with the user
+around, idle 600 s left alone, listening and thinking 180 s, typing 120 s, the camera 240 s with
+the user looking away for 1.5-6.5 s every 6-26 s), before (87bb500, no behaviour layer) -> the
+first behaviour layer -> now:
+
+| | before | first layer | now |
+|---|---|---|---|
+| gestures per minute (idle / listening without a voice / thinking / typing / camera) | 0 | 8.2-9.6 / 9-11 / 11-14 / 8-13 / 5-7 | 5.3-6.6 / 1.1-4.1 / 5-11 / 5.5-11.5 / 1.3-3.8 |
+| idle: Fano factor of the gesture onsets in 30 s windows (< 1: more regular than random) | - | 0.31-0.56 | 1.57-2.13 |
+| idle: 2-minute windows with a calm half minute (no gesture starting) | - | 0-25 % | 62-100 % |
+| idle: longest still stretch of the head per 10 min | 28-57 s | 11-14 s | 16-23 s (left alone: 15-43 s) |
+| idle: time looking more than 5 deg away from the user | 1 % | 10-13 % | 7-10 % |
+| idle: brow raises / smiles per minute (nobody watching) | 0 / 0 | 0.8-1.5 / 0.4-1.1 | 0.2-0.5 / 0.2-0.4 |
+| idle: eyes pinned at their range (frames with eye-in-head at the clamp) | 0 % | 0.3-0.6 % | 0.02-0.19 % |
+| the cursor appears during a look into the room: eyes on it (median / p90 / max, 40 trials) | 0.22 / 0.22 / 0.23 s (no such looks) | 0.22 / 1.13 / 3.70 s | 0.07 / 0.08 / 0.08 s |
+| the user comes back (camera) during a bored look-away: eyes on them (max), acknowledged while still looking away | - | 12.2 s, 40 of 40 | 0.07 s, 0 of 28 |
+| camera: acknowledgments per minute, brow raises / smiles per minute | 0, 0 / 0 | 2.5 (every 22 s, CV 0.24), 3-4.5 / 2.5-4.3 | 0.05, 0-1 / 0-0.75 |
+| listening: brow raises per minute | 0 | 6.3-7.3 | 0.3-1.7 |
+| thinking: saccades per minute, median fixation | 17-22, 1.9-3.1 s | 31-37, 1.05-1.23 s | 19-24, 1.9-2.1 s |
+| bored: yawns per 10 min (5 x 10 min left alone), interval CV | 0 | 2.8, 0.17 (a clock at its 110 s refractory) | 1.8, at least 240 s apart and rarer as the boredom goes on |
+| 60 vs 144 Hz, 240 s (idle seeds 1-3, listening and thinking 1-2): the same gestures | - | 5 of 7 runs | 7 of 7 (start times within 0.03 s) |
+| head yaw / roll rms (idle with the user around) | 1.0 / 0.25 deg | 2.0-2.4 / 1.6-1.9 deg | 1.9-2.3 / 1.4-1.8 deg |
+| blinks per minute (idle) | 16-18 | 18-20 | 17-20 |
+
+(The CPU cost of the behaviour layer is ~0.03-0.05 ms per frame.)
+
+In the harness: `/dev/avatar.html?sim=1&state=thinking&t=20` steps a live run to 20 s
+(`window.__seek(t)`; `window.__avatar.setUser(...)` in between), `life=<0..2>` sets the
+liveliness.
+
+## The hologram: depth, light, glow
+
+* **Light that turns with the head** (relief): the relief is a height field, so it has real surface
+  normals; a key light from the upper left front lights it relative to the rest pose (whose light
+  is baked into the plate): turning toward the light brightens that side, away from it darkens it,
+  a tight cyan-white glint slides over the brow, the nose and the cheekbones, and the edges
+  turning away catch more cyan rim light (never whitened: over a white desktop a white edge melts
+  into it; and only on the solid face and cranium, not on the fringe, the ears or the glow around
+  them, where a rim reads as a haze around the head). At rest the key light changes nothing.
+* **Crisper and brighter:** the gold lines and the eyes are sharpened (an unsharp mask against a
+  coarser mip level), the rest of the plate barely and the fine wire grid not at all (its
+  sub-pixel lines would crawl and sparkle as the head moves); the eyes' bright parts and the lit
+  gold lines glow, the eyes through a soft knee that keeps their hue (the iris centre glows amber,
+  never white-hot, and its fibres survive); the eyes' glow breathes and rises a little with the
+  voice; faint scan lines (a 3 CSS px pitch at any display scale) drift slowly; an emphasis sends
+  an energy front out from the brow over the lines and the grid (AnimState `pulse`).
+* **Depth:** the aura turns and shifts with the head about its pivot, a few frames behind it
+  (springs), each layer at its own depth: the face, the halo, the ribbons and the far field slide
+  against each other as the head moves (parallax).
+* **A clear silhouette over any desktop:** the relief's face and cranium are glass that occludes
+  the desktop (`opacity` 0.94; its baked occlusion mask, without the old glow gate), so a busy
+  desktop no longer shows through the forehead; the bloom chain also carries the scene's coverage,
+  and the final pass lays a thin dark outline just outside the head with it (up to 30 %, gone
+  within ~8 CSS px; its base mip level is picked from the pixel ratio and the bloom scale, so it is
+  as wide at any display scale and on every tier), which separates it from a bright or busy
+  desktop and is invisible over a dark one. The ears, the fringe and the dissolving neck stay pure
+  light.
+* **Output:** *High* renders at the display's resolution up to 2x with 4x MSAA, *Medium* up to
+  1.5x with 2x MSAA, *Low* at 1x without either (the relief's edges are soft in its own texture;
+  FXAA, tried, smeared the fine grid and the irises and cost a fifth more); the plates are
+  mipmapped and anisotropically filtered.
+* **Automatic quality** (`QualityGovernor`, src/avatar/quality.js): when the frame rate stays
+  below ~50 fps for 3 s (0.85 x the refresh rate on a slower display, never below 42.5 fps; the
+  refresh is the frame loop's shortest frame interval lately), it first renders that tier at
+  0.75 x its pixel ratio cap (when that lowers it), then steps down to the next tier, one step at a
+  time with a warm-up after each. (It used to act only below 24 fps, so 25-50 fps on High was
+  never corrected.)
+* **Projector light** (optional, *Settings → Avatar → Projector light*, `avatar.projector`): a small
+  bright emitter at the bottom of the view and a faint cone of light widening from it into the
+  neck (brighter edges, slow beams, scan lines running up), fading out before the face; it
+  brightens with the avatar's energy and dims in sleep. Off by default.
+
+![The hologram before (top) and after (bottom) over a dark, a bright and a busy desktop](screenshots/pop_backdrops.jpg)
+
+Measured on stills of the harness (392 x 584 CSS px, SwiftShader, fixedTime 1) over black and
+the `bg=dark|bright|busy` desktops, before (87bb500) -> the first pass -> now:
+
+| | before | first pass | now |
+|---|---|---|---|
+| a busy / bright desktop showing through the face (mean difference to the same frame over black, 0-255) | 18.2 / 28.2 | 8.8 / 13.5 | 8.9 / 13.5 |
+| the edge's luminance step over a bright desktop, at rest / head turned 0.3 rad | 0.337 / 0.337 | 0.302 / 0.210 | 0.350 / 0.303 |
+| ... over a busy / a dark desktop | 0.165 / 0.134 | 0.161 / 0.138 | 0.164 / 0.146 |
+| light 1-12 px outside the head over black, relative to the face (glow spill) | 0.246 | 0.317 | 0.242 |
+| the dark outline's alpha 4-6 / 8-10 / 24-26 CSS px out (DPR 1; DPR 2 within 0.01) | 0.12 / 0.10 / 0.04 | 0.30 / 0.23 / 0.09 | 0.18 / 0.10 / 0.04 |
+| crispness inside the face (mean abs. Laplacian), High / Low | 0.167 / 0.168 | 0.248 / 0.123 | 0.191 / 0.177 |
+| grid crawl: frame-to-frame high-pass change on a 0.003 rad yaw sweep, DPR 1 / 2 (relative to the detail) | 0.027 / 0.035 (0.68 / 0.77) | 0.040 / 0.049 (0.70 / 0.83) | 0.031 / 0.039 (0.69 / 0.78) |
+| eye pixels above L 0.98 (22 px around the pupils), rest / speaking (speech 0.85, energy 0.9) | 0.2 % / 39 % | 16 % / 48 % | 0.3 % / 30 % |
+| idle shimmer: frame-to-frame change in the face at liveliness 0 (0-255) | 2.97 | 4.21 | 3.33 |
+
+Render cost, SwiftShader (software rendering on the CPU: a proxy for the GPU's fragment work, and a
+noisy one), ms per frame of the idle avatar, the three builds interleaved block by block (median
+of 6 blocks of 15 frames; DPR 3 renders at High's cap):
+
+| Tier, DPR | before | first pass | now |
+|---|---|---|---|
+| High, 1 (MSAA 4x) | 197 | 283 | 238 |
+| High, 2 (784 x 1168) | 575 | 691 | 672 |
+| High, 3 | 544 (784 x 1168) | 1289 (1176 x 1752) | 647 (784 x 1168) |
+| Medium, 1 (MSAA 2x) | 184 | 225 | 226 |
+| Low, 1 | 84-86 | 110-124 | 88 |
+
+The projector light adds nothing measurable; the draw calls are unchanged (13 / 11 / 9). The CPU
+side of a frame (director, behaviour, particles' springs) is 0.04-0.07 ms. Not measured on real
+GPUs here: on a desktop GPU this is far inside the 16.7 ms frame; a weak integrated GPU gets the
+automatic quality's steps (above) and Low, which costs what it did before the light.
+
+The rest pose moves a little from the reference frame by design (the same pose and shape, but
+brighter lines and eyes, the rim, the sharpening): `compare.py score` against
+`preview/neutral.jpg` (masked, 784 x 1168), before -> the first pass -> now: SSIM 0.517 -> 0.465
+-> 0.507, SSIM (2 px blur) 0.925 -> 0.896 -> 0.917, PSNR 21.3 -> 19.6 -> 20.6 dB, MAE 14.0 -> 18.0
+-> 15.0. The settled poses themselves (fixedTime and settle renders, the director tests) are
+unchanged: the behaviour layer is off in them.
+
 ## Using it
 
 | Input | Action |
@@ -392,7 +562,11 @@ permission card ("run", "tool"), a failure ("simulate error"), otherwise an echo
   pinkNoise's unit rms), the director's motion (`director-motion.test.js`: continuous velocity, the
   same motion at 60 and 144 Hz, blink statistics, thinking episodes, nods and nods that grow, the
   head going along with a cursor sweep and flick but not with a glance, the idle sway's size,
-  eye contact as speech starts, the settled poses unchanged), the relief head's mouth-mesh
+  eye contact as speech starts, the settled poses unchanged), the behaviour layer
+  (`behavior.test.js`: the idle repertoire, no clock and no autocorrelation peak over minutes,
+  refractory periods, smooth heads at 60 and 144 Hz, boredom, listening / thinking / typing /
+  speaking / camera, liveliness), the hologram's light and depth (`pop.test.js`: the relief's
+  normals, the aura turning with the head, tiers, the projector), the relief head's mouth-mesh
   refinement and iris layer (`relief-refine.test.js`, `relief-iris.test.js`: the open map, the
   fill along an arched lid) and the rigs. `tests/unit/app/lipsync-real.test.js` keeps every
   m / b / p of the real Kokoro fixture sealed on the relief rig for >= 50 ms, the chin with it.

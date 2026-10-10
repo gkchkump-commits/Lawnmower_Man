@@ -208,8 +208,9 @@ export class EyeController {
     this.started.push(amp);
     if (this.started.length > 8) this.started.shift();
     // large shifts: the head takes its share of where the eyes land (in the world, so a head
-    // still on its way from the last look is never sent backwards), quickly
-    const big = smooth(8, 30, amp);
+    // still on its way from the last look is never sent backwards), quickly. (A share of 0: the
+    // head is moved by the caller, e.g. the behaviour layer's look-arounds.)
+    const big = share > 0 ? smooth(8, 30, amp) : 0;
     if (big > 0) {
       const s = Math.max(share, 0.1 + 0.25 * big);
       this._pendingHead = { at: t + 0.03, x: s * x1, y: 0.5 * s * y1, omega: 4 + 8 * big };

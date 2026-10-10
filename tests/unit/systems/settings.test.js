@@ -31,7 +31,7 @@ describe('defaults', () => {
       cliPath: '', model: '', effort: '', mode: 'chat', workdir: '', persona: '', resumeLastSession: true, lastSessionId: '',
     });
     expect(DEFAULT_SETTINGS.voice).toMatchObject({ enabled: true, sttModel: 'large-v3-turbo', ttsVoice: 'af_heart', ttsSpeed: 1.0, systemVoice: '', device: 'auto', handsFree: false, speakReplies: true });
-    expect(DEFAULT_SETTINGS.avatar).toEqual({ renderer: 'relief', pack: 'reference', quality: 'high', particles: 1.0, bloom: 1.0, followCursor: true, expressiveness: 1.0 });
+    expect(DEFAULT_SETTINGS.avatar).toEqual({ renderer: 'relief', pack: 'reference', quality: 'high', particles: 1.0, bloom: 1.0, followCursor: true, expressiveness: 1.0, liveliness: 1.0, projector: false });
     expect(DEFAULT_SETTINGS.window).toMatchObject({ sizePreset: 'medium', alwaysOnTop: true, clickThrough: true, position: null, showChat: true });
     expect(DEFAULT_SETTINGS.hotkeys).toEqual({
       toggleListen: 'CommandOrControl+Alt+Space', toggleChat: 'CommandOrControl+Alt+C', stopSpeaking: 'CommandOrControl+Alt+X',
@@ -107,6 +107,14 @@ describe('applyPatch validation', () => {
     expect(applyPatch(base, { avatar: { expressiveness: 7 } }).settings.avatar.expressiveness).toBe(2);
     expect(applyPatch(base, { avatar: { expressiveness: -3 } }).settings.avatar.expressiveness).toBe(0);
     expect(applyPatch(base, { avatar: { expressiveness: 'lots' } }).settings.avatar.expressiveness).toBe(1);
+    // avatar.liveliness: 0..2 (the spontaneous behaviour), the same rules
+    expect(applyPatch(base, { avatar: { liveliness: 1.6 } }).settings.avatar.liveliness).toBe(1.6);
+    expect(applyPatch(base, { avatar: { liveliness: 9 } }).settings.avatar.liveliness).toBe(2);
+    expect(applyPatch(base, { avatar: { liveliness: -1 } }).settings.avatar.liveliness).toBe(0);
+    expect(applyPatch(base, { avatar: { liveliness: null } }).settings.avatar.liveliness).toBe(1);
+    // avatar.projector: a boolean
+    expect(applyPatch(base, { avatar: { projector: true } }).settings.avatar.projector).toBe(true);
+    expect(applyPatch(base, { avatar: { projector: 'yes' } }).settings.avatar.projector).toBe(false);
   });
 
   it('voice.systemVoice: any one-line voice name or URI; not control characters, newlines or huge strings', () => {

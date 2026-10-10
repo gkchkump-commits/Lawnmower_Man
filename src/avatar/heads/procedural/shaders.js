@@ -29,6 +29,7 @@ uniform mat3 uJawRot;
 uniform vec3 uJawPivot;
 uniform mat3 uHeadRot;
 uniform vec3 uHeadPivot;
+uniform vec3 uHeadXform;  // posture: shift x, y and scale about the pivot (1 at rest)
 uniform vec3 uCornerL;
 uniform vec3 uCornerR;
 uniform vec4 uLips;     // upperLift, lowerDrop, push, cheek
@@ -67,7 +68,7 @@ vec3 rigFace(vec3 p, inout vec3 n) {
 // head rotation weight (0 on the lower neck, 1 on the head)
 float headWeight(vec3 rest) { return smoothstep(uNeckRot.x, uNeckRot.y, rest.y); }
 vec3 rigHead(vec3 p, float hw) {
-  p = mix(p, uHeadPivot + uHeadRot * (p - uHeadPivot), hw);
+  p = mix(p, uHeadPivot + uHeadRot * (p - uHeadPivot) * uHeadXform.z + vec3(uHeadXform.xy, 0.0), hw);
   p.y += uBreathY * hw;
   return p;
 }

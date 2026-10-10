@@ -12,6 +12,7 @@ uniform float uUpperLift;
 uniform float uLowerDrop;
 uniform float uLipPush;
 uniform float uBreathY;
+uniform vec3 uHeadXform;  // posture: shift x, y (world) and scale about the pivot (1 at rest)
 uniform float uPlateAspect;
 uniform vec2 uCornerL;
 uniform vec2 uCornerR;
@@ -95,7 +96,7 @@ vec3 applyRig(vec3 p, float slitD) {
 
 vec3 applyHead(vec3 p) {
   // the bust turns, the lower neck does not (a rigid card would swing the whole neck sideways)
-  vec3 r = uHeadPivot + uHeadRot * (p - uHeadPivot);
+  vec3 r = uHeadPivot + uHeadRot * (p - uHeadPivot) * uHeadXform.z + vec3(uHeadXform.xy, 0.0);
   return mix(p, r, smoothstep(uNeckBand.x, uNeckBand.y, p.y)) + vec3(0.0, uBreathY, 0.0);
 }
 
@@ -109,6 +110,11 @@ export const FACE_VERT = /* glsl */ `
 ${RIG_CHUNK}
 attribute float aEdge;
 attribute float aSlitD;     // rest px below the closed-mouth slit (+ = below; lip warp)
+attribute vec3 aNormal;     // the relief's surface normal at rest (world; the light, below)
+#ifndef RELIEF_LITE
+varying vec3 vNrm0;         // ... at rest
+varying vec3 vNrm1;         // ... turned with the head
+#endif
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
@@ -121,6 +127,10 @@ void main() {
   vEdge = aEdge;
   vFace = aW2.w;
   vLip = vec2(aSlitD, (position.x - uMouth.x) / uMouth.z);
+#ifndef RELIEF_LITE
+  vNrm0 = aNormal;
+  vNrm1 = mix(aNormal, uHeadRot * aNormal, smoothstep(uNeckBand.x, uNeckBand.y, p.y));
+#endif
   gl_Position = projectionMatrix * modelViewMatrix * vec4(applyHead(p), 1.0);
 }`;
 
@@ -156,6 +166,18 @@ uniform vec3 uColEye;
 uniform vec3 uColGrid;
 uniform vec4 uLipWarp;      // px: upper thinning, contact, lower lip rise, lower thinning
 uniform vec4 uOpen;         // the opening at the centre (plate px): upper lip lift, lower lip drop; lens width, exponent
+// ---- the hologram's light and life (life lane)
+uniform vec4 uLight;        // key light change with the head's turn, specular glint, rim, sharpening
+uniform vec2 uPulseW;       // an energy wave on emphasis: its front's radius (plate heights), amplitude
+uniform float uBreath;      // the breathing cycle (the eyes' glow breathes with it)
+uniform float uPop;         // the hologram's emissive strength (eyes, lines, edges)
+uniform float uPixelRatio;  // device px per CSS px (the scan lines' pitch is in CSS px)
+// (RELIEF_LITE, the Low tier for integrated GPUs: no turn light, glint, rim, sharpening or scan
+// lines; the emissive lines and eyes stay. As cheap as the plate was before the light.)
+#ifndef RELIEF_LITE
+varying vec3 vNrm0;
+varying vec3 vNrm1;
+#endif
 varying vec2 vUv;
 varying vec2 vUv2;
 varying float vEdge;
@@ -267,6 +289,13 @@ void main() {
   // (mipmapped: a slight negative LOD bias keeps the fine grid crisp when minified)
   vec3 col = texture2D(tPlate, suv, -0.6).rgb;
   if (lipWarp) col = textureGrad(tPlate, suv, gdx, gdy).rgb;
+  // crisper lines and eyes: the plate's mid frequencies lifted (an unsharp mask against the same
+  // texel ~1.7 mip levels coarser) on the gold lines and in the eyes, only a little elsewhere and
+  // not on the fine wire grid, whose sub-pixel lines would crawl and sparkle as the head moves
+#ifndef RELIEF_LITE
+  float shk = uLight.w * mix(0.1, 1.0, clamp(max(1.6 * mA.g, mB.r), 0.0, 1.0)) * (1.0 - 0.85 * mA.b * (1.0 - mA.g));
+  if (shk > 0.001) col = max(col + shk * (col - textureGrad(tPlate, suv, gdx * 3.2, gdy * 3.2).rgb), 0.0);
+#endif
   if (uIrisLayer > 0.5 && abs(uGaze.x) + abs(uGaze.y) > 1e-6 && mB.g > 0.001) {
     vec4 eye = vUv.x < 0.5 ? uEyeL : uEyeR;
     // (fading in over the first ~6 % of the disc radius of travel: the plate itself at rest and a
@@ -350,6 +379,60 @@ void main() {
   // faint scanline sweep
   float scan = exp(-pow((vUv2.y - (1.0 - fract(uTime * 0.085))) * 70.0, 2.0));
   col += uColRim * scan * lit * 0.35 * uFx;
+
+  // ---- light and life (life lane) ----------------------------------------------------------
+  // A key light from the upper left front lights the relief as the 3-D head it is: turning
+  // toward it brightens that side, away from it darkens it (relative to the rest pose, whose
+  // light is baked into the plate: at rest this changes nothing), a glint slides over the brow,
+  // nose and cheekbones, and the edges turning away catch more rim light.
+#ifndef RELIEF_LITE
+  {
+    vec3 n0 = normalize(vNrm0), n1 = normalize(vNrm1);
+    const vec3 KEY = vec3(-0.4, 0.52, 0.754);
+    float dif = max(dot(n1, KEY), 0.0) - max(dot(n0, KEY), 0.0);
+    col *= 1.0 + uLight.x * dif;
+    vec3 hv = normalize(KEY + vec3(0.0, 0.0, 1.0));
+    // (a tight highlight in the hologram's own cyan: the coarse mesh normals would spread a
+    // broad exponent into a plastic white sheen)
+    float g1 = pow(max(dot(n1, hv), 0.0), 90.0), g0 = pow(max(dot(n0, hv), 0.0), 90.0);
+    // (the glint is the change: where the head turns it on; a little of it at rest)
+    float glint = max(g1 - g0, 0.0) + 0.18 * g1;
+    float skin = smoothstep(0.02, 0.12, baseLum) * (1.0 - ap);
+    col += mix(uColRim, vec3(1.0), 0.2) * glint * uLight.y * skin * (0.4 + lit);
+    // the edges turning away catch more of the cyan rim (never toward white: over a white
+    // desktop a whitened edge would melt into it)
+    float f1 = pow(1.0 - clamp(n1.z, 0.0, 1.0), 3.0), f0 = pow(1.0 - clamp(n0.z, 0.0, 1.0), 3.0);
+    // (on the solid head only, the face and cranium that occlude the desktop: on the soft fringe,
+    // the ears and the glow around them a rim reads as a haze around the head)
+    float edgeIn = smoothstep(uChinV - 0.06, uChinV + 0.03, vUv.y) * smoothstep(0.0, 2.0, vEdge) * smoothstep(0.35, 0.85, alpha)
+      * mix(1.0, smoothstep(0.3, 0.8, mC.b), uHasLids);
+    col += uColRim * (0.45 * f1 + 0.6 * max(f1 - f0, 0.0)) * uLight.z * edgeIn * (0.2 + lit);
+  }
+#endif
+  {
+    // emissive: the eyes' bright parts and the lit gold lines glow past white (the bloom takes
+    // them: crisp lines with a halo, not a haze over the face); the eyes breathe, and glow up
+    // with the voice
+    float hot = smoothstep(0.42, 0.95, baseLum);
+    float eyeGlow = 0.36 + 0.05 * (uBreath - 0.5) + 0.2 * uSpeech * uSpeak + 0.2 * uListen;
+    col += uColEye * ap * hot * eyeGlow * uPop * (1.0 - 0.6 * uSleep);
+    // (a soft knee in the eyes that keeps their hue: the iris centre glows amber, never white-hot,
+    // and its fibres survive; the bloom still takes what is above the knee)
+    float em = max(col.r, max(col.g, col.b));
+    if (ap > 0.01 && em > 0.78) col *= mix(1.0, (0.78 + 0.3 * (1.0 - exp(-(em - 0.78) / 0.3))) / em, ap);
+    col += uColLine * gold * smoothstep(0.12, 0.55, baseLum) * 0.32 * uPop;
+    // an energy wave on emphasis: a bright front runs out from the brow over the lines and grid
+    if (uPulseW.y > 0.002) {
+      float front = exp(-pow((length(dp) - uPulseW.x) / 0.05, 2.0));
+      col += (uColLine * gold * 2.4 + uColGrid * mA.b * 1.0 + uColRim * 0.4 * lit) * front * uPulseW.y * uFx;
+    }
+    // hologram scan lines (a 3 CSS px pitch at any display scale, drifting slowly; faint, and
+    // fainter still asleep)
+#ifndef RELIEF_LITE
+    float sl = 0.5 + 0.5 * sin(gl_FragCoord.y / uPixelRatio * 2.1 - uTime * 1.1);
+    col *= 1.0 - 0.03 * uFx * (1.0 - 0.7 * uSleep) * sl * smoothstep(0.0, 0.08, baseLum);
+#endif
+  }
 
   if (uError > 0.001) {
     float l = dot(col, vec3(0.299, 0.587, 0.114));

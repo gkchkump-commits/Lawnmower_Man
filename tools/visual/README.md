@@ -47,7 +47,9 @@ mean absolute RGB error.
 | `renderer=relief\|procedural\|placeholder` | head (falls back relief → procedural → placeholder) |
 | `fixedTime=<s>` | freeze the clock (deterministic frames) |
 | `seed`, `quality=low\|medium\|high`, `particles`, `bloom`, `fx` (living effects 0..1.5), `idle` (idle motion), `zoom` | render options |
-| `transparent=0\|1`, `bg=black\|checker\|desk\|white` | output mode / backdrop |
+| `transparent=0\|1`, `bg=black\|checker\|desk\|white\|dark\|bright\|busy` | output mode / backdrop (`dark`, `bright`, `busy`: desktops painted behind the transparent canvas, src/dev/backdrops.js) |
+| `sim=1&t=<s>` | a live run (the behaviour layer) on a scripted 60 Hz clock: `window.__seek(t)` steps it |
+| `life=<0..2>`, `projector=1` | liveliness of the spontaneous behaviour, the projector light |
 | `compare=1&ref=neutral\|blink\|teeth\|open` | show the pack's reference frame next to the render |
 | `state=idle\|listening\|thinking\|speaking\|error\|sleep`, `speech=<0..1>` | director inputs |
 | `jaw wide round smile browUp blink blinkL blinkR gazeX gazeY yaw pitch roll energy` | AnimState overrides |

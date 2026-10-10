@@ -299,6 +299,8 @@ command line — user text only ever travels over stdin; long prompts go in file
     bloom: 1.0,                  // strength multiplier 0..2
     followCursor: true,
     expressiveness: 1.0,         // 0..2: how much speech moves the head, brows and face (nods, glances, brows)
+    liveliness: 1.0,             // 0..2: spontaneous behaviour (look-arounds, posture, small gestures; 0 = none)
+    projector: false,            // a projector's cone of light under the bust
   },
   window: {
     sizePreset: 'medium',        // small 300x450, medium 400x600, large 560x840 (avatar area; chat panel extra)
@@ -360,9 +362,14 @@ avatar.setProsody(cue | cue[])   // speech prosody from the lip-sync: { type: 'a
 avatar.setIntonation({ pitch, voiced }) // the local voice's pitch, semitones re the speaker's usual
                                  // one (src/audio/prosody.js): the head and brows follow it a little
 avatar.setExpression({ smile, browUp }) // 0..1 (the camera: smile back, wake-up greeting)
+avatar.setUser({ typing?, present?, looking?, roll?, voice? }) // what the app knows about the user,
+                                 // for the spontaneous behaviour (src/avatar/behavior.js): a key typed
+                                 // now; the camera's view (present null = no camera; roll = head tilt in
+                                 // the selfie view, rad, + counter-clockwise on screen); voice = the mic
+                                 // meter's level now, 0..1, while it listens (nods at the pauses)
 avatar.blink()
 avatar.lookAt(x, y, kind?)       // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); kind 'cursor' | 'face' | 'glance' (the head goes along with a cursor or a face); lookAt(null) releases
-avatar.setOptions(partial)       // quality/particles/bloom/colors/expressiveness (0..2) at runtime
+avatar.setOptions(partial)       // quality/particles/bloom/colors/expressiveness/liveliness (0..2)/projector at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)
 avatar.advance(dt, { render })   // tests / harness: step a scripted clock with live dynamics
@@ -391,8 +398,10 @@ little lopsided while talking), smile, blinkL, blinkR (0 open → 1 closed), gaz
 browUp, headYaw, headPitch, headRoll (radians, small), breath (0..1 cycle), speech (0..1 loudness),
 energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights), cheekRaise,
 chinRaise, nostrilFlare (0..1, the face moving with the mouth: cheeks with spread vowels and
-smiles, the chin under pressed lips, the nostrils on a breath in; 0 at rest)`. A head that does not
-know a channel ignores it.
+smiles, the chin under pressed lips, the nostrils on a breath in; 0 at rest), lean, shiftX (-1..1,
+posture: toward the viewer, sideways), squint (0..1, both lids), pulse (0..1, an energy wave on an
+emphasis; the behaviour layer, 0 at rest and in settled renders)`. A head that does not know a
+channel ignores it.
 
 ## 6. Voice server — `voice/` (Python 3.12, FastAPI + uvicorn)
 

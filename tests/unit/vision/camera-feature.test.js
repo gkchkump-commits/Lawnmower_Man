@@ -62,7 +62,8 @@ function setup(o = {}) {
     return t;
   };
   const expressions = [];
-  const avatar = { setExpression: vi.fn((e) => expressions.push(e)), blink: vi.fn() };
+  const users = [];
+  const avatar = { setExpression: vi.fn((e) => expressions.push(e)), blink: vi.fn(), setUser: vi.fn((u) => users.push(u)) };
   const gazes = [];
   const gaze = { setFace: vi.fn((g) => gazes.push(g)) };
   const controller = {
@@ -114,7 +115,7 @@ function setup(o = {}) {
     trackers.at(-1).emit('observation', { obs, t: now, ms: 10 });
     advance(dt);
   };
-  return { feat, camera, trackers, controller, avatar, expressions, gaze, gazes, view, store, saved, capture, set, flush, frame, advance, now: () => now, settings: () => settings };
+  return { feat, camera, trackers, controller, avatar, expressions, users, gaze, gazes, view, store, saved, capture, set, flush, frame, advance, now: () => now, settings: () => settings };
 }
 
 describe('CameraFeature: turning the camera on and off', () => {
@@ -334,6 +335,18 @@ describe('CameraFeature: behaviours', () => {
     expect(h.gazes.at(-1)).toBeNull();
     h.frame(face({ cx: 0.3 }));
     expect(h.gazes.at(-1)).toBeNull();
+  });
+
+  it('tells the avatar\'s behaviour who is there: present, looking, the head tilt; nobody once the camera stops', async () => {
+    const h = await onWithFace();
+    for (let i = 0; i < 6; i++) h.frame(face({ rollDeg: 10 }));
+    const u = h.users.at(-1);
+    expect(u).toMatchObject({ present: true, looking: true });
+    // (the image's clockwise tilt is counter-clockwise in the selfie view: + on screen)
+    expect(u.roll * 180 / Math.PI).toBeGreaterThan(6);
+    expect(u.roll * 180 / Math.PI).toBeLessThan(11);
+    h.set({ camera: { enabled: false } });
+    expect(h.users.at(-1)).toEqual({ present: null, looking: false, roll: 0 });
   });
 
   it('the detection rate follows presence and sleep', async () => {

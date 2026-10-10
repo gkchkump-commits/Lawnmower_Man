@@ -134,6 +134,8 @@ export function estimateDistanceCm(size, o = {}) {
  * @property {number} distanceCm  approximate distance from the camera
  * @property {number} yaw         head yaw, radians (mirrored too: > 0 = turned toward screen right)
  * @property {number} pitch       head pitch, radians (> 0 = looking up)
+ * @property {number} roll        head tilt, radians, as seen in the selfie view (> 0 = counter-clockwise
+ *                                on screen: the image's clockwise, mirrored)
  * @property {boolean} looking    looking at the screen (head and eyes toward it)
  * @property {number} smile       0..1, smoothed
  * @property {boolean} smiling
@@ -178,7 +180,7 @@ export class AttentionTracker {
     /** @type {AttentionState} */
     this.state = {
       present: false, changedAt: now, lastSeen: -Infinity, x: 0, y: 0, size: 0, distanceCm: Infinity,
-      yaw: 0, pitch: 0, looking: false, smile: 0, smiling: false, jaw: 0, talking: false,
+      yaw: 0, pitch: 0, roll: 0, looking: false, smile: 0, smiling: false, jaw: 0, talking: false,
     };
     this._hits = 0;
     this._firstHit = 0;
@@ -244,6 +246,7 @@ export class AttentionTracker {
     s.size += (g.size - s.size) * k;
     s.yaw += (-g.yaw - s.yaw) * k;
     s.pitch += (g.pitch - s.pitch) * k;
+    s.roll += (g.roll - s.roll) * k;
     s.distanceCm = estimateDistanceCm(s.size);
 
     // ---- looking at the screen: head roughly toward it, eyes not turned aside

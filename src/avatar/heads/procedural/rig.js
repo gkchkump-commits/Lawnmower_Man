@@ -20,6 +20,8 @@ export const PROC_LIMITS = Object.freeze({
   gazePitch: 0.22,
   vergence: 0.025,         // slight convergence (eyes look at a point in front of the face)
   breathFh: 0.004,
+  // posture and lids of the behaviour layer (as the relief head's)
+  leanScale: 0.03, leanDropFh: 0.012, shiftFh: 0.02, squintBlink: 0.42, squintLower: 0.35,
   // speech channels (lip-sync): press m b p, tuck f v, teeth s z ee, tongue th l
   teethLiftFh: 0.011,      // upper lip lift for teeth = 1 (the incisors show)
   tuckLiftFh: 0.011,       // upper lip lift for tuck (the incisor edge shows)
@@ -203,9 +205,16 @@ export function procRigUniforms(rig, a, u) {
   u.blink = u.blink || [0, 0];
   // the upper lid follows a downward gaze part of the way (nothing at rest)
   const lidG = 0.25 * clamp01(-(a.gazeY ?? 0));
-  u.blink[0] = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG);
-  u.blink[1] = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG);
-  u.squint = L.squint * smile;
+  const squint = clamp01(a.squint ?? 0), sq = 1 - L.squintBlink * squint;
+  u.blink[0] = 1 - (1 - clamp01(a.blinkL)) * (1 - lidG) * sq;
+  u.blink[1] = 1 - (1 - clamp01(a.blinkR)) * (1 - lidG) * sq;
+  u.squint = Math.min(1, L.squint * smile + L.squintLower * squint);
+  // posture: sideways shift, lean (scale about the head pivot, sinking a little); 0 / 1 at rest
+  const lean = clamp(a.lean ?? 0, -1, 1);
+  u.headXform = u.headXform || [0, 0, 1];
+  u.headXform[0] = L.shiftFh * clamp(a.shiftX ?? 0, -1, 1) * fh;
+  u.headXform[1] = -L.leanDropFh * lean * fh;
+  u.headXform[2] = 1 + L.leanScale * lean;
   // gaze directions in the head's rest frame
   const gx = Math.tan(clamp(a.gazeX, -1, 1) * L.gazeYaw);
   const gy = Math.tan(clamp(a.gazeY, -1, 1) * L.gazePitch);

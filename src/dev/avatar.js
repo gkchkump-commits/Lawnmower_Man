@@ -6,6 +6,7 @@
 //   /dev/avatar.html?fixedTime=1&vis=PP                       one viseme's mouth shape
 //   /dev/avatar.html?say=Hello!%20I'm%20Claude.&t=0.8         the system-voice lip-sync at 0.8 s
 //   /dev/avatar.html?clip=a.json,b.json&t=1.2                 real voice-server clips (local voice)
+//   /dev/avatar.html?sim=1&state=thinking&t=20&bg=busy         a live run (behaviour) stepped to 20 s
 // Exposes window.__avatar and sets window.__ready = true after the first frame. In say / clip
 // mode window.__seek(t) advances the simulation to t seconds and renders (film strips, videos).
 /* global URLSearchParams, location, history */
@@ -16,6 +17,7 @@ import { Emitter } from '../app/emitter.js';
 import { LipSync, VISEME_SHAPES, normalizeVisemes, planSpeech } from '../audio/lipsync.js';
 import { LEAD_IN } from '../audio/articulation.js';
 import { base64ToBytes, decodeWav } from '../audio/wav.js';
+import { BACKDROPS, paintBackdrop } from './backdrops.js';
 
 const q = new URLSearchParams(location.search);
 const num = (k, d) => (q.has(k) && q.get(k) !== '' && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
@@ -34,7 +36,9 @@ if (!ui) {
 const transparent = flag('transparent', true);
 const bg = q.get('bg') || (transparent ? 'black' : 'black');
 const view = document.getElementById('avatarView');
-if (bg !== 'black') view.classList.add(bg);
+// bg=dark|bright|busy: a desktop behind the transparent hologram (src/dev/backdrops.js)
+if (BACKDROPS.includes(/** @type {any} */ (bg))) paintBackdrop(view, /** @type {any} */ (bg), num('bgSeed', 7));
+else if (bg !== 'black') view.classList.add(bg);
 
 const packUrl = q.get('pack') ? `../assets/avatars/${q.get('pack')}/` : '../assets/avatars/reference/';
 if (compare) {
@@ -80,7 +84,9 @@ for (const [p] of SLIDERS) if (q.has(p)) active.set(p, num(p, 0));
 const sayText = q.get('say');
 // clip=<url>[,<url>...]: real voice-server clips (/tts JSON: text, visemes, audioB64 or wav=<url>)
 const clipUrls = (q.get('clip') || '').split(',').map((s) => s.trim()).filter(Boolean);
-const scripted = !!sayText || clipUrls.length > 0;
+// sim=1: a live run on a scripted 60 Hz clock (window.__seek), for the spontaneous behaviour
+const simLive = flag('sim', false) && !sayText && !clipUrls.length;
+const scripted = !!sayText || clipUrls.length > 0 || simLive;
 
 const options = {
   renderer: q.get('renderer') || 'relief',
@@ -94,6 +100,8 @@ const options = {
   transparent,
   idleMotion: num('idle', 1),
   expressiveness: num('expr', 1),
+  liveliness: num('life', 1),
+  projector: flag('projector', false),
   zoom: num('zoom', 1),
   // say / clip modes drive a scripted clock through avatar.advance(): no render loop of their own
   autoStart: !scripted,
@@ -258,8 +266,8 @@ if (flag('stats', false)) {
   }, 500);
 }
 
-if (sayText || clipUrls.length) {
-  const sim = sayText ? speechSimulation(sayText) : await clipSimulation(clipUrls);
+if (sayText || clipUrls.length || simLive) {
+  const sim = sayText ? speechSimulation(sayText) : clipUrls.length ? await clipSimulation(clipUrls) : liveSimulation();
   window.__seek = (t) => sim.seek(Number(t) || 0);
   window.__plan = sim.plan;
   window.__schedule = sim.schedule;
@@ -273,6 +281,28 @@ if (sayText || clipUrls.length) {
   await avatar.nextFrame();
 }
 window.__ready = true;
+
+/**
+ * A live run without speech on a fixed 60 Hz clock (the behaviour layer, states, gaze):
+ * window.__seek(t) steps the avatar to t seconds and renders; window.__avatar.setState / lookAt /
+ * setUser in between take effect at that time. URL: sim=1&t=<s> (and state=..., life=...).
+ */
+function liveSimulation() {
+  let now = 0;
+  const dt = 1 / 60;
+  return {
+    plan: null,
+    /** @param {number} t */
+    seek(t) {
+      while (now + dt <= t + 1e-9) {
+        now += dt;
+        avatar.advance(dt, { render: false });
+      }
+      avatar.advance(0);
+      return { t: now };
+    },
+  };
+}
 
 /**
  * The system-voice lip-sync path, deterministic: a scripted "voice" speaks `text` (word boundary

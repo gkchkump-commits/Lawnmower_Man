@@ -176,6 +176,7 @@ export default class ProceduralHead {
       uJawPivot: { value: v3(meta.rig.jawPivot) },
       uHeadRot: { value: new THREE.Matrix3() },
       uHeadPivot: { value: v3(meta.rig.headPivot) },
+      uHeadXform: { value: new THREE.Vector3(0, 0, 1) },
       uCornerL: { value: new THREE.Vector3() },
       uCornerR: { value: new THREE.Vector3() },
       uLips: { value: new THREE.Vector4() },
@@ -232,6 +233,7 @@ export default class ProceduralHead {
     const f = this.uniforms;
     f.uJawRot.value.fromArray(u.jawRot);
     f.uHeadRot.value.fromArray(u.headRot);
+    f.uHeadXform.value.fromArray(u.headXform);
     f.uCornerL.value.fromArray(u.cornerL);
     f.uCornerR.value.fromArray(u.cornerR);
     f.uLips.value.fromArray(u.lips);
@@ -263,7 +265,8 @@ export default class ProceduralHead {
   /** @returns {import('../../fx/particles.js').ParticleAnchors} */
   particleAnchors() {
     const p = this.model.meta.particleAnchors;
-    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon() };
+    const pv = this.model.meta.rig?.headPivot;
+    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon(), ...(pv ? { pivot: [pv[0], pv[1], pv[2]] } : {}) };
   }
 
   /** Silhouette (world, rest pose, screen plane) for hitTest. */

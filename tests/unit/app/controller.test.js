@@ -398,6 +398,19 @@ describe('Controller: voice input', () => {
     expect(bridge.calls).toContainEqual(['send', 'hello there']);
   });
 
+  it('passes the mic level to the avatar while it listens (it nods at the pauses of the voice)', async () => {
+    const { c, mic, avatar } = setup();
+    await c.start();
+    c.tick(1 / 60, 0);
+    expect(avatar.users).toEqual([]);           // the mic is off: nothing
+    await c.startListening('ptt');
+    mic.level = 0.62;
+    c.tick(1 / 60, 1 / 60);
+    mic.paused = true;
+    c.tick(1 / 60, 2 / 60);
+    expect(avatar.users).toEqual([{ voice: 0.62 }, { voice: 0 }]);
+  });
+
   it('ignores Whisper hallucinations on short noise', async () => {
     const { c, mic, stt, view } = setup();
     await c.start();

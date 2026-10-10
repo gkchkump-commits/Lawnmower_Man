@@ -3,16 +3,17 @@
 // camera simulator (tools/tapo-sim), with the real go2rtc, the real camera window and worker
 // (WebCodecs decode, the stub person detector) and the fake Claude CLI (contract §12.3):
 //
-//   1. setup through the camera window's form (real clicks) → online, go2rtc ready, live video
+//   1. setup through the camera window's form (real clicks): Test connection, then Save → online,
+//      go2rtc ready, live video
 //   2. security: nothing leaves loopback, go2rtc listens on 127.0.0.1 only, the password is in no
 //      file, log or command line
 //   3. pan/tilt: Calibrate (mirrored pan + inverted tilt found, view units near the truth), D-pad,
-//      press-and-hold, click-to-center, a preset, home
+//      press-and-hold, click-to-center, a preset, home, and the same from the keyboard
 //   4. arm → a person walks in → event, notification, the avatar's line, a clip with pre-roll that
 //      parses, its .jpg/.json, the events list and the player over app://…/__clips (Range)
 //   5. "describe" on → the next alert sends Claude a hidden turn with one picture
-//   6. Claude's camera tools: approval card for a snapshot, pre-approved with claudeSee 'always',
-//      unavailable with claudeMove 'never'
+//   6. Claude's camera tools: approval card for a snapshot and for turning the camera,
+//      pre-approved with claudeSee 'always', unavailable with claudeMove 'never'
 //   7. privacy mode (PTZ "privacy", never "unsupported"), the camera going offline and coming back
 //   8. quit: Unsubscribe, the RTSP session ends, go2rtc is gone
 //
@@ -249,6 +250,18 @@ try {
     check('the setup form is pre-filled from the settings', (await cam.locator('#tapo-set-host').inputValue()) === '127.0.0.1' && (await cam.locator('#tapo-set-username').inputValue()) === 'camacct');
     await shot(cam, '1-setup');
     await cam.locator('#tapo-set-password').fill(PASSWORD);
+    // Test connection first (with the typed, unsaved password): every step passes, nothing moves
+    const movesBefore = sim.calls.filter((c) => c.service === 'ptz' && /Move|GotoPreset/.test(c.op)).length;
+    await cam.locator('#setup').getByRole('button', { name: 'Test connection', exact: true }).click();
+    const report = cam.locator('#setup .report');
+    const tested = await until(async () => {
+      const cls = (await report.getAttribute('class').catch(() => '')) || '';
+      return /\b(ok|fail)\b/.test(cls) ? cls : null;
+    }, 30000);
+    const steps = await report.locator('.report-step').evaluateAll((els) => els.map((e) => `${/** @type {HTMLElement} */ (e).dataset.step}:${e.className.replace('report-step', '').trim()}`)).catch(() => []);
+    check('Test connection: every step passes', /\bok\b/.test(tested || '') && ['host', 'auth', 'profiles', 'ptz', 'rtsp'].every((id) => steps.includes(`${id}:ok`)), { tested, steps });
+    check('…and the camera did not move during the test', sim.calls.filter((c) => c.service === 'ptz' && /Move|GotoPreset/.test(c.op)).length === movesBefore);
+    await shot(cam, '1-tested');
     await cam.locator('#setup').getByRole('button', { name: 'Save', exact: true }).click();
     const online = await until(async () => (await status())?.connection === 'online', 30000);
     check('status online after Save', online, (await status())?.detail);
@@ -385,6 +398,27 @@ try {
     const home = await until(() => sim.callsOf('AbsoluteMove', t0)[0], 5000);
     check('home → AbsoluteMove(0, 0)', home && home.args.x === 0 && home.args.y === 0, home && home.args);
     await idle();
+    await sleep(1600);
+
+    // the same from the keyboard (the window focused, not in a text field)
+    await cam.evaluate(() => /** @type {HTMLElement|null} */ (document.activeElement)?.blur?.());
+    t0 = Date.now();
+    await cam.keyboard.press('ArrowRight');
+    const keyRel = await until(() => sim.callsOf('RelativeMove', t0)[0], 5000);
+    check('key → : RelativeMove with x < 0 (like the D-pad)', keyRel && keyRel.args.x < 0 && keyRel.args.y === 0, keyRel && keyRel.args);
+    await idle();
+    await sleep(1600);
+    t0 = Date.now();
+    await cam.keyboard.press('1');
+    const keyPreset = await until(() => sim.callsOf('GotoPreset', t0)[0], 5000);
+    check('key 1: the first saved position (GotoPreset 1)', keyPreset && keyPreset.args.token === '1', keyPreset && keyPreset.args);
+    await idle();
+    await sleep(1600);
+    t0 = Date.now();
+    await cam.keyboard.press('h');
+    const keyHome = await until(() => sim.callsOf('AbsoluteMove', t0)[0], 5000);
+    check('key H: home (AbsoluteMove 0, 0)', keyHome && keyHome.args.x === 0 && keyHome.args.y === 0, keyHome && keyHome.args);
+    await idle();
     check('the motor never pushed against an end stop', sim.state.ptz.endStopMs === 0, sim.state.ptz.endStopMs);
     await sleep(1600);
   });
@@ -412,13 +446,24 @@ try {
     check('…confirmed by the local detector', event && event.sources?.includes('local-person') && !event.unconfirmed, (event || first)?.sources);
     await until(() => avatar.locator('#transcript').getByText('Someone is at the camera.').count(), 15000);
     check('the avatar says "Someone is at the camera."', (await transcript()).includes('Someone is at the camera.'), (await transcript()).slice(-300));
+    // …and looks toward the camera window (lm:tapo:look → the gaze holds that point for a few seconds)
+    const where = await app.evaluate(({ BrowserWindow }) => {
+      const ws = BrowserWindow.getAllWindows();
+      const c = (/** @type {any} */ w) => { const b = w.getBounds(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+      const av = ws.find((w) => w.webContents.getURL() === 'app://lawnmower/index.html');
+      const cw = ws.find((w) => /\/tapo\/index\.html/.test(w.webContents.getURL()));
+      return av && cw ? { avatar: c(av), camera: c(cw) } : null;
+    });
+    const gaze = await avatar.evaluate(() => ({ source: window.__app?.gaze?.source ?? null, target: window.__app?.gaze?.target ?? null }));
+    const wantSign = where ? Math.sign(where.camera.x - where.avatar.x) : 0;
+    check('the avatar looks toward the camera window', gaze.source === 'cursor' && Array.isArray(gaze.target) && (wantSign === 0 || Math.sign(gaze.target[0]) === wantSign), { gaze, where });
+    await shot(avatar, '4-avatar-alert');
     const notes = await until(async () => {
       const n = await e2e('notifications');
       return n && n.length ? n : null;
     }, 10000);
     check('a Windows notification is shown ("Person at the camera")', notes && /Person at the camera/.test(notes[0].title), notes);
     await shot(cam, '4-person');
-    await shot(avatar, '4-avatar-alert');
     sim.set({ person: false });
     const ended = await until(async () => !(await status())?.security?.active, 20000);
     check('the event ends after the post-roll', ended);
@@ -504,6 +549,24 @@ try {
     }
     const img = await until(async () => /Tool camera_snapshot returned 1 image \(image\/jpeg \d+x\d+, \d+ bytes\)/.test(await transcript()), 30000);
     check('…allowed: Claude gets a JPEG from the camera', img, (await transcript()).slice(-400));
+
+    // turning the camera on "ask": a card too; allowed, the camera turns and Claude is told
+    await until(async () => !(await card.isVisible().catch(() => false)), 10000);
+    await sleep(1600);
+    const beforeLook = (await transcript()).length;
+    const tLook = Date.now();
+    await say('camera camera_look {"direction":"left"}');
+    const lookCard = await until(() => card.isVisible(), 20000);
+    check('camera_look on "ask" shows an approval card', lookCard);
+    await shot(avatar, '6-approval-look');
+    if (lookCard) {
+      await sleep(1200);
+      await card.locator('.perm-allow').click();
+    }
+    const turned = await until(async () => /Tool camera_look returned text: Turned left\./.test((await transcript()).slice(beforeLook)), 30000);
+    const lookMove = sim.calls.find((c) => c.t >= tLook && c.service === 'ptz' && /RelativeMove|ContinuousMove/.test(c.op));
+    check('…allowed: the camera turns left (mirrored: x > 0) and Claude hears "Turned left."', turned && lookMove && lookMove.args.x > 0, { move: lookMove && { op: lookMove.op, args: lookMove.args }, text: (await transcript()).slice(beforeLook).slice(-300) });
+    await until(() => !sim.state.ptz.moving, 10000);
 
     await setSettings({ security: { claudeSee: 'always', claudeMove: 'never' } });
     await until(async () => (await avatar.evaluate(() => window.lawnmower.claude.status())).status === 'ready', 30000);

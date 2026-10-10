@@ -59,6 +59,7 @@ In tests: `const sim = await startSim()` from `tools/tapo-sim/index.mjs` (random
 | `noFallingEdge` | false | the falling edge is never sent |
 | `subscriptionLifetimeSec` | 600 | without Renew the subscription expires |
 | `sessionTimeoutSec`, `maxRtspSessions` | 15, 2 | RTSP |
+| `rtspAdvertiseTimeout` | true | the SETUP answer says `Session: <id>;timeout=15`; go2rtc 1.9.14 then sends OPTIONS every 10 s. `false`: a camera that does not say it, and go2rtc's default keepalive is too slow: the session is dropped and re-established every ~15 s |
 | `clockToleranceSec`, `replayCheck`, `xaddrHost`, `rebootMs` | 10, true, null, 3000 | |
 
 `--quirks ideal` is a well-behaved ONVIF camera: standard axes, no thresholds, honest timeouts,

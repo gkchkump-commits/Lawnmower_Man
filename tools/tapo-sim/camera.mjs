@@ -38,7 +38,10 @@ export const QUIRK_PRESETS = Object.freeze({
     tokens: 'tapo', // profile_1 / PTZConfiguration_1
     sessionTimeoutSec: 15, // RTSP: no request for this long → the session is dropped
     maxRtspSessions: 2, // the camera's two-stream budget (Tapo app viewers count: scenario.viewers)
-    rtspAdvertiseTimeout: false, // Session header without ;timeout=
+    // Session header carries ;timeout=15 (the C220 "reports" a 15 s timeout). go2rtc 1.9.14 sends
+    // its keepalive at that value − 5 s; without it, its default interval is longer than 15 s and
+    // the session is dropped and re-established every ~15 s (false = that camera)
+    rtspAdvertiseTimeout: true,
     rtspAcceptBasic: false,
     privacyKillsStream: false, // privacy mode: placeholder picture (false) or no frames at all (true)
     rebootMs: 3000,

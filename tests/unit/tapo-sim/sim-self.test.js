@@ -422,11 +422,18 @@ describe('RTSP server', () => {
     expect((await ok.request('DESCRIBE', `rtsp://127.0.0.1:${sim.rtspPort}/stream8`))?.status).toBe(404);
   });
 
-  it('TCP interleaved only (UDP → 461)', async () => {
+  it('TCP interleaved only (UDP → 461); the Session header states the 15 s timeout', async () => {
     const c = await client();
     await c.request('DESCRIBE', `rtsp://127.0.0.1:${sim.rtspPort}/stream1`);
     const r = await c.request('SETUP', `rtsp://127.0.0.1:${sim.rtspPort}/stream1/track1`, { Transport: 'RTP/AVP;unicast;client_port=5000-5001' });
     expect(r?.status).toBe(461);
+    const ok = await c.request('SETUP', `rtsp://127.0.0.1:${sim.rtspPort}/stream1/track1`, { Transport: 'RTP/AVP/TCP;unicast;interleaved=0-1' });
+    expect(ok?.headers.session).toMatch(/^[0-9A-F]{8};timeout=15$/);
+    expect(ok?.headers.transport).toMatch(/^RTP\/AVP\/TCP;unicast;interleaved=0-1;ssrc=[0-9A-F]{8}/);
+    sim.set({ quirks: { rtspAdvertiseTimeout: false } });
+    const c2 = await client();
+    await c2.request('DESCRIBE', `rtsp://127.0.0.1:${sim.rtspPort}/stream2`);
+    expect((await c2.request('SETUP', `rtsp://127.0.0.1:${sim.rtspPort}/stream2/track1`, { Transport: 'RTP/AVP/TCP;unicast;interleaved=0-1' }))?.headers.session).toMatch(/^[0-9A-F]{8}$/);
   });
 
   it('streams frames split on AUDs: one access unit per marker, 15 fps, IDR with SPS/PPS first', async () => {

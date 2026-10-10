@@ -16,10 +16,27 @@ describe('settings: tapo and security groups', () => {
     expect(SETTINGS_VERSION).toBe(3); // new groups need no migration
   });
 
-  it('mirrors the renderer defaults once lane B has added them', () => {
-    if (!RENDERER_DEFAULTS.tapo) return;
+  it('mirrors the renderer defaults', () => {
     expect(RENDERER_DEFAULTS.tapo).toEqual(DEFAULT_SETTINGS.tapo);
     expect(RENDERER_DEFAULTS.security).toEqual(DEFAULT_SETTINGS.security);
+  });
+
+  it('the mock camera bridge clamps and checks like main (src/bridge/mock-tapo.js)', async () => {
+    const { TAPO_NUMBER_RANGES, TAPO_ENUMS } = await import('../../../src/bridge/mock-tapo.js');
+    for (const [p, [lo, hi]] of Object.entries(TAPO_NUMBER_RANGES)) {
+      const [g, k] = p.split('.');
+      expect(patch({ [g]: { [k]: -1e9 } }).settings[g][k], p).toBe(lo);
+      expect(patch({ [g]: { [k]: 1e9 } }).settings[g][k], p).toBe(hi);
+    }
+    for (const [p, values] of Object.entries(TAPO_ENUMS)) {
+      const [g, k] = p.split('.');
+      for (const v of values) expect(patch({ [g]: { [k]: v } }).settings[g][k], p).toBe(v);
+      expect(patch({ [g]: { [k]: 'bogus' } }).settings[g][k], p).toBe(DEFAULT_SETTINGS[g][k]);
+    }
+    // every numeric and enum setting of main is mirrored
+    const numeric = Object.entries({ ...DEFAULT_SETTINGS.tapo, ...DEFAULT_SETTINGS.security }).filter(([, v]) => typeof v === 'number').map(([k]) => k).sort();
+    expect(Object.keys(TAPO_NUMBER_RANGES).map((p) => p.split('.')[1]).sort()).toEqual(numeric);
+    expect(Object.keys(TAPO_ENUMS).sort()).toEqual(['security.claudeMove', 'security.claudeSee', 'security.notify', 'security.record', 'security.sensitivity', 'tapo.ptz', 'tapo.stream']);
   });
 
   it('validates hosts: LAN only, never a URL', () => {

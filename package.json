@@ -24,6 +24,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:wake-e2e": "node scripts/wake-e2e.mjs",
     "test:voice": "cd voice && python -m pytest -q",
     "lint": "eslint .",
     "dist": "vite build && electron-builder --publish never",

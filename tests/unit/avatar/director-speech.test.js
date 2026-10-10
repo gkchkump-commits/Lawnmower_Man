@@ -242,7 +242,12 @@ describe('Director: prosody (secondary speech motion)', () => {
     d.setProsody({ type: 'accent', strength: 1 });
     d.setProsody({ type: 'accent', strength: 1 });
     expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(1);
-    run(d, 0.3, 60, () => {}, t);
+    // (a strong accent 0.3 s later used to nod again; now it waits out NOD_REFRACTORY: no
+    // nod-per-syllable rhythm, it gets a beat or a brow instead)
+    const tt = run(d, 0.3, 60, () => {}, t).t;
+    d.setProsody({ type: 'accent', strength: 1 });
+    expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(1);
+    run(d, NOD_REFRACTORY[1], 60, () => {}, tt);
     d.setProsody({ type: 'accent', strength: 1 });
     expect(d._kicks.filter((k) => k.kind === 'nod')).toHaveLength(2);
   });

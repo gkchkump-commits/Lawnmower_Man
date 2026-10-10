@@ -366,14 +366,15 @@ export class Director {
         if (t - this._lastAccent < 0.2) return;           // one gesture per syllable at most
         this._lastAccent = t;
         // A speaker does not nod on every stressed syllable, nor the same way, nor in a rhythm: a
-        // strong (nuclear) accent gets a nod; a weaker one a nod now and then (never within
-        // NOD_REFRACTORY of the last nod), a turn or tilt of the head (a beat), a flick of the
-        // brows, or nothing visible. Sizes vary widely (log-normal).
+        // strong (nuclear) accent gets a nod, a weaker one now and then, but never within
+        // NOD_REFRACTORY of the last nod; otherwise a turn or tilt of the head (a beat), a flick
+        // of the brows, or nothing visible. Sizes vary widely (log-normal).
         const r = this.rng2;
         const size = (0.5 + 0.5 * s) * clamp(Math.exp(0.32 * gauss(r)), 0.55, 1.7);
         const u = r();
-        const pNod = t < this._nodFree ? 0 : 0.15 + 0.35 * s;
-        if (s >= ACCENT_ALWAYS_NODS || u < pNod) {
+        const free = t >= this._nodFree;
+        const pNod = free ? 0.15 + 0.35 * s : 0;
+        if ((free && s >= ACCENT_ALWAYS_NODS) || u < pNod) {
           this._nod(t, size);
           this._nodFree = t + NOD_REFRACTORY[0] + (NOD_REFRACTORY[1] - NOD_REFRACTORY[0]) * r();
         } else if (u < pNod + 0.55 * (1 - pNod)) {

@@ -214,6 +214,23 @@ export function acousticOnset(ac, from, to = from + 0.4) {
   return NaN;
 }
 
+/** Visemes whose sound is a hiss (frication) rather than the voice. */
+const FRICATIVES = new Set(['FF', 'SS', 'TH', 'CH']);
+
+/**
+ * Where any sound starts in [from, to]: the first frame within 40 dB of the loudest in the next
+ * 0.4 s (and above -62 dBFS) that stays there for 10 ms (a fricative's hiss before the voice).
+ * NaN when there is none before `to`. @param {AcousticTrack} ac @param {number} from @param {number} to
+ */
+export function soundStart(ac, from, to) {
+  const a = trackFrame(ac, Math.max(0, from)), b = trackFrame(ac, to);
+  let ref = -Infinity;
+  for (let i = a; i <= trackFrame(ac, from + 0.4); i++) if (ac.e[i] > ref) ref = ac.e[i];
+  const thr = Math.max(ref - 40, -62);
+  for (let i = a; i + 2 <= b; i++) if (ac.e[i] > thr && ac.e[i + 1] > thr && ac.e[i + 2] > thr) return i * ac.hop;
+  return NaN;
+}
+
 /**
  * Landmarks of a timeline in its clip's audio, as anchors [timeline time, audio time]: phrase
  * onsets, the closure of each m / b / p and the low-band dip of each f / v between vowels, and the
@@ -282,6 +299,13 @@ export function landmarks(tl, ac) {
           }
           raw.push([s.end, rel, 2, i, 1]);
           raw.push([s.start, Math.min(rel - 0.06, on - 0.02), 1]);
+        } else if (FRICATIVES.has(s.viseme)) {
+          // a fricative's hiss starts well before the voice ("Five", "So"), too quiet to count as
+          // the phrase's sound: it starts where any sound does, and an f / v tuck releases where
+          // the voice comes in
+          const hiss = soundStart(ac, s.start - 0.1, on);
+          raw.push([s.start, (Number.isFinite(hiss) ? hiss : on) - ONSET_PRE, 2]);
+          if (s.viseme === 'FF' && Number.isFinite(hiss) && on - hiss >= 0.03 && Math.abs(on - s.end) <= MAX_SHIFT) raw.push([s.end, on, 1.5, i, 1]);
         } else {
           raw.push([s.start, on - ONSET_PRE, 2]);
         }

@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyseAcoustics } from '../../../src/audio/acoustics.js';
 import {
-  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, bandClosure, findDip, fuseTimeline, landmarks, monotone, priorNorms, vowelAmounts,
-  warmUpFusion, warpTime,
+  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, bandClosure, findDip, fuseTimeline, landmarks, monotone, priorNorms, soundStart,
+  vowelAmounts, warmUpFusion, warpTime,
 } from '../../../src/audio/fusion.js';
 import { visemeTarget } from '../../../src/audio/articulation.js';
 import { decodeWav } from '../../../src/audio/wav.js';
@@ -158,6 +158,18 @@ describe('landmarks: releases after a consonant, phrase-initial m / b / p (0.8-5
     const { tl: o3 } = alignTimeline(t3, ac3);
     expect(Math.abs(o3[1].end - 0.18)).toBeLessThan(0.012);
     expect(o3[1].start).toBeLessThan(0.1);                    // closed before the murmur
+  });
+
+  it('a phrase-initial f starts with its hiss and its tuck releases where the voice comes in ("Five")', () => {
+    // the hiss from 0.05 s (-45 dB: too quiet to count as the phrase's sound), the voice from 0.13
+    const e4 = (t) => (t < 0.05 ? -80 : t < 0.13 ? -45 : t < 0.6 ? -18 : -80);
+    const ac4 = track3(0.8, e4, (t) => (t < 0.13 ? -75 : e4(t) - 3), (t) => (t < 0.05 ? -80 : t < 0.13 ? -55 : t < 0.6 ? -33 : -80));
+    const t4 = [{ start: 0, end: 0.1, viseme: 'sil' }, { start: 0.1, end: 0.15, viseme: 'FF' }, { start: 0.15, end: 0.6, viseme: 'aa' }, { start: 0.6, end: 0.8, viseme: 'sil' }];
+    const { tl: o4 } = alignTimeline(t4, ac4);
+    expect(Math.abs(o4[1].start - 0.04)).toBeLessThan(0.008);
+    expect(Math.abs(o4[1].end - 0.13)).toBeLessThan(0.008);
+    expect(o4[1].exactEnd).toBe(true);
+    expect(soundStart(ac4, 0, 0.13)).toBeCloseTo(0.05, 2);
   });
 
   it('the two edges of one closure may stretch it well beyond the warp\'s usual 250 % (Kokoro\'s 25 ms m, a 70 ms closure)', () => {

@@ -26,7 +26,7 @@ const VOWELS = new Set(['aa', 'E', 'I', 'O', 'U']);
 const VOCALIC = new Set(['aa', 'E', 'I', 'O', 'U', 'RR']);
 
 /** The jaw a vowel category allows (before stress): close U / I, mid O / E (ɛ e ə ɜ), open aa. */
-export const JAW_RANGE = Object.freeze({ U: [0.04, 0.3], I: [0.04, 0.36], O: [0.2, 0.75], E: [0.12, 0.72], aa: [0.3, 0.95] });
+export const JAW_RANGE = Object.freeze({ U: [0.04, 0.3], I: [0.04, 0.36], O: [0.2, 0.75], E: [0.12, 0.62], aa: [0.3, 0.95] });
 
 /** How far (s) a landmark may move a timeline boundary, and how far around it a landmark is looked for. */
 export const MAX_SHIFT = 0.09;
@@ -296,12 +296,12 @@ export function vowelAmounts(viseme, va, n, clipNorm, T) {
   // prominence: a stressed syllable is louder and longer; a reduced one quieter and shorter
   const stress = clamp(0.92 + 0.03 * eRel + 0.14 * (durRel - 1), 0.62, 1.18);
   const q = va.f1 > 0 ? clamp((va.q - 0.2) / 0.4, 0, 1) : 0;
-  // F1 -> openness: close vowels ~0.07, open ones ~0.8 of the jaw's range
+  // F1 -> openness: close vowels ~0.07, open ones ~0.9 of the jaw's range
   const x = va.f1 > 0 ? clamp((va.f1 - n.f1lo) / (n.f1hi - n.f1lo), -0.1, 1.15) : NaN;
   // (the category bounds what the sound may say: a U is a close vowel whatever the tracker claims
   // — the weak F1 of a back rounded vowel lets F2 pass for it — and an open vowel is open)
   const [jlo, jhi] = JAW_RANGE[viseme] || [0.03, 0.95];
-  const jawAc = Number.isFinite(x) ? clamp(0.07 + 0.74 * Math.max(0, x), jlo, jhi) : T[0];
+  const jawAc = Number.isFinite(x) ? clamp(0.07 + 0.86 * Math.max(0, x), jlo, jhi) : T[0];
   const jaw = clamp((T[0] + (jawAc - T[0]) * 0.9 * q) * stress, 0.03, 0.95);
   let wide = T[1], teeth = T[5], round = T[2];
   if (viseme === 'E' || viseme === 'I') {

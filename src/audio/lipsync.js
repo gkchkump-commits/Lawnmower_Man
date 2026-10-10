@@ -680,8 +680,13 @@ export class LipSync {
     /** @type {Array<() => void>} */
     this._offs = [];
     // compile the analysis while the app is idle, not on the first clip's frames (browser only)
+    // (one idle callback per step: the fusion and the segments add 2-4 ms each, not to one task)
     if (typeof globalThis.requestIdleCallback === 'function') {
-      globalThis.requestIdleCallback(() => { warmUpAnalysis(); warmUpFusion(visemeTarget, warmUpSegments); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
+      const idle = (fn) => globalThis.requestIdleCallback(fn, { timeout: 5000 });
+      idle(() => {
+        warmUpAnalysis(); this.acoustics?.warmUp?.();
+        idle(() => warmUpFusion(visemeTarget, (f) => idle(() => warmUpSegments(f))));
+      });
     }
     const p = this.player;
     if (p && typeof p.on === 'function') {

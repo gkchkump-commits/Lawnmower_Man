@@ -759,6 +759,8 @@ export class Director {
         this._thinkSwitchAt = time + Math.max(8, -11 * Math.log(Math.max(1e-6, this.rng3())));
         jump = true;
       }
+      // (none while the behaviour's own search holds a spot: one look at a time)
+      if (this._B?.gaze.on) this._think.microAt = Math.max(this._think.microAt, time + 0.4);
       if (time >= this._think.microAt) {
         // small looks within the averted region (1-3 deg)
         const a = (1 + 2 * this.rng3()) * roam, ang = this.rng3() * Math.PI * 2;

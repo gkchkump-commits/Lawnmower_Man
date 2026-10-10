@@ -4,36 +4,47 @@
 // sideways shift), a gaze target of its own, and face channels outside speech.
 //
 //   scheduler  a semi-Markov process per track (gaze, head, face, breath): a track that is free
-//              waits a random (gamma) time drawn from the total rate of the gestures that fit the
-//              situation (state, typing, the camera's view of the user, boredom), then starts one
-//              of them, picked by its rate; each kind has a refractory period, so nothing comes
+//              waits a random (exponential) time drawn from the total rate of the gestures that fit
+//              the situation (state, typing, the camera's view of the user, boredom), then starts
+//              one of them, picked by its rate; each kind has a refractory period, so nothing comes
 //              twice in a row, and every instance draws its own durations, amplitudes and
-//              directions. Start times are continuous (not frames), so 60 and 144 Hz show the same
-//              behaviour. No clock, no loop: inter-gesture intervals are random, and so are the
-//              gestures.
+//              directions. Start times are continuous (not frames), and every track (and the
+//              posture, the activity, the events) draws from its own random stream, so 60 and
+//              144 Hz show the same behaviour.
+//   activity   people move in bursts and are still in between: a hidden slow state alternates
+//              calm bouts (log-normal, median 40 s) with active ones (median 25 s); the rates are
+//              scaled down in calm and up in active (the mean stays what the kinds say). So the
+//              gestures come in clusters with quiet stretches of half a minute and more between,
+//              never on a clock.
+//   the user   always wins: the cursor, the face or the user coming back cuts the avatar's own looks
+//              short at once (the eyes go to the user, the head follows in ~0.2-0.35 s), and social
+//              signals (a brow flash, a smile) answer the user: when they look back after a while,
+//              when they come back after a quiet minute, at the pauses of their voice (a nod).
 //   kinematics every gesture is minimum-jerk envelopes / pulses (src/avatar/motion.js) that start
 //              and end at rest; the gaze jumps between fixations (the eye controller makes the
 //              saccades and the head's share); posture drifts through critically damped springs
-//              toward targets that change every few to tens of seconds. A gesture cut short (a
-//              state change) fades out over a few hundred ms, so nothing steps.
+//              toward targets that change every few to tens of seconds, wandering a little around
+//              each. A gesture cut short (a state change, the user) fades out, so nothing steps.
 //   scaling    rates scale with `liveliness` (0 = off, 1 = default, 2 = twice as often), sizes
 //              with 0.55 + 0.45 x liveliness.
 //
 // Repertoire by situation:
 //   idle       look-arounds (head + eyes to points in the room and back), head tilts, posture
-//              shifts, brow flashes, brief smiles, lip presses, a swallow, a deep breath / sigh, a
-//              slow neck roll
-//   bored      (idle long, or the camera sees nobody) longer gazes away, slumping, sighs, yawns
+//              shifts, lip presses, a swallow, a deep breath / sigh, a slow neck roll; brow flashes
+//              and smiles mostly for someone (the camera sees the user, the user comes back)
+//   bored      (idle long, or the camera sees nobody) longer gazes away, slumping, sighs, now and
+//              then a yawn (fewer as the boredom goes on)
 //   typing     the user types: leans in, glances down at the chat now and then
-//   listening  leans in, attentive tilts, backchannel nods with a brow / lip "mm-hm"
+//   listening  leans in, attentive tilts, a nod at the pauses of the user's voice (sometimes with a
+//              brow "mm-hm")
 //   thinking   looks around in the averted region, pressed / pursed lips, a squint, a "hmm" tilt
 //   speaking   the prosody leads (src/avatar/director.js): only posture drift, and energy pulses
-//              on the accents for the hologram
-//   camera     present and looking: engaged (fewer look-arounds, more smiles), mirrors the user's
-//              head tilt a little, a smile and a brow flash when the user looks back at it
+//              on emphasis for the hologram
+//   camera     present and looking: engaged (fewer look-arounds), mirrors the user's head tilt a
+//              little, now and then a smile and a brow flash when the user looks back after a while
 
 import { clamp, clamp01, mulberry32 } from './noise.js';
-import { Spring, envelope, gauss, logNormal, minJerk, pulse } from './motion.js';
+import { Spring, envelope, gauss, logNormal, minJerk, pinkNoise, pulse } from './motion.js';
 
 const RAD = Math.PI / 180;
 /** liveliness range (avatar.liveliness): 0 = no spontaneous behaviour, 1 = default, 2 = lively */
@@ -47,6 +58,24 @@ const smoothstep = (e0, e1, x) => {
 
 /** The tracks a gesture can occupy (one gesture per track at a time). */
 export const TRACKS = /** @type {const} */ (['gaze', 'head', 'face', 'breath']);
+
+/**
+ * The slow activity state: calm and active bouts (log-normal lengths, s) and how much they scale
+ * the rates. The two have the same spread, so their mean lengths are in the medians' ratio and
+ * the scale is normalised to keep the mean rate of every kind.
+ */
+export const ACTIVITY = Object.freeze({ calm: { median: 40, sigma: 0.5, k: 0.1 }, active: { median: 25, sigma: 0.5, k: 1.4 } });
+const ACT_NORM = (ACTIVITY.calm.median * ACTIVITY.calm.k + ACTIVITY.active.median * ACTIVITY.active.k)
+  / (ACTIVITY.calm.median + ACTIVITY.active.median);
+/** The camera: how long the user looked away before a look back may be acknowledged (s) */
+export const ACK_AWAY = Object.freeze({ min: 3, full: 20, p: 0.6 });
+/** A quiet minute: the user's next sign of life may be greeted (a brow flash / smile) */
+const GREET_QUIET = 60;
+/** The user's voice (mic level 0..1): a pause this long after this much voice is a nod's moment */
+const VOICE_PAUSE = 0.25, VOICE_MIN = 1.2;
+/** Eye-in-head limit of the avatar's own looks once the head has followed (deg): the head takes
+ * the rest; and the largest look (deg, world: the eyes' range, src/avatar/eyes.js GAZE_DEG.x) */
+const EYE_IN_HEAD = 13, LOOK_MAX = 17;
 
 /**
  * @typedef {Object} BehaviorOut   what the director adds (all 0 / off at rest)
@@ -64,7 +93,7 @@ export const TRACKS = /** @type {const} */ (['gaze', 'head', 'face', 'breath']);
  * @property {number} chin   0..1 the chin bunches (pressed lips, a swallow)
  * @property {number} nostril 0..1 (a deep breath)
  * @property {number} sigh   0..1 a deep breath in and out
- * @property {number} pulse  0..1 energy wave on an accent / emphasis (the hologram's glow)
+ * @property {number} pulse  0..1 energy wave on an emphasis (the hologram's glow)
  * @property {boolean} blink a blink now (the end of a yawn, some look-arounds)
  * @property {{ on: boolean, rel: boolean, x: number, y: number, share: number, jump: boolean }} gaze
  *   while on: the eyes look at (x, y) (world degrees; rel: relative to the director's own target)
@@ -82,17 +111,18 @@ export function createBehaviorOut() {
 /**
  * Situation of a frame (computed by Behavior#update from what the director passes in).
  * @typedef {{ state: string, look: boolean, lookKind: string, typing: boolean, present: boolean|null,
- *   looking: boolean, bored: number, L: number, A: number, thinkSide: number, thinkUp: boolean }} Ctx
+ *   looking: boolean, bored: number, L: number, A: number, thinkSide: number, thinkUp: boolean,
+ *   yawns: number }} Ctx
  */
 
 /**
  * The repertoire. rate(c): per minute at liveliness 1 (0: not now); refr: seconds before the same
  * kind again; tracks: what it occupies; make(r, c): one instance's parameters (incl. dur);
- * apply(g, x, out, c): its contribution x seconds after it started (fade-out applied outside).
+ * apply(g, x, out, k, c): its contribution x seconds after it started (k: its fade-out, 1..0).
  * @type {Record<string, { tracks: string[], refr: number, rate: (c: Ctx) => number,
  *   make: (r: () => number, c: Ctx) => any, apply: (g: any, x: number, o: BehaviorOut, k: number, c: Ctx) => void }>}
  */
-const KINDS = {
+export const KINDS = {
   // ---- gaze ------------------------------------------------------------------------------------
   lookAround: {
     tracks: ['gaze'], refr: 3,
@@ -107,7 +137,8 @@ const KINDS = {
       // are larger and much longer; listening's are short "where was I" glances
       const small = c.state === 'listening';
       const side = r() < 0.5 ? -1 : 1;
-      const amp = Math.min(22, logNormal(r, small ? 7 : 12, 0.3, 5, 20) * (1 + 0.35 * c.bored) * (0.8 + 0.2 * c.A));
+      // (at most what the eyes reach in the head: they lead, the head follows a moment later)
+      const amp = Math.min(LOOK_MAX, logNormal(r, small ? 7 : 12, 0.3, 5, 20) * (1 + 0.35 * c.bored) * (0.8 + 0.2 * c.A));
       const vr = r();
       const vy = vr < 0.27 ? -(0.25 + 0.35 * r()) : vr < 0.38 ? 0.15 + 0.25 * r() : (r() - 0.5) * 0.2;
       const fix = [{ x: side * amp, y: amp * vy, d: logNormal(r, small ? 0.75 : 1.25, 0.45, 0.4, 4) * (1 + 2.2 * c.bored) }];
@@ -115,8 +146,7 @@ const KINDS = {
       const more = small ? 0 : r() < 0.3 ? (r() < 0.2 ? 2 : 1) : 0;
       for (let i = 0; i < more; i++) {
         const p = fix[fix.length - 1];
-        // (never beyond 24 deg: the eyes stay in their range with the head's share)
-        const nx = clamp(p.x + side * (2 + 5 * r()) * (r() < 0.25 ? -1 : 1), -24, 24);
+        const nx = clamp(p.x + side * (2 + 5 * r()) * (r() < 0.25 ? -1 : 1), -LOOK_MAX, LOOK_MAX);
         fix.push({ x: nx, y: p.y + (r() - 0.5) * 5, d: logNormal(r, 0.9, 0.4, 0.35, 3) * (1 + c.bored) });
       }
       // the head goes along with a good share of a look into the room (more when bored)
@@ -136,15 +166,17 @@ const KINDS = {
     apply: gazeFixations,
   },
   search: {
-    // thinking: the eyes wander within the averted region ("searching memory")
-    tracks: ['gaze'], refr: 1.8,
-    rate: (c) => (c.state === 'thinking' ? 8 : 0),
+    // thinking: now and then the eyes settle on another spot of the averted region ("searching
+    // memory"), held a good while; the director's own small shifts pause meanwhile
+    // (src/avatar/director.js), so the two never stack into darting
+    tracks: ['gaze'], refr: 2.5,
+    rate: (c) => (c.state === 'thinking' ? 3 : 0),
     make: (r, c) => {
-      const n = 1 + (r() < 0.45 ? 1 : 0) + (r() < 0.15 ? 1 : 0);
+      const n = r() < 0.2 ? 2 : 1;
       const fix = [];
       for (let i = 0; i < n; i++) {
         const a = 2.5 + 4.5 * r(), ang = r() * Math.PI * 2;
-        fix.push({ x: a * Math.cos(ang) + c.thinkSide * 1.5, y: 0.7 * a * Math.sin(ang), d: logNormal(r, 0.7, 0.4, 0.3, 2) });
+        fix.push({ x: a * Math.cos(ang) + c.thinkSide * 1.5, y: 0.7 * a * Math.sin(ang), d: logNormal(r, 1.4, 0.35, 0.6, 3.2) });
       }
       return withHead({ fix, rel: true, share: 0.2 });
     },
@@ -159,23 +191,27 @@ const KINDS = {
       const a = 0.5 + 0.4 * r(), h = logNormal(r, 2.2, 0.5, 0.8, 6), rel = 0.7 + 0.5 * r();
       return {
         dur: a + h + rel, a, h, rel, dir: r() < 0.5 ? -1 : 1, roll: (2.2 + 2.8 * r()) * (c.state === 'listening' ? 1.15 : 1),
-        yaw: (r() - 0.5) * 2, pitch: (r() - 0.6) * 1.2,
+        yaw: (r() - 0.5) * 2, pitch: (r() - 0.6) * 1.2, drift: 0.08 + 0.12 * r(), seed: (r() * 1e6) | 0,
       };
     },
     apply: (g, x, o, k) => {
-      const e = envelope(x, g.a, g.h, g.rel) * k;
-      o.roll += g.dir * g.roll * RAD * e;
+      const e = holdLive(g, x) * k;
+      o.roll += (g.dir * g.roll * holdDrift(g, x) + 0.3 * pinkNoise(x, g.seed, { f0: 0.35, octaves: 2 })) * RAD * e;
       o.yaw += g.yaw * RAD * e;
       o.pitch += g.pitch * RAD * e;
     },
   },
   nod: {
-    // listening: backchannel nods ("mm-hm"), one or two, with a brow / lip micro-movement
+    // listening: a backchannel nod ("mm-hm"), one or two, mostly at the pauses of the user's voice
+    // (Behavior#setUser voice), now and then with a brow / lip micro-movement
     tracks: ['head'], refr: 1.7,
-    rate: (c) => (c.state === 'listening' ? 8 : 0),
+    rate: (c) => (c.state === 'listening' ? 2 : 0),
     make: (r) => {
       const amp = 1.1 + 1.5 * r(), k = 0.85 + 0.35 * r(), two = r() < 0.38;
-      return { dur: (two ? 0.95 : 0.55) * k, amp, k, two, brow: 0.12 + 0.15 * r(), press: r() < 0.5 ? 0.2 + 0.2 * r() : 0, yaw: (r() - 0.5) * 0.6 };
+      return {
+        dur: (two ? 0.95 : 0.55) * k, amp, k, two, brow: r() < 0.3 ? 0.12 + 0.15 * r() : 0,
+        press: r() < 0.4 ? 0.2 + 0.2 * r() : 0, yaw: (r() - 0.5) * 0.6,
+      };
     },
     apply: (g, x, o, k) => {
       let n = pulse(x, 0.17 * g.k, 0.3 * g.k);
@@ -183,7 +219,7 @@ const KINDS = {
       o.pitch -= g.amp * RAD * n * k;
       o.yaw += g.yaw * RAD * n * k;
       const mm = envelope(x, 0.12, Math.max(0, g.dur - 0.4), 0.28) * k;
-      o.brow = softOr(o.brow, g.brow * mm);
+      if (g.brow) o.brow = softOr(o.brow, g.brow * mm);
       if (g.press) { o.press = softOr(o.press, g.press * mm); o.chin = softOr(o.chin, 0.5 * g.press * mm); }
     },
   },
@@ -206,11 +242,14 @@ const KINDS = {
     rate: (c) => (c.state === 'thinking' ? 3 : 0),
     make: (r, c) => {
       const a = 0.45 + 0.3 * r(), h = logNormal(r, 1.6, 0.4, 0.7, 4), rel = 0.7 + 0.4 * r();
-      return { dur: a + h + rel, a, h, rel, roll: (2.5 + 2.5 * r()) * (r() < 0.75 ? c.thinkSide : -c.thinkSide), press: 0.35 + 0.35 * r(), squint: r() < 0.6 ? 0.25 + 0.2 * r() : 0, pitch: 0.5 + r() };
+      return {
+        dur: a + h + rel, a, h, rel, roll: (2.5 + 2.5 * r()) * (r() < 0.75 ? c.thinkSide : -c.thinkSide),
+        press: 0.35 + 0.35 * r(), squint: r() < 0.6 ? 0.22 + 0.18 * r() : 0, pitch: 0.5 + r(), drift: 0.08 + 0.12 * r(), seed: (r() * 1e6) | 0,
+      };
     },
     apply: (g, x, o, k) => {
-      const e = envelope(x, g.a, g.h, g.rel) * k;
-      o.roll += g.roll * RAD * e;
+      const e = holdLive(g, x) * k;
+      o.roll += (g.roll * holdDrift(g, x) + 0.3 * pinkNoise(x, g.seed, { f0: 0.35, octaves: 2 })) * RAD * e;
       o.pitch += g.pitch * RAD * e;
       o.press = softOr(o.press, g.press * e);
       o.chin = softOr(o.chin, 0.45 * g.press * e);
@@ -220,8 +259,10 @@ const KINDS = {
 
   // ---- face ------------------------------------------------------------------------------------
   browFlash: {
+    // a social signal: for someone (the camera sees the user looking), rare at nobody; the user
+    // coming back after a quiet minute is greeted with one (event-driven, Behavior#_noteUser)
     tracks: ['face'], refr: 7,
-    rate: (c) => (c.state === 'idle' ? 1.0 * (1 - 0.7 * c.bored) * (c.present && c.looking ? 1.6 : 1) : c.state === 'listening' ? 0.8 : 0),
+    rate: (c) => (c.state === 'idle' ? (c.present === true ? (c.looking ? 1.2 : 0.4) : 0.25) * (1 - 0.7 * c.bored) : c.state === 'listening' ? 0.8 : 0),
     make: (r) => {
       const h = 0.12 + 0.22 * r();
       return { dur: 0.13 + h + 0.38, h, amp: 0.3 + 0.35 * r() };
@@ -230,7 +271,9 @@ const KINDS = {
   },
   smile: {
     tracks: ['face'], refr: 10,
-    rate: (c) => (c.state === 'idle' ? (c.typing ? 0.3 : 0.7) * (1 - 0.8 * c.bored) * (c.present && c.looking ? 2.2 : 1) : c.state === 'listening' ? 0.5 : 0),
+    rate: (c) => (c.state === 'idle'
+      ? (c.present === true && c.looking ? (c.typing ? 0.3 : 1.0) : c.typing ? 0.15 : 0.25) * (1 - 0.8 * c.bored)
+      : c.state === 'listening' ? 0.5 : 0),
     make: (r) => {
       const a = 0.35 + 0.2 * r(), h = logNormal(r, 1.1, 0.5, 0.4, 3.5), rel = 0.8 + 0.5 * r();
       return { dur: a + h + rel, a, h, rel, amp: 0.15 + 0.22 * r(), brow: r() < 0.35 ? 0.15 : 0 };
@@ -258,7 +301,7 @@ const KINDS = {
   purse: {
     // thinking: lips pursed (pushed forward a little)
     tracks: ['face'], refr: 7,
-    rate: (c) => (c.state === 'thinking' ? 1.2 : c.state === 'idle' && !c.typing ? 0.15 : 0),
+    rate: (c) => (c.state === 'thinking' ? 1.2 : c.state === 'idle' && !c.typing ? 0.1 : 0),
     make: (r) => {
       const h = logNormal(r, 1.0, 0.45, 0.4, 2.6);
       return { dur: 0.3 + h + 0.4, h, amp: 0.24 + 0.16 * r() };
@@ -275,7 +318,7 @@ const KINDS = {
     rate: (c) => (c.state === 'thinking' ? 1.2 : 0),
     make: (r) => {
       const h = logNormal(r, 1.0, 0.45, 0.4, 2.5);
-      return { dur: 0.3 + h + 0.5, h, amp: 0.28 + 0.22 * r() };
+      return { dur: 0.3 + h + 0.5, h, amp: 0.25 + 0.2 * r() };
     },
     apply: (g, x, o, k) => { o.squint = softOr(o.squint, g.amp * envelope(x, 0.3, g.h, 0.5) * k); },
   },
@@ -292,29 +335,36 @@ const KINDS = {
     },
   },
   yawn: {
-    // bored: the mouth opens slowly with the eyes narrowing, the head tilts back, a deep breath
-    tracks: ['face', 'head', 'breath'], refr: 110,
-    rate: (c) => (c.state === 'idle' && !c.typing && c.bored > 0.3 ? 0.7 * c.bored * c.bored : 0),
+    // bored: a deep inhale with the brows up, the mouth gaping slowly (no rounding) while the eyes
+    // squeeze half shut and the head tips back, a short peak, then a quicker close with a little
+    // press of the lips. Rare: fewer and fewer as one bored stretch goes on.
+    tracks: ['face', 'head', 'breath'], refr: 240,
+    rate: (c) => (c.state === 'idle' && !c.typing && c.bored > 0.3 ? 0.7 * c.bored * c.bored * 0.35 ** c.yawns : 0),
     make: (r) => {
-      const a = 1.4 + 0.5 * r(), h = 0.7 + 0.7 * r(), rel = 1.1 + 0.4 * r();
-      return { dur: a + h + rel + 0.2, a, h, rel, jaw: 0.42 + 0.18 * r(), back: 2.5 + 1.5 * r(), roll: (r() - 0.5) * 3 };
+      const a = 2.0 + 0.5 * r(), h = 0.8 + 0.7 * r(), rel = 1.0 + 0.4 * r();
+      return {
+        dur: a + h + rel + 0.8, a, h, rel, jaw: 0.75 + 0.15 * r(), back: 4 + 2 * r(), roll: (r() - 0.5) * 3,
+        press: r() < 0.6 ? 0.25 + 0.15 * r() : 0,
+      };
     },
     apply: (g, x, o, k) => {
       const e = envelope(x, g.a, g.h, g.rel) * k;
       o.jaw = softOr(o.jaw, g.jaw * e);
-      o.round = softOr(o.round, 0.18 * e);
-      o.squint = softOr(o.squint, 0.7 * envelope(x - 0.3, g.a - 0.2, g.h + 0.2, g.rel * 0.8) * k);
-      o.brow = softOr(o.brow, 0.25 * pulse(x, 0.5 * g.a, g.a));
+      // (the eyes follow the mouth a little late, and open again as it closes)
+      o.squint = softOr(o.squint, envelope(x - 0.4, g.a - 0.3, g.h + 0.2, g.rel * 0.8) * k);
+      // the brows lift with the first of the inhale and come down before the peak
+      o.brow = softOr(o.brow, 0.28 * pulse(x, 0.35 * g.a, 0.45 * g.a) * k);
       o.pitch += g.back * RAD * e;
       o.roll += g.roll * RAD * e;
       o.sigh = softOr(o.sigh, envelope(x, g.a, g.h, g.rel + 0.6) * k);
       o.nostril = softOr(o.nostril, 0.4 * envelope(x, g.a * 0.8, g.h, 0.6) * k);
+      if (g.press) o.press = softOr(o.press, g.press * pulse(x - (g.a + g.h + 0.7 * g.rel), 0.25, 0.5) * k);
       if (x >= g.a + g.h + g.rel - 0.15 && !g.blinked) { g.blinked = true; o.blink = true; }
     },
   },
   acknowledge: {
-    // the camera: the user looks back at the avatar after looking away (event-driven, rate 0)
-    tracks: ['face'], refr: 12,
+    // the camera: the user looks back at the avatar after a while (event-driven, rate 0)
+    tracks: ['face'], refr: 60,
     rate: () => 0,
     make: (r) => ({ dur: 2.6, brow: 0.45 + 0.15 * r(), smile: 0.3 + 0.12 * r() }),
     apply: (g, x, o, k) => {
@@ -343,19 +393,26 @@ const KINDS = {
   },
 };
 
+/** A held gesture's envelope (attack / hold / release, s: g.a, g.h, g.rel). */
+const holdLive = (g, x) => envelope(x, g.a, g.h, g.rel);
+/** ... and its amplitude, which settles back a little over the hold (a held pose is never dead flat). */
+const holdDrift = (g, x) => 1 - g.drift * minJerk(clamp01((x - g.a) / g.h));
+
 /** Head movement time (s) for a turn of `deg` degrees (gaze shifts: ~0.35 s small, ~0.75 s large). */
 const headMoveDur = (deg) => clamp(0.32 + 0.035 * Math.abs(deg), 0.32, 0.8);
 
 /**
  * A gaze gesture's head motion: a minimum-jerk step toward each fixation's share (starting a
  * moment after the saccade), and one back at the end. Steps superpose, so overlapping ones stay
- * smooth (C2). Adds `steps` and the total `dur` (the fixations plus the head's way back).
+ * smooth (C2). The head takes at least what keeps the eyes within EYE_IN_HEAD of straight ahead.
+ * Adds `steps` and the total `dur` (the fixations plus the head's way back).
  */
 function withHead(g) {
-  const sx = g.share, sy = g.shareY ?? 0.5 * g.share;
   g.steps = [];
   let t = 0, hx = 0, hy = 0;
   for (const f of g.fix) {
+    const sx = Math.max(g.share, 1 - EYE_IN_HEAD / Math.max(EYE_IN_HEAD, Math.abs(f.x)));
+    const sy = g.shareY ?? 0.5 * g.share;
     const nx = sx * f.x, ny = sy * f.y;
     g.steps.push({ at: t + 0.04, dur: headMoveDur(Math.hypot(nx - hx, ny - hy)), dx: nx - hx, dy: ny - hy });
     hx = nx; hy = ny;
@@ -368,17 +425,23 @@ function withHead(g) {
   return g;
 }
 
-/**
- * The fixations of a gaze gesture: a piecewise constant target (the eye controller makes the
- * saccades and, with share 0, no head motion of its own: the gesture moves the head itself).
- */
-function gazeFixations(g, x, o, k) {
+/** A gaze gesture's head offset x seconds in (deg, [yaw, pitch]). */
+function headOffset(g, x) {
   let hx = 0, hy = 0;
   for (const s of g.steps) {
     if (x <= s.at) break;
     const u = minJerk((x - s.at) / s.dur);
     hx += s.dx * u; hy += s.dy * u;
   }
+  return [hx, hy];
+}
+
+/**
+ * The fixations of a gaze gesture: a piecewise constant target (the eye controller makes the
+ * saccades and, with share 0, no head motion of its own: the gesture moves the head itself).
+ */
+function gazeFixations(g, x, o, k) {
+  const [hx, hy] = headOffset(g, x);
   o.yaw += hx * RAD * k;
   o.pitch += hy * RAD * k;
   if (k < 0.999) return; // fading out: the gaze is back with the director already
@@ -410,11 +473,15 @@ function postureBias(c, side) {
   return b;
 }
 
+/** The random streams: one per track, the posture, the activity state and the user's events. */
+const STREAMS = [...TRACKS, 'post', 'act', 'ev'];
+
 export class Behavior {
   /** @param {{ seed?: number, liveliness?: number }} [o] */
   constructor(o = {}) {
     this.seed = (o.seed ?? 1) | 0;
-    this.rng = mulberry32(this.seed * 49979687 + 29);
+    /** @type {Record<string, () => number>} */
+    this._rng = Object.fromEntries(STREAMS.map((k, i) => [k, mulberry32((this.seed * 49979687 + 29 + i * 104729) | 0)]));
     this.liveliness = 1;
     this.setLiveliness(o.liveliness ?? 1);
     this.out = createBehaviorOut();
@@ -423,24 +490,43 @@ export class Behavior {
     /** next start time per track (NaN: to be drawn; Infinity: nothing fits until the situation changes) */
     this._next = Object.fromEntries(TRACKS.map((k) => [k, NaN]));
     this._ctxKey = '';
-    /** when each track became free (the origin of its next wait: continuous time, not a frame) */
+    /** the origin of each track's next wait (continuous time, not a frame): it became free then */
     this._freeAt = Object.fromEntries(TRACKS.map((k) => [k, NaN]));
+    /** when the last gesture on each track ends (or ended: its fade-out) */
+    this._endAt = Object.fromEntries(TRACKS.map((k) => [k, -Infinity]));
     /** @type {Record<string, number>} last start per kind */
     this._last = {};
     this._state = 'idle';
     this._stateAt = 0;
     this._time = 0;
     this._started = false;
+    // the slow activity state (calm / active bouts)
+    this._act = { calm: true, until: NaN };
     // the user, as the app sees them
     this._typedAt = -Infinity;
     this._engagedAt = 0;
+    /** the user's last sign of life (cursor, typing, coming into view, looking): greetings */
+    this._userAt = -Infinity;
     /** @type {boolean|null} null: no camera */
     this._present = null;
     this._absentAt = -Infinity;
     this._looking = false;
-    this._lookChangedAt = 0;
+    /** when the user last looked away (or left); the app's start counts as one */
+    this._lookAwayAt = 0;
     this._userRoll = 0;
     this._ackWanted = false;
+    /** the director holds the user (cursor / face) as its target (the avatar's own glances aside) */
+    this._attn = false;
+    /** no look of the avatar's own before this (the user just showed up) */
+    this._gazeHold = -Infinity;
+    /** @type {{ at: number, brow: boolean, smile: boolean }|null} a greeting due */
+    this._greet = null;
+    /** the user's voice (the mic level): pauses get a nod */
+    this._voice = { on: false, onAt: -Infinity, below: NaN, floor: 0.15 };
+    /** @type {number|undefined} a nod due at a pause of the user's voice */
+    this._nodAt = undefined;
+    /** yawns in this bored stretch */
+    this._yawns = 0;
     /** @type {number|undefined} a blink requested by a gesture, at this time */
     this._blinkAt = undefined;
     /** @type {Ctx} this frame's situation (one object, updated in place) */
@@ -452,6 +538,8 @@ export class Behavior {
     this._postNext = NaN;
     this._postSide = 1;
     this._mirror = new Spring();
+    /** how much the head wanders around its posture (0 when the behaviour is off) */
+    this._wander = new Spring();
     this._pulses = /** @type {Array<{ at: number, amp: number }>} */ ([]);
     /** recent gestures { t, kind } (tools, tests) */
     this.log = /** @type {Array<{ t: number, kind: string }>} */ ([]);
@@ -479,50 +567,75 @@ export class Behavior {
     }
     for (const k of TRACKS) { this._next[k] = NaN; this._freeAt[k] = t; }
     // the posture follows the new situation soon
-    this._postNext = Math.min(Number.isFinite(this._postNext) ? this._postNext : Infinity, t + 0.15 + 0.35 * this.rng());
+    this._postNext = Math.min(Number.isFinite(this._postNext) ? this._postNext : Infinity, t + 0.15 + 0.35 * this._rng.post());
   }
 
   /**
    * What the app knows about the user. typing: a key was typed now; present / looking / roll: the
    * camera's view (null present = no camera); roll: the user's head tilt in radians as seen in the
-   * selfie view (+ = counter-clockwise on screen).
-   * @param {{ typing?: boolean, present?: boolean|null, looking?: boolean, roll?: number }} u @param {number} t
+   * selfie view (+ = counter-clockwise on screen); voice: the microphone's level now (0..1, the
+   * app's meter; while the mic listens).
+   * @param {{ typing?: boolean, present?: boolean|null, looking?: boolean, roll?: number, voice?: number }} u @param {number} t
    */
   setUser(u, t) {
     if (!u || typeof u !== 'object') return;
-    if (u.typing) { this._typedAt = t; this._engagedAt = t; }
+    if (u.typing) { this._typedAt = t; this._engagedAt = t; this._noteUser(t); }
     if (u.present !== undefined) {
       const p = u.present === null ? null : !!u.present;
       if (p === false && this._present !== false) this._absentAt = t;
-      if (p) this._engagedAt = Math.max(this._engagedAt, t - 1);
+      if (p && this._present === false) {
+        // back in view: the avatar's own looks give way, and a long absence may be acknowledged
+        // when they look (below), counted from when they left
+        this._yieldGaze(t);
+        this._lookAwayAt = Math.min(this._lookAwayAt, this._absentAt);
+      }
+      if (p) { this._engagedAt = Math.max(this._engagedAt, t - 1); this._noteUser(t, true); }
       this._present = p;
-      if (!p) this._looking = false;
+      if (!p) { if (this._looking) this._lookAwayAt = t; this._looking = false; }
     }
     if (u.looking !== undefined && this._present !== false) {
       const l = !!u.looking;
-      if (l && !this._looking && t - this._lookChangedAt >= 1.5) this._ackWanted = true;
-      if (l !== this._looking) this._lookChangedAt = t;
+      if (l && !this._looking) {
+        this._yieldGaze(t);
+        // a look back after a while: now and then a smile and a brow flash (more likely the
+        // longer they were away; never after a glance away of a second or two)
+        const away = t - this._lookAwayAt;
+        if (away >= ACK_AWAY.min && this._rng.ev() < ACK_AWAY.p * smoothstep(ACK_AWAY.min, ACK_AWAY.full, away)) this._ackWanted = true;
+        this._noteUser(t, true);
+      }
+      if (!l && this._looking) this._lookAwayAt = t;
       this._looking = l;
       if (l) this._engagedAt = t;
     }
     if (u.roll !== undefined && Number.isFinite(Number(u.roll))) this._userRoll = clamp(Number(u.roll), -0.6, 0.6);
+    if (u.voice !== undefined) this._hear(clamp01(Number(u.voice) || 0), t);
   }
 
-  /** The user did something the avatar sees (the cursor moved). @param {number} t */
-  engage(t) { this._engagedAt = t; }
+  /** The user did something the avatar sees (the cursor moved): it looks at them. @param {number} t */
+  engage(t) {
+    this._engagedAt = t;
+    this._yieldGaze(t);
+    this._noteUser(t);
+  }
 
-  /** A speech prosody cue (the director's setProsody): accents send energy through the hologram. */
+  /** A speech prosody cue (the director's setProsody): an emphasis sends energy through the hologram. */
   cue(c, t) {
     if (!c || typeof c !== 'object') return;
     const s = clamp01(Number(c.strength ?? 1));
-    const amp = c.type === 'emphasis' ? 0.85 * s : c.type === 'accent' ? 0.4 * s : c.type === 'phrase-start' ? 0.18 * s : 0;
+    // (only the strong beats: a wave on every accent would be noise)
+    const amp = c.type === 'emphasis' ? s : 0;
     if (amp <= 0) return;
     this._pulses.push({ at: t, amp });
     if (this._pulses.length > 8) this._pulses.shift();
   }
 
   /** Kinds of the gestures running now ('a+b', '' when none): tools, tests. */
-  active() { return this._active.filter((g) => this._time < g.fadeAt + g.fadeDur).map((g) => g.kind).join('+'); }
+  active() {
+    return this._active.filter((g) => this._time >= g.t0 && this._time < g.fadeAt + g.fadeDur).map((g) => g.kind).join('+');
+  }
+
+  /** The slow activity state now: 'calm' or 'active' (tools, tests). */
+  get activity() { return this._act.calm ? 'calm' : 'active'; }
 
   /** The situation at time t (written into `out`, a fresh object by default). @returns {Ctx} */
   _ctxFor(state, t, out = /** @type {any} */ ({})) {
@@ -532,6 +645,7 @@ export class Behavior {
     out.state = state; out.look = false; out.lookKind = 'cursor'; out.typing = t - this._typedAt < 1.6;
     out.present = this._present; out.looking = this._looking; out.bored = bored;
     out.L = this.liveliness; out.A = 0.55 + 0.45 * this.liveliness; out.thinkSide = 1; out.thinkUp = true;
+    out.yawns = this._yawns;
     return out;
   }
 
@@ -539,19 +653,93 @@ export class Behavior {
     if (g.fadeAt <= t) return;
     g.fadeAt = t;
     g.fadeDur = d;
+    // (the tracks are free again when the last gesture on them is over)
+    for (const tr of KINDS[g.kind].tracks) {
+      let end = -Infinity;
+      for (const h of this._active) if (KINDS[h.kind].tracks.includes(tr)) end = Math.max(end, Math.min(h.t0 + h.dur, h.fadeAt + h.fadeDur));
+      this._endAt[tr] = end;
+    }
   }
 
-  /** @param {string} kind @param {number} t0 @param {Ctx} c */
-  _start(kind, t0, c) {
+  /**
+   * The user shows up (the cursor, the face, coming back, looking back): the avatar's own looks
+   * give way at once (the eyes go to the user now; the head's share of the look goes back over
+   * 0.2-0.35 s), and no new one starts for a moment. @param {number} t @returns {number} when the
+   * head is back
+   */
+  _yieldGaze(t) {
+    let done = t;
+    for (const g of this._active) {
+      if (!KINDS[g.kind].tracks.includes('gaze') || g.fadeAt <= t || t >= g.t0 + g.dur) continue;
+      const [hx, hy] = t > g.t0 ? headOffset(g.p, t - g.t0) : [0, 0];
+      const d = clamp(0.2 + 0.012 * Math.hypot(hx, hy), 0.2, 0.35);
+      this._fade(g, t, d);
+      done = Math.max(done, t + d);
+    }
+    this._gazeHold = Math.max(this._gazeHold, t + 1.2 + 0.8 * this._rng.ev());
+    this._next.gaze = NaN;
+    this._freeAt.gaze = this._gazeHold;
+    return done;
+  }
+
+  /**
+   * A sign of life from the user (t). After a quiet minute the first one may be greeted: a brow
+   * flash (half the time) and / or a smile (a third), a moment later. present: the camera (it
+   * acknowledges a look back by itself, so no greeting from it).
+   * @param {number} t @param {boolean} [camera]
+   */
+  _noteUser(t, camera = false) {
+    const quiet = t - this._userAt;
+    this._userAt = t;
+    if (camera || !(quiet > GREET_QUIET) || this._greet) return;
+    const r = this._rng.ev;
+    const brow = r() < 0.5, smile = r() < 0.3, at = t + 0.2 + 0.3 * r();
+    if (brow || smile) this._greet = { at, brow, smile };
+  }
+
+  /**
+   * The microphone's level (0..1): the voice is on above the room's noise floor; a pause of
+   * VOICE_PAUSE after at least VOICE_MIN of voice is where a listener nods (half the time).
+   * @param {number} lv @param {number} t
+   */
+  _hear(lv, t) {
+    const v = this._voice;
+    v.floor += (lv - v.floor) * (lv < v.floor ? 0.2 : 0.003);
+    const on = Math.max(0.3, v.floor + 0.18), off = on - 0.08;
+    if (!v.on) {
+      if (lv > on) { v.on = true; v.onAt = t; v.below = NaN; }
+      return;
+    }
+    if (lv >= off) { v.below = NaN; return; }
+    if (Number.isNaN(v.below)) v.below = t;
+    if (t - v.below < VOICE_PAUSE) return;
+    v.on = false;
+    if (v.below - v.onAt >= VOICE_MIN && this._rng.ev() < 0.5) this._nodAt = t;
+  }
+
+  /** @param {string} kind @param {number} t0 @param {Ctx} c @param {() => number} [r] */
+  _start(kind, t0, c, r) {
     const K = KINDS[kind];
-    const p = K.make(this.rng, c);
+    const p = K.make(r ?? this._rng[K.tracks[0]], c);
     const g = { kind, t0, dur: p.dur, fadeAt: Infinity, fadeDur: 0.3, p };
     this._active.push(g);
     this._last[kind] = t0;
-    this.log.push({ t: +t0.toFixed(3), kind });
+    for (const tr of K.tracks) this._endAt[tr] = Math.max(this._endAt[tr], t0 + p.dur);
+    if (kind === 'yawn') this._yawns++;
+    // (in time order: two tracks' gestures a few ms apart are logged alike at any frame rate)
+    const e = { t: +t0.toFixed(3), kind };
+    let i = this.log.length;
+    while (i > 0 && this.log[i - 1].t > e.t) i--;
+    this.log.splice(i, 0, e);
     if (this.log.length > 512) this.log.shift();
     if (p.blink) this._blinkAt = t0 + 0.02;
     return g;
+  }
+
+  /** A calm or active bout's length (s). @param {boolean} calm */
+  _bout(calm) {
+    const b = calm ? ACTIVITY.calm : ACTIVITY.active;
+    return logNormal(this._rng.act, b.median, b.sigma, b.median * 0.25, b.median * 4);
   }
 
   /**
@@ -559,6 +747,7 @@ export class Behavior {
    * @param {number} dt @param {number} t
    * @param {{ state: string, look?: boolean, lookKind?: string, idleMotion?: number, thinkSide?: number,
    *   thinkUp?: boolean }} d  what the director knows: its state, whether lookAt holds a target
+   *   (and its kind), the thinking look's side
    * @returns {BehaviorOut}
    */
   update(dt, t, d) {
@@ -572,7 +761,10 @@ export class Behavior {
     if (!this._started) {
       this._started = true;
       this._engagedAt = Math.max(this._engagedAt, t);
-      this._postNext = t + 1 + 4 * this.rng();
+      this._postNext = t + 1 + 4 * this._rng.post();
+      // (the activity state starts somewhere in a bout: calm two thirds of the time)
+      this._act.calm = this._rng.act() < (ACTIVITY.calm.median / (ACTIVITY.calm.median + ACTIVITY.active.median));
+      this._act.until = t + this._bout(this._act.calm) * this._rng.act();
     }
     const state = d.state;
     if (state !== this._state) this.setState(state, t);
@@ -586,16 +778,57 @@ export class Behavior {
     c.L = L;
     c.A = 0.55 + 0.45 * L;
     const calm = state === 'speaking' || state === 'sleep' || state === 'error' || L <= 0;
+    if (c.bored < 0.05) this._yawns = 0;
 
-    // ---- the camera: the user looks back -> a smile and a brow flash
+    // ---- the user is the target now (the cursor, the face; not the avatar's own glances aside)
+    const attn = c.look ? (c.lookKind === 'glance' ? this._attn : true) : false;
+    if (attn && !this._attn) this._yieldGaze(t);
+    this._attn = attn;
+
+    // ---- the activity state: a new bout when this one is over; the waits are drawn again from
+    // that moment (exponential waits: memoryless, so nothing else changes)
+    while (t >= this._act.until) {
+      const ts = this._act.until;
+      this._act.calm = !this._act.calm;
+      this._act.until = ts + this._bout(this._act.calm);
+      for (const k of TRACKS) {
+        if (Number.isNaN(this._next[k]) || this._next[k] <= ts) continue;
+        this._next[k] = NaN;
+        this._freeAt[k] = Math.max(ts, k === 'gaze' ? this._gazeHold : -Infinity);
+      }
+    }
+    // (rates: full depth in idle, half (in log) in listening / thinking, which follow the user)
+    const actK = (this._act.calm ? ACTIVITY.calm.k : ACTIVITY.active.k) / ACT_NORM;
+    const actScale = state === 'idle' ? actK : Math.sqrt(actK);
+
+    // ---- the camera: the user looks back -> a smile and a brow flash, once the eyes are back
     if (this._ackWanted) {
       this._ackWanted = false;
       const ok = !calm && (state === 'idle' || state === 'listening') && this._present !== false
         && t - (this._last.acknowledge ?? -Infinity) >= KINDS.acknowledge.refr;
       if (ok) {
+        const back = this._yieldGaze(t);
         for (const g of this._active) if (KINDS[g.kind].tracks.includes('face')) this._fade(g, t, 0.2);
-        this._start('acknowledge', t, c);
+        this._start('acknowledge', Math.max(t + 0.2, back), c, this._rng.ev);
       }
+    }
+    // ---- a greeting: the user is back after a quiet minute
+    if (this._greet && t >= this._greet.at) {
+      const g0 = this._greet;
+      this._greet = null;
+      if (!calm && (state === 'idle' || state === 'listening')) {
+        for (const g of this._active) if (KINDS[g.kind].tracks.includes('face') && g.kind !== 'acknowledge') this._fade(g, g0.at, 0.15);
+        const ok = (k) => g0.at - (this._last[k] ?? -Infinity) >= KINDS[k].refr && !this._active.some((g) => g.kind === 'acknowledge' && t < g.fadeAt + g.fadeDur);
+        if (g0.brow && ok('browFlash')) this._start('browFlash', g0.at, c, this._rng.ev);
+        if (g0.smile && ok('smile')) this._start('smile', g0.at + 0.06, c, this._rng.ev);
+      }
+    }
+    // ---- a pause in the user's voice: a nod
+    if (this._nodAt !== undefined) {
+      const at = this._nodAt;
+      this._nodAt = undefined;
+      if (!calm && state === 'listening' && at - (this._last.nod ?? -Infinity) >= KINDS.nod.refr
+        && !this._active.some((g) => g.kind === 'nod' && t < g.t0 + g.dur)) this._start('nod', at, c, this._rng.ev);
     }
 
     // ---- schedule: per free track, a random wait drawn from the total rate of the kinds that fit
@@ -604,36 +837,46 @@ export class Behavior {
     // rate; one still in its refractory period does not happen (thinned).
     const key = `${state}|${c.typing}|${c.present}|${c.looking}|${c.look}|${Math.round(c.bored * 10)}|${L}`;
     if (key !== this._ctxKey) {
+      const was = this._ctxKey.split('|');
       // (the posture follows the new situation soon, e.g. leaning in as the user starts typing)
-      if (this._ctxKey && this._ctxKey.split('|').slice(0, 5).join() !== key.split('|').slice(0, 5).join()) {
-        this._postNext = Math.min(this._postNext, t + 0.2 + 0.5 * this.rng());
+      if (this._ctxKey && was.slice(0, 5).join() !== key.split('|').slice(0, 5).join()) {
+        this._postNext = Math.min(this._postNext, t + 0.2 + 0.5 * this._rng.post());
       }
+      // (the moment of the change: typing ends 1.6 s after the last key, not at this frame)
+      const tc = was[1] === 'true' && !c.typing ? clamp(this._typedAt + 1.6, t - dt, t) : t;
       this._ctxKey = key;
-      for (const k of TRACKS) if (Number.isFinite(this._next[k]) || this._next[k] === Infinity) { this._next[k] = NaN; this._freeAt[k] = t; }
+      for (const k of TRACKS) {
+        if (!(Number.isFinite(this._next[k]) || this._next[k] === Infinity)) continue;
+        this._next[k] = NaN;
+        this._freeAt[k] = Math.max(tc, k === 'gaze' ? this._gazeHold : -Infinity);
+      }
     }
     if (!calm) {
       for (const track of TRACKS) {
-        if (this._busy(track, t) || t < this._next[track]) continue;
+        if (this._busy(track, t)) continue;
+        if (track === 'gaze' && t < this._gazeHold) continue;
+        const r = this._rng[track];
         const rates = this._rates(track, c);
-        const R = rates.reduce((s, [, r]) => s + r, 0) * L;
+        const sum = rates.reduce((s, [, x]) => s + x, 0);
+        const R = sum * L * actScale;
         if (Number.isNaN(this._next[track])) {
-          const from = Number.isFinite(this._freeAt[track]) && this._freeAt[track] <= t ? this._freeAt[track] : t;
-          // (a gamma(2) wait: random, but fewer very short or very long gaps than a pure Poisson;
-          // the first one in a new state is half as long: settling into it, a person adjusts)
+          const fa = this._freeAt[track], from = Math.min(t, Math.max(Number.isFinite(fa) ? fa : t, this._endAt[track]));
+          // (an exponential wait; the first one in a new state is half as long: settling into
+          // it, a person adjusts)
           const settle = t - this._stateAt < 1 ? 0.5 : 1;
-          this._next[track] = R > 0 ? from + 0.25 - settle * (30 / R) * Math.log(Math.max(1e-9, this.rng() * this.rng())) : Infinity;
-          continue;
+          this._next[track] = R > 0 ? from + 0.25 - settle * (60 / R) * Math.log(Math.max(1e-9, r())) : Infinity;
         }
+        if (t < this._next[track]) continue;
         const at = this._next[track];
         this._next[track] = NaN;
         this._freeAt[track] = at;
         if (!(R > 0)) continue;
-        let pick = this.rng() * R / L;
+        let pick = r() * sum;
         let kind = rates[rates.length - 1][0];
-        for (const [k, r] of rates) { if ((pick -= r) <= 0) { kind = k; break; } }
+        for (const [k, x] of rates) { if ((pick -= x) <= 0) { kind = k; break; } }
         if (at - (this._last[kind] ?? -Infinity) < KINDS[kind].refr) continue;
         // a gesture that needs other tracks too happens only when they are free
-        if (KINDS[kind].tracks.some((tr) => tr !== track && this._busy(tr, t))) continue;
+        if (KINDS[kind].tracks.some((tr) => tr !== track && this._busy(tr, at))) continue;
         const g = this._start(kind, at, c);
         // the next one on these tracks: drawn from the moment this one ends
         for (const tr of KINDS[kind].tracks) { this._next[tr] = NaN; this._freeAt[tr] = g.t0 + g.dur; }
@@ -657,15 +900,16 @@ export class Behavior {
     else o.gaze.jump = o.gaze.on && (!wasOn || o.gaze.x !== wx || o.gaze.y !== wy);
     if (this._blinkAt !== undefined && t >= this._blinkAt) { o.blink = true; this._blinkAt = undefined; }
 
-    // ---- posture: a new target every 4-45 s (log-normal), reached through slow springs; the
-    // change happens at its own time inside the frame (the same motion at any frame rate)
+    // ---- posture: a new target every 4-45 s (log-normal; longer in a calm bout), reached through
+    // slow springs; the change happens at its own time inside the frame (the same motion at any
+    // frame rate), and the head wanders a little around it
     const P = this._post;
     let rest = dt;
     if (t >= this._postNext) {
       const pre = clamp(dt - (t - this._postNext), 0, dt);
       this._stepPosture(pre);
       rest = dt - pre;
-      const r = this.rng;
+      const r = this._rng.post;
       this._postSide = r() < 0.5 ? -1 : 1;
       const A = calm && state !== 'speaking' ? 0 : c.A * (state === 'speaking' ? 0.5 : 1) * (1 + 0.6 * c.bored);
       const b = L > 0 && !(state === 'sleep' || state === 'error') ? postureBias(c, this._postSide) : [0, 0, 0, 0, 0];
@@ -677,14 +921,20 @@ export class Behavior {
       this._postOmega = 1.5 + 1.1 * r();
       // (from the scheduled time, not the frame's)
       const from = Number.isFinite(this._postNext) && t - this._postNext < 1 ? this._postNext : t;
-      this._postNext = from + logNormal(r, 13, 0.55, 4, 45) * (state === 'speaking' ? 1.6 : 1) * (1 + 0.4 * c.bored);
+      const pace = state === 'idle' ? (this._act.calm ? 1.5 : 0.75) : 1;
+      this._postNext = from + logNormal(r, 13, 0.55, 4, 45) * (state === 'speaking' ? 1.6 : 1) * (1 + 0.4 * c.bored) * pace;
     }
     this._stepPosture(rest);
     o.yaw += P.yaw.x; o.pitch += P.pitch.x; o.roll += P.roll.x; o.shiftX += P.shiftX.x; o.lean += P.lean.x;
+    const wk = this._wander.step(L > 0 && state !== 'sleep' && state !== 'error' ? Math.min(1, L) * (state === 'speaking' ? 0.5 : 1) : 0, 1.5, dt);
+    if (wk > 0) {
+      o.roll += 0.3 * wk * RAD * pinkNoise(t, this.seed * 7 + 401, { f0: 0.04, octaves: 3 });
+      o.yaw += 0.25 * wk * RAD * pinkNoise(t, this.seed * 7 + 409, { f0: 0.03, octaves: 3 });
+    }
     // ---- the camera: mirror the user's head tilt a little (a few hundred ms behind)
     const mirrorOn = !calm && this._present === true && this._looking && state !== 'thinking';
     o.roll += this._mirror.step(mirrorOn ? 0.28 * Math.min(1, L) * clamp(this._userRoll, -0.25, 0.25) : 0, 2.4, dt);
-    // ---- energy pulses on accents (while speaking)
+    // ---- energy pulses on emphasis (while speaking)
     for (const q of this._pulses) o.pulse = softOr(o.pulse, q.amp * envelope(t - q.at, 0.06, 0.05, 0.65));
     if (this._pulses.length && t - this._pulses[0].at > 1) this._pulses.shift();
     o.lean = clamp(o.lean, -1, 1);
@@ -711,7 +961,7 @@ export class Behavior {
     return out;
   }
 
-  /** A gesture is running on the track. @param {string} track @param {number} t */
+  /** A gesture is running on the track at time t. @param {string} track @param {number} t */
   _busy(track, t) {
     return this._active.some((g) => t < g.fadeAt + g.fadeDur && t < g.t0 + g.dur && KINDS[g.kind].tracks.includes(track));
   }

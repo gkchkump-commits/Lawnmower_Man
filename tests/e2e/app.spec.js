@@ -14,7 +14,12 @@ test.describe('app (mock bridge)', () => {
     await expect(page.locator('body')).toHaveAttribute('data-state', 'idle');
     await expect(page.locator('#stage canvas')).toHaveCount(1);
     expect(await page.evaluate(() => window.__app.avatar.renderer)).toBe('relief');
-    await expect(page.locator('.status-claude')).toContainText('Claude');
+    await expect(page.locator('.status-claude')).toContainText('Claude'); // the engine keeps its name
+    // Jade names the one you talk to (contract-wake §10.2)
+    await expect(page.locator('#stage')).toHaveAttribute('aria-label', 'Jade');
+    await expect(page.locator('#stage canvas')).toHaveAttribute('aria-label', 'Jade, the hologram avatar');
+    await expect(page.locator('#input')).toHaveAttribute('placeholder', 'Message Jade…');
+    await expect(page.locator('#input')).toHaveAttribute('aria-label', 'Message Jade');
     const stats = await headStats(page);
     expect(stats.mean, JSON.stringify(stats)).toBeGreaterThan(18);
     expect(stats.bright).toBeGreaterThan(0.15);

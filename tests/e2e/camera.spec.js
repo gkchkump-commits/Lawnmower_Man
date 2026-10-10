@@ -110,7 +110,8 @@ test.describe('camera (fake camera, mock bridge)', () => {
     const card = page.locator('.camera-card[data-camera="consent"]');
     await expect(card).toBeVisible();
     await expect(card).toContainText('runs only on this PC');
-    await expect(card).toContainText('Let Claude see me');
+    await expect(card).toContainText('Let Jade see me');
+    await expect(card).toContainText('the picture goes to Claude');
     await expect(page.locator('body')).toHaveAttribute('data-camera', 'consent');
     expect(await page.evaluate(() => window.__app.camera.camera.running)).toBe(false);
     await page.waitForTimeout(300); // the card fades in
@@ -178,6 +179,8 @@ test.describe('camera (fake camera, mock bridge)', () => {
     await boot(page, {}, { camera: { enabled: true, shareWithClaude: true } });
     await expect(page.locator('body')).toHaveAttribute('data-camera', 'on', { timeout: 20_000 });
     await expect(page.locator('#shot')).toHaveAttribute('aria-pressed', 'true'); // always on
+    await expect(page.locator('#shot')).toHaveAttribute('title', 'Jade sees you: every message carries a snapshot for Claude (Settings › Camera › Let Jade see me)');
+    await expect(page.locator('#shot')).toHaveAttribute('aria-label', 'Let Jade see you with the next message');
     await faceSeen(page);
 
     await send(page, 'Can you see me?');
@@ -207,6 +210,7 @@ test.describe('camera (fake camera, mock bridge)', () => {
     await expect(page.locator('.msg-user').last().locator('.msg-shot')).toHaveCount(0);
 
     // …until the camera button arms one for the next message only
+    await expect(page.locator('#shot')).toHaveAttribute('title', '📷 Let Jade see you with your next message');
     await page.locator('#shot').click();
     await expect(page.locator('#shot')).toHaveAttribute('aria-pressed', 'true');
     await send(page, 'this one with a picture');

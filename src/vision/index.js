@@ -480,7 +480,7 @@ export class CameraFeature extends Emitter {
   }
 
   /**
-   * Say hello: the quick spoken line, or (mode 'claude') a hidden prompt so Claude does.
+   * Say hello: the quick spoken line, or (mode 'claude') a hidden prompt so Jade does (through Claude).
    * @param {{ awayMs: number, first: boolean }} ev @param {number} t @param {'hello'|'claude'} mode
    * @returns {boolean} greeted
    */
@@ -495,7 +495,7 @@ export class CameraFeature extends Emitter {
       done = ctl.sendText(greetingPrompt(minutes, ev.first), {
         source: 'camera',
         hidden: true,
-        note: ev.first ? 'The camera sees you, so it asked Claude to say hello.' : `You're back after ${minutes} min, so the camera asked Claude to say hello.`,
+        note: ev.first ? 'The camera sees you, so it asked Jade to say hello.' : `You're back after ${minutes} min, so the camera asked Jade to say hello.`,
       });
     } else {
       done = !!ctl.say?.(quickGreeting({ first: ev.first, awayMs: ev.awayMs, hour: this._hour(), pick: this._random }));

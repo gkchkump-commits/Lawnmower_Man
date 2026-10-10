@@ -112,7 +112,7 @@ export class AvatarHost {
     const canvas = document.createElement('canvas');
     canvas.id = 'avatar';
     canvas.className = 'avatar-canvas';
-    canvas.setAttribute('aria-label', 'Claude hologram avatar');
+    canvas.setAttribute('aria-label', 'Jade, the hologram avatar');
     canvas.setAttribute('role', 'img');
     this.stage.prepend(canvas);
     this.canvas = canvas;

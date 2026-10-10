@@ -56,12 +56,18 @@ export const VAD_DEFAULTS = Object.freeze({ threshold: 0.5, minSpeechDuration: 0
  * The onset recipe (§7.5): a fresh stream at each VAD onset after ≥ quietMs without speech, fed
  * prerollMs of the audio before it; nothing fed hangoverMs after the last speech; a JADE hit counts
  * only when its first token lies within namePrefixMs of the stream start. maxStreamMs = 0: off
- * (tools/wake/eval-folder.mjs --max-stream-ms evaluates it; see docs).
+ * (tools/wake/eval-folder.mjs --max-stream-ms evaluates it). agcLookaheadMs: at an utterance onset
+ * the spotters' feed waits until this much speech has set the utterance's own level (no added
+ * latency: "Jade" ends later); measured on the eval's noisy mix, 198 → 202 of 252 against the
+ * previous utterance's gain (docs: the lane report).
  */
-export const RECIPE_DEFAULTS = Object.freeze({ quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 0, namePrefixMs: 720, blockSamples: 320, agcLookaheadMs: 0 });
+export const RECIPE_DEFAULTS = Object.freeze({ quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 0, namePrefixMs: 720, blockSamples: 320, agcLookaheadMs: 300 });
 
-/** The level normaliser in front of the spotters (§7.6). */
-export const AGC_DEFAULTS = Object.freeze({ targetDb: -20, minGainDb: -6, maxGainDb: 24, tauMs: 300 });
+/**
+ * The level normaliser in front of the spotters (§7.6). `limit`: a block whose peak would pass it
+ * gets less gain instead of clipping.
+ */
+export const AGC_DEFAULTS = Object.freeze({ targetDb: -20, minGainDb: -6, maxGainDb: 24, tauMs: 300, limit: 0.99 });
 
 /**
  * One installed file: its name inside its folder, exact size and SHA-256.

@@ -116,8 +116,10 @@ describe('AvatarHost', () => {
     // so does avatar.liveliness (the spontaneous behaviour)
     await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5, liveliness: 1.7 });
     expect(created[1].options.at(-1)).toMatchObject({ liveliness: 1.7 });
-    await host.apply({ ...AV, liveliness: 0.3 });
-    expect(created[2].opts.liveliness).toBe(0.3);
+    await host.apply({ ...AV, liveliness: 0.3, projector: true });
+    expect(created[2].opts).toMatchObject({ liveliness: 0.3, projector: true });
+    await host.apply({ ...AV, liveliness: 0.3, projector: false });
+    expect(created[2].options.at(-1)).toMatchObject({ projector: false });
     expect(created[0].disposed).toBe(true);
     expect(host.avatar.renderer).toBe('relief');
   });

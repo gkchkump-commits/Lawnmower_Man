@@ -82,6 +82,7 @@ export const SECTIONS = [
       { type: 'range', path: 'avatar.expressiveness', label: 'Expressiveness', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       // how much it moves on its own: looks around, shifts its posture, small gestures (src/avatar/behavior.js)
       { type: 'range', path: 'avatar.liveliness', label: 'Liveliness', hint: 'How much it moves on its own: looks around, shifts, small gestures', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { type: 'toggle', path: 'avatar.projector', label: 'Projector light', hint: 'A cone of light under the bust, as if projected' },
     ],
   },
   {

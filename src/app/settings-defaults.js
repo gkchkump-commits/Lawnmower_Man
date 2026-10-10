@@ -40,6 +40,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     followCursor: true,
     expressiveness: 1.0,
     liveliness: 1.0,
+    projector: false,
   },
   window: {
     sizePreset: 'medium',

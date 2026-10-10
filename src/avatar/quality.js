@@ -10,13 +10,15 @@
  * @property {number} bloomLevels   number of mip levels in the bloom chain
  * @property {boolean} halfFloat    HalfFloat bloom targets when available (the scene target is
  *                                  half float on every tier, see fx/post.js)
+ * @property {boolean} fxaa         FXAA in the final pass (the tier without MSAA)
  */
 
 /** @type {Record<'low'|'medium'|'high', QualityTier>} */
 export const QUALITY = {
-  high: { dprCap: 2, msaa: 4, particles: 6000, bloomScale: 0.5, bloomLevels: 5, halfFloat: true },
-  medium: { dprCap: 1.5, msaa: 2, particles: 3000, bloomScale: 0.5, bloomLevels: 4, halfFloat: true },
-  low: { dprCap: 1, msaa: 0, particles: 1200, bloomScale: 0.25, bloomLevels: 3, halfFloat: false },
+  // (high: the display's full resolution up to 3x, e.g. a 4K laptop panel at 200-300 %)
+  high: { dprCap: 3, msaa: 4, particles: 6000, bloomScale: 0.5, bloomLevels: 5, halfFloat: true, fxaa: false },
+  medium: { dprCap: 1.5, msaa: 2, particles: 3000, bloomScale: 0.5, bloomLevels: 4, halfFloat: true, fxaa: false },
+  low: { dprCap: 1, msaa: 0, particles: 1200, bloomScale: 0.25, bloomLevels: 3, halfFloat: false, fxaa: true },
 };
 
 /** @param {string} q @returns {'low'|'medium'|'high'} */

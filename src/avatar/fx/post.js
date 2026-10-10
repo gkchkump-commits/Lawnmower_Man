@@ -1,5 +1,8 @@
 // Post-processing: scene render target -> cheap dual-filter bloom -> final composite that
 // outputs PREMULTIPLIED alpha derived from brightness (black = transparent desktop) or opaque black.
+// The bloom chain also carries the scene's coverage (alpha) blurred: the composite lays a soft dark
+// halo just outside the head with it, so the hologram's silhouette reads over a bright or busy
+// desktop too (over a dark one it is invisible). FXAA smooths edges where there is no MSAA.
 
 import * as THREE from 'three';
 
@@ -16,19 +19,21 @@ uniform sampler2D tSrc;
 uniform vec2 uTexel;
 uniform vec4 uThreshold; // threshold, knee, 2*knee, 0.25/knee
 varying vec2 vUv;
-vec3 pick(vec2 uv) {
-  vec3 c = texture2D(tSrc, uv).rgb;
+// (rgb: the bright part; alpha: the coverage, carried for the silhouette halo)
+vec4 pick(vec2 uv) {
+  vec4 s = texture2D(tSrc, uv);
+  vec3 c = s.rgb;
   float br = max(c.r, max(c.g, c.b));
   float rq = clamp(br - uThreshold.x + uThreshold.y, 0.0, uThreshold.z);
   rq = uThreshold.w * rq * rq;
   float contrib = max(rq, br - uThreshold.x) / max(br, 1e-4);
-  return c * contrib;
+  return vec4(c * contrib, s.a);
 }
 void main() {
   vec2 o = uTexel * 0.5;
-  vec3 c = pick(vUv + vec2(-o.x, -o.y)) + pick(vUv + vec2(o.x, -o.y))
+  vec4 c = pick(vUv + vec2(-o.x, -o.y)) + pick(vUv + vec2(o.x, -o.y))
          + pick(vUv + vec2(-o.x, o.y)) + pick(vUv + vec2(o.x, o.y));
-  gl_FragColor = vec4(min(c * 0.25, vec3(32.0)), 1.0);
+  gl_FragColor = vec4(min(c.rgb * 0.25, vec3(32.0)), 0.25 * c.a);
 }`;
 
 // Dual-Kawase downsample (5 taps).
@@ -38,12 +43,12 @@ uniform vec2 uTexel;
 varying vec2 vUv;
 void main() {
   vec2 o = uTexel;
-  vec3 c = texture2D(tSrc, vUv).rgb * 4.0;
-  c += texture2D(tSrc, vUv + vec2(-o.x, -o.y)).rgb;
-  c += texture2D(tSrc, vUv + vec2(o.x, -o.y)).rgb;
-  c += texture2D(tSrc, vUv + vec2(-o.x, o.y)).rgb;
-  c += texture2D(tSrc, vUv + vec2(o.x, o.y)).rgb;
-  gl_FragColor = vec4(c / 8.0, 1.0);
+  vec4 c = texture2D(tSrc, vUv) * 4.0;
+  c += texture2D(tSrc, vUv + vec2(-o.x, -o.y));
+  c += texture2D(tSrc, vUv + vec2(o.x, -o.y));
+  c += texture2D(tSrc, vUv + vec2(-o.x, o.y));
+  c += texture2D(tSrc, vUv + vec2(o.x, o.y));
+  gl_FragColor = c / 8.0;
 }`;
 
 // Dual-Kawase upsample (8 taps) + add the finer level.
@@ -52,18 +57,21 @@ uniform sampler2D tSrc;    // coarser level (being upsampled)
 uniform sampler2D tBase;   // finer level at this resolution
 uniform vec2 uTexel;       // texel of the coarser level
 uniform float uRadius;
+uniform float uHaloMix;    // the coverage: how much of the coarser (wider) blur each level keeps
 varying vec2 vUv;
 void main() {
   vec2 o = uTexel * uRadius;
-  vec3 c = texture2D(tSrc, vUv + vec2(-o.x * 2.0, 0.0)).rgb;
-  c += texture2D(tSrc, vUv + vec2(-o.x, o.y)).rgb * 2.0;
-  c += texture2D(tSrc, vUv + vec2(0.0, o.y * 2.0)).rgb;
-  c += texture2D(tSrc, vUv + vec2(o.x, o.y)).rgb * 2.0;
-  c += texture2D(tSrc, vUv + vec2(o.x * 2.0, 0.0)).rgb;
-  c += texture2D(tSrc, vUv + vec2(o.x, -o.y)).rgb * 2.0;
-  c += texture2D(tSrc, vUv + vec2(0.0, -o.y * 2.0)).rgb;
-  c += texture2D(tSrc, vUv + vec2(-o.x, -o.y)).rgb * 2.0;
-  gl_FragColor = vec4(c / 12.0 + texture2D(tBase, vUv).rgb, 1.0);
+  vec4 c = texture2D(tSrc, vUv + vec2(-o.x * 2.0, 0.0));
+  c += texture2D(tSrc, vUv + vec2(-o.x, o.y)) * 2.0;
+  c += texture2D(tSrc, vUv + vec2(0.0, o.y * 2.0));
+  c += texture2D(tSrc, vUv + vec2(o.x, o.y)) * 2.0;
+  c += texture2D(tSrc, vUv + vec2(o.x * 2.0, 0.0));
+  c += texture2D(tSrc, vUv + vec2(o.x, -o.y)) * 2.0;
+  c += texture2D(tSrc, vUv + vec2(0.0, -o.y * 2.0));
+  c += texture2D(tSrc, vUv + vec2(-o.x, -o.y)) * 2.0;
+  vec4 base = texture2D(tBase, vUv);
+  // colour: the levels add up (the glow); coverage: a weighted average (it stays 0..1)
+  gl_FragColor = vec4(c.rgb / 12.0 + base.rgb, mix(base.a, c.a / 12.0, uHaloMix));
 }`;
 
 const COMPOSITE_FRAG = /* glsl */ `
@@ -74,7 +82,27 @@ uniform float uTransparent;
 uniform float uOpacity;     // how strongly covered pixels (head) occlude the desktop
 uniform float uExposure;
 uniform vec2 uResolution;
+uniform float uHalo;        // the silhouette halo's strength (alpha just outside the head)
+uniform vec2 uGate;         // the glow a covered pixel needs to occlude the desktop (head-specific)
+uniform float uFxaa;        // 1: smooth the scene's edges (tiers without MSAA)
 varying vec2 vUv;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+// FXAA (the classic 9-tap variant): blend along the edge where the local contrast is high
+vec3 fxaa(vec2 uv, vec3 rgbM) {
+  vec2 px = 1.0 / uResolution;
+  vec3 nw = texture2D(tScene, uv + vec2(-1.0, -1.0) * px).rgb, ne = texture2D(tScene, uv + vec2(1.0, -1.0) * px).rgb;
+  vec3 sw = texture2D(tScene, uv + vec2(-1.0, 1.0) * px).rgb, se = texture2D(tScene, uv + vec2(1.0, 1.0) * px).rgb;
+  float lNW = luma(nw), lNE = luma(ne), lSW = luma(sw), lSE = luma(se), lM = luma(rgbM);
+  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE))), lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+  if (lMax - lMin < max(0.04, lMax * 0.16)) return rgbM;
+  vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+  float red = max((lNW + lNE + lSW + lSE) * 0.03125, 1.0 / 128.0);
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + red), -8.0, 8.0) * px;
+  vec3 a = 0.5 * (texture2D(tScene, uv - dir / 6.0).rgb + texture2D(tScene, uv + dir / 6.0).rgb);
+  vec3 b = 0.5 * a + 0.25 * (texture2D(tScene, uv - dir * 0.5).rgb + texture2D(tScene, uv + dir * 0.5).rgb);
+  float lB = luma(b);
+  return (lB < lMin || lB > lMax) ? a : b;
+}
 vec3 shoulder(vec3 x) {
   // identity below 0.9, smooth roll-off above (keeps the baked plate exact, tames bloom hot spots)
   vec3 t = max(x - 0.9, 0.0);
@@ -88,7 +116,9 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.545
 float maxc(vec3 c) { return max(c.r, max(c.g, c.b)); }
 void main() {
   vec4 s = texture2D(tScene, vUv);
-  vec3 c = s.rgb * uExposure + texture2D(tBloom, vUv).rgb * uBloom;
+  if (uFxaa > 0.5) s.rgb = fxaa(vUv, s.rgb);
+  vec4 bl = texture2D(tBloom, vUv);
+  vec3 c = s.rgb * uExposure + bl.rgb * uBloom;
   c = toSRGB(shoulder(c));
   // dithering against banding in dark glows
   c += (hash(gl_FragCoord.xy + fract(uResolution.x)) - 0.5) / 255.0;
@@ -104,12 +134,22 @@ void main() {
     float nb = 0.25 * (maxc(texture2D(tScene, vUv + vec2(o.x, o.y)).rgb) + maxc(texture2D(tScene, vUv + vec2(-o.x, o.y)).rgb)
       + maxc(texture2D(tScene, vUv + vec2(o.x, -o.y)).rgb) + maxc(texture2D(tScene, vUv + vec2(-o.x, -o.y)).rgb));
     float glow = max(lum, toSRGB(vec3(nb * uExposure)).r);
-    float a = clamp(max(lum, s.a * uOpacity * smoothstep(0.04, 0.24, glow)), 0.0, 1.0);
+    float a = clamp(max(lum, s.a * uOpacity * smoothstep(uGate.x, uGate.y, glow)), 0.0, 1.0);
+    // the silhouette halo: a soft dark band just outside the head (the blurred coverage where the
+    // head itself is not), fading out over ~20 px; nothing inside the head, nothing far away
+    float wide = bl.a, own = s.a;
+    float hw = smoothstep(0.0, 0.45, wide);
+    a = max(a, uHalo * hw * sqrt(hw) * (1.0 - smoothstep(0.05, 0.6, own)));
     gl_FragColor = vec4(min(c, vec3(a)), a);   // premultiplied
   } else {
     gl_FragColor = vec4(c, 1.0);
   }
 }`;
+
+/** The silhouette halo: its peak alpha, and how wide it reaches (the coarse levels' share). */
+export const HALO = Object.freeze({ strength: 0.4, mix: 0.8 });
+/** Default coverage gate (heads without a baked occlusion mask: only what visibly glows occludes). */
+export const COVERAGE_GATE = Object.freeze([0.04, 0.24]);
 
 function makeTarget(w, h, type, opts = {}) {
   const rt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), {
@@ -137,7 +177,7 @@ export class Post {
     this.tier = opts.tier;
     this.bloom = opts.bloom ?? 1;
     this.transparent = opts.transparent !== false;
-    this.opacity = opts.opacity ?? 0.88;
+    this.opacity = opts.opacity ?? 0.94;
     this.energy = 0.5;
     this.width = 1;
     this.height = 1;
@@ -162,10 +202,12 @@ export class Post {
     this.matDown = mk(DOWN_FRAG, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } });
     this.matUp = mk(UP_FRAG, {
       tSrc: { value: null }, tBase: { value: null }, uTexel: { value: new THREE.Vector2() }, uRadius: { value: 1 },
+      uHaloMix: { value: HALO.mix },
     });
     this.matComposite = mk(COMPOSITE_FRAG, {
       tScene: { value: null }, tBloom: { value: null }, uBloom: { value: 0.5 }, uTransparent: { value: 1 },
       uOpacity: { value: this.opacity }, uExposure: { value: 1 }, uResolution: { value: new THREE.Vector2() },
+      uHalo: { value: HALO.strength }, uFxaa: { value: 0 }, uGate: { value: new THREE.Vector2(...COVERAGE_GATE) },
     });
     this.matComposite.premultipliedAlpha = true;
     this.threshold = 0.72;
@@ -226,6 +268,15 @@ export class Post {
   }
 
   /** @param {{ bloom?: number, transparent?: boolean, opacity?: number }} o */
+  /**
+   * The glow a covered pixel needs before it occludes the desktop: a head whose coverage is a
+   * baked mask (the relief's masks_c) occludes with all of it, others only where they glow.
+   * @param {[number, number]} g
+   */
+  setCoverageGate(g) {
+    this.matComposite.uniforms.uGate.value.set(g[0], g[1]);
+  }
+
   setOptions(o) {
     if (o.bloom !== undefined) this.bloom = Math.max(0, Number(o.bloom) || 0);
     if (o.transparent !== undefined) this.transparent = !!o.transparent;
@@ -285,6 +336,9 @@ export class Post {
     c.uBloom.value = bloomOn ? (this.bloom * 0.42 * (0.75 + 0.5 * this.energy)) / Math.max(1, levels * 0.6) : 0;
     c.uTransparent.value = this.transparent ? 1 : 0;
     c.uOpacity.value = this.opacity;
+    // (the halo rides on the bloom chain: none without it)
+    c.uHalo.value = bloomOn ? HALO.strength : 0;
+    c.uFxaa.value = this.tier.fxaa ? 1 : 0;
     c.uResolution.value.set(this.width, this.height);
     r.setRenderTarget(null);
     r.setClearColor(0x000000, 0);

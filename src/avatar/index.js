@@ -3,7 +3,8 @@
 import * as THREE from 'three';
 import { ANIM_KEYS, Director, STATES } from './director.js';
 import { Particles } from './fx/particles.js';
-import { Post } from './fx/post.js';
+import { COVERAGE_GATE, Post } from './fx/post.js';
+import { Projector } from './fx/projector.js';
 import { withSlash } from './pack.js';
 import { mergePalette } from './palette.js';
 import { QUALITY, QualityGovernor, normalizeQuality } from './quality.js';
@@ -46,10 +47,12 @@ export function normalizeOptions(o = {}) {
     seed: Number.isFinite(Number(o.seed)) ? Number(o.seed) | 0 : 1,
     fixedTime: Number.isFinite(o.fixedTime) ? Number(o.fixedTime) : undefined,
     transparent: o.transparent !== false,
-    opacity: num(o.opacity, 0.88, 0, 1),
+    // (the head's glass occludes the desktop: enough that a busy screen does not show through it)
+    opacity: num(o.opacity, 0.94, 0, 1),
     idleMotion: num(o.idleMotion, 1, 0, 3),
     expressiveness: num(o.expressiveness, 1, 0, 2),
     liveliness: num(o.liveliness, 1, 0, 2),
+    projector: !!o.projector,
     zoom: num(o.zoom, 1, 0.2, 5),
     colors: o.colors && typeof o.colors === 'object' ? { ...o.colors } : {},
     autoStart: o.autoStart !== false,
@@ -114,6 +117,7 @@ export async function createAvatar(canvas, options = {}) {
   let packPalette = null;
   let particles = /** @type {Particles|null} */ (null);
   let post = /** @type {Post|null} */ (null);
+  let projector = /** @type {Projector|null} */ (null);
   /** @type {Array<() => void>} */
   const frameWaiters = [];
 
@@ -142,6 +146,7 @@ export async function createAvatar(canvas, options = {}) {
     }
     head?.update(dt, time, a);
     particles?.update(dt, time, a);
+    if (projector?.mesh.visible) projector.update(time, a);
     post?.update(a);
   }
 
@@ -271,6 +276,7 @@ export async function createAvatar(canvas, options = {}) {
   }
   stage.setFraming(head.framing());
   motionLimits = head.motionLimits?.() ?? null;
+  post.setCoverageGate(head.coverageGate?.() ?? COVERAGE_GATE);
 
   const baseCount = () => Math.round(tier().particles * opts.particles);
   particles = new Particles({
@@ -293,10 +299,22 @@ export async function createAvatar(canvas, options = {}) {
     }
   }
 
+  // the projector light under the bust (optional; decoration like the aura)
+  const anchors = head.particleAnchors?.() ?? defaultAnchors(head.framing());
+  projector = new Projector({ palette: ctx.palette });
+  stage.scene.add(projector.mesh);
+  projector.setVisible(true);
+  if (compileCheck()) {
+    stage.scene.remove(projector.mesh);
+    projector = null;
+  } else projector.setVisible(opts.projector);
+
   function syncParticleView() {
     if (!particles) return;
     const vh = stage.viewHeight || 1;
     particles.setView(vh * (stage.width / stage.height), vh, stage.height * stage.pixelRatio);
+    const cy = stage.framing?.center?.[1] ?? 0;
+    projector?.setAnchors(anchors, cy - vh / 2, vh * (stage.width / stage.height));
   }
   syncParticleView();
 
@@ -377,11 +395,13 @@ export async function createAvatar(canvas, options = {}) {
         opts.colors = { ...opts.colors, ...p.colors };
         ctx.palette = toColors(mergePalette(packPalette, opts.colors));
         particles.setPalette(ctx.palette);
+        projector?.setPalette(ctx.palette);
         head.setOptions?.({ palette: ctx.palette });
       }
       if (p.idleMotion !== undefined) director.setIdleMotion(p.idleMotion);
       if (p.expressiveness !== undefined) director.setExpressiveness(p.expressiveness);
       if (p.liveliness !== undefined) director.setLiveliness(p.liveliness);
+      if (p.projector !== undefined) { opts.projector = !!p.projector; projector?.setVisible(opts.projector); }
       if (p.zoom !== undefined) { stage.setZoom(p.zoom); syncParticleView(); }
       stage.requestRender();
     },
@@ -452,6 +472,7 @@ export async function createAvatar(canvas, options = {}) {
       stage.stop();
       head?.dispose();
       particles?.dispose();
+      projector?.dispose();
       post?.dispose();
       stage.dispose();
       head = null; particles = null;

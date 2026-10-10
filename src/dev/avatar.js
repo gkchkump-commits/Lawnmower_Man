@@ -101,6 +101,7 @@ const options = {
   idleMotion: num('idle', 1),
   expressiveness: num('expr', 1),
   liveliness: num('life', 1),
+  projector: flag('projector', false),
   zoom: num('zoom', 1),
   // say / clip modes drive a scripted clock through avatar.advance(): no render loop of their own
   autoStart: !scripted,

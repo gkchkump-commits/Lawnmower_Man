@@ -78,7 +78,7 @@ export class AvatarHost {
   /**
    * Bring the avatar in line with settings.avatar (create / re-create / setOptions).
    * Calls are coalesced: only the latest settings are applied once a creation finishes.
-   * @param {{ renderer: string, pack: string, quality: string, particles: number, bloom: number, expressiveness?: number, liveliness?: number }} av
+   * @param {{ renderer: string, pack: string, quality: string, particles: number, bloom: number, expressiveness?: number, liveliness?: number, projector?: boolean }} av
    */
   apply(av) {
     this._target = { ...av };
@@ -93,9 +93,9 @@ export class AvatarHost {
       if (!b || want.renderer !== b.renderer || want.pack !== b.pack) {
         await this._recreate(want);
       } else if (this.api && (want.quality !== b.quality || want.particles !== b.particles || want.bloom !== b.bloom
-        || want.expressiveness !== b.expressiveness || want.liveliness !== b.liveliness)) {
+        || want.expressiveness !== b.expressiveness || want.liveliness !== b.liveliness || want.projector !== b.projector)) {
         try {
-          this.api.setOptions({ quality: want.quality, particles: want.particles, bloom: want.bloom, expressiveness: want.expressiveness, liveliness: want.liveliness });
+          this.api.setOptions({ quality: want.quality, particles: want.particles, bloom: want.bloom, expressiveness: want.expressiveness, liveliness: want.liveliness, projector: want.projector });
         } catch (err) {
           console.warn('[avatar-host] setOptions failed', err);
         }
@@ -126,6 +126,7 @@ export class AvatarHost {
         bloom: want.bloom,
         expressiveness: want.expressiveness,
         liveliness: want.liveliness,
+        projector: want.projector,
         transparent: true,
         ...this.extra,
       });

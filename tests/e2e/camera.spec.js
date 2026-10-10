@@ -8,10 +8,19 @@
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { QUICK_GREETINGS, quickGreeting } from '../../src/vision/index.js';
 import { GL_ARGS, appUrl, boot, expect, send, shot, test as base, waitIdle } from './helpers.js';
 
 const CONSENT_KEY = 'lawnmower.camera.consent.v1';
 const REFERENCE = path.resolve('docs/reference/neutral.jpg');
+
+/** A pattern for any of these exact lines, wherever they sit in the element's text. */
+const anyLine = (lines) => new RegExp(lines.map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
+/** Every line of the first-sight hello, whatever the time of day. */
+const FIRST_SIGHT = ['morning', 'afternoon', 'evening', 'night'].flatMap((k) => QUICK_GREETINGS[k]);
+/** The first-sight lines of the time of day at these hours (the app picks one at random). */
+const helloLines = (...hours) => [...new Set(hours.flatMap((hour) =>
+  Object.values(QUICK_GREETINGS).find((list) => list.includes(quickGreeting({ first: true, awayMs: 0, hour, pick: () => 0 })))))];
 
 /**
  * A one-frame 640x480 Y4M (what --use-file-for-fake-video-capture plays, looped) of the
@@ -107,6 +116,8 @@ test.describe('camera (fake camera, mock bridge)', () => {
     await page.waitForTimeout(300); // the card fades in
     await shot(page, testInfo, 'camera-consent');
 
+    const pageHour = () => page.evaluate(() => new Date().getHours());
+    const hourBefore = await pageHour();
     await card.locator('.camera-accept').click();
     await expect(page.locator('body')).toHaveAttribute('data-camera', 'on', { timeout: 20_000 });
     await expect(page.locator('#cam-live')).toBeVisible(); // visible without hovering the toolbar
@@ -121,8 +132,11 @@ test.describe('camera (fake camera, mock bridge)', () => {
     expect(st.rate).toBe(12);
     // eye contact: the gaze goes to the face (or one of its short glances away)
     await page.waitForFunction(() => ['face', 'glance'].includes(window.__app.gaze.source));
-    // it sees you for the first time: a quick spoken hello (no Claude turn)
-    await expect(page.locator('#transcript .msg').last()).toContainText(/good (morning|afternoon|evening)|up late|night owl|midnight oil/i);
+    // it sees you for the first time: a quick spoken hello (no Claude turn), one of the lines for
+    // the time of day, picked at random (an hour boundary may pass while the camera starts)
+    const hello = page.locator('#transcript .msg').last();
+    await expect(hello).toContainText(anyLine(FIRST_SIGHT));
+    await expect(hello).toContainText(anyLine(helloLines(hourBefore, await pageHour())));
     expect(await page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'claude.send').length)).toBe(0);
     expect(await page.evaluate(() => localStorage.getItem('lawnmower.camera.consent.v1'))).toBe('yes');
     await page.waitForTimeout(400);

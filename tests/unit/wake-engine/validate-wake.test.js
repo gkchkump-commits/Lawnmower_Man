@@ -73,6 +73,11 @@ describe('wake IPC validation (contract §6.1)', () => {
     expect(() => validateSaveClip({ wav: wav(), hits: [{ atSec: -1, keyword: 'JADE', outcome: 'x' }] })).toThrow(/atSec/);
     expect(() => validateSaveClip({ wav: wav(), hits: [{ atSec: 1, keyword: 'HEY_SIRI', outcome: 'x' }] })).toThrow(/keyword/);
     expect(() => validateSaveClip({ wav: wav(), hits: [{ atSec: 1, keyword: 'JADE', outcome: '../../evil' }] })).toThrow(/outcome/);
+    // what the renderer sends (src/wake/feature.js): 'heard', 'woke', 'ignored: <reason>'
+    for (const outcome of ['heard', 'woke', 'ignored: jude', 'ignored: no-call', 'ignored: self']) {
+      expect(validateSaveClip({ wav: wav(), hits: [{ atSec: 1, keyword: 'HEY_JUDE', outcome }] }).hits[0].outcome).toBe(outcome);
+    }
+    expect(() => validateSaveClip({ wav: wav(), hits: [{ atSec: 1, keyword: 'JADE', outcome: 'ignored: C:\\x' }] })).toThrow(/outcome/);
     expect(() => validateSaveClip({ wav: 'base64…' })).toThrow(/ArrayBuffer/);
   });
 });

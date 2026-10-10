@@ -106,7 +106,8 @@ export function validateSaveClip(p) {
     if (!isPlainObject(h)) throw new Error('each hit must be { atSec, keyword, outcome }');
     if (typeof h.atSec !== 'number' || !Number.isFinite(h.atSec) || h.atSec < 0 || h.atSec > CLIP_MAX_SEC + 5) throw new Error('hit.atSec must be a time inside the clip');
     if (typeof h.keyword !== 'string' || !LABELS.includes(h.keyword)) throw new Error('hit.keyword must be HEY_JADE, HEY_JUDE or JADE');
-    if (typeof h.outcome !== 'string' || !/^[a-z][a-z0-9 '_-]{0,39}$/i.test(h.outcome)) throw new Error('hit.outcome must be a short word');
+    // the renderer's outcomes: 'heard', 'woke', 'ignored: <reason>' (src/wake/feature.js); no path characters
+    if (typeof h.outcome !== 'string' || !/^[a-z][a-z0-9 '_:-]{0,39}$/i.test(h.outcome)) throw new Error('hit.outcome must be a short word');
     return { atSec: Math.round(h.atSec * 1000) / 1000, keyword: h.keyword, outcome: h.outcome };
   });
   return { wav, durationSec, hits };

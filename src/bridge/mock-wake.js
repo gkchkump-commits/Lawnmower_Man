@@ -296,6 +296,12 @@ export function createMockWake(o) {
 export function checkClip(c) {
   if (!c || typeof c !== 'object' || !(c.wav instanceof ArrayBuffer)) return 'wav must be an ArrayBuffer';
   if (!Array.isArray(c.hits) || c.hits.length > 200) return 'hits must be a list of at most 200';
+  // as electron/wake/validate.js validateSaveClip
+  for (const h of c.hits) {
+    if (!h || typeof h !== 'object' || !Number.isFinite(h.atSec) || h.atSec < 0 || h.atSec > 65) return 'hit.atSec must be a time inside the clip';
+    if (!['HEY_JADE', 'HEY_JUDE', 'JADE'].includes(h.keyword)) return 'hit.keyword must be HEY_JADE, HEY_JUDE or JADE';
+    if (typeof h.outcome !== 'string' || !/^[a-z][a-z0-9 '_:-]{0,39}$/i.test(h.outcome)) return 'hit.outcome must be a short word';
+  }
   const v = new DataView(c.wav);
   if (c.wav.byteLength < 44) return 'not a WAV file';
   const tag = (/** @type {number} */ o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));

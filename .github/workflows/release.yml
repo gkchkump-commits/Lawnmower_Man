@@ -50,6 +50,9 @@ jobs:
           fi
       - name: Install npm dependencies (downloads the Electron runtime)
         run: npm ci
+      - name: Fetch go2rtc for the home camera (pinned release, SHA-256 checked)
+        # vendor/go2rtc/win32-x64/go2rtc.exe + LICENSE → resources/tapo/ (package.json build.win.extraResources)
+        run: npm run fetch:go2rtc -- --platform win32-x64
       - name: Build renderer + package (NSIS installer and portable exe)
         run: npm run dist:win
       - name: List build output
@@ -85,9 +88,16 @@ jobs:
             'resources\scripts\setup-voice.cmd',
             'resources\scripts\setup-voice.sh',
             'resources\THIRD_PARTY_NOTICES.md',
+            'resources\tapo\go2rtc.exe',
+            'resources\tapo\go2rtc-LICENSE.txt',
             'Uninstall Lawnmower Man.exe'
           )
           foreach ($f in $need) { if (-not (Test-Path -LiteralPath (Join-Path $dest $f))) { throw "missing in install: $f" } }
+          # the home camera's video component is the pinned go2rtc release, byte for byte
+          $want = node --input-type=module -e "import('./scripts/fetch-go2rtc.mjs').then((m) => console.log(m.ASSETS['win32-x64'].binSha256))"
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dest 'resources\tapo\go2rtc.exe')).Hash.ToLowerInvariant()
+          if ($got -ne $want) { throw "resources\tapo\go2rtc.exe is not the pinned go2rtc (sha256 $got, want $want)" }
+          Write-Host "go2rtc.exe sha256 $got (pinned)"
           foreach ($f in @('resources\voice\tests', 'resources\voice\.venv', 'resources\voice\models')) {
             if (Test-Path -LiteralPath (Join-Path $dest $f)) { throw "must not be installed: $f" }
           }

@@ -78,11 +78,14 @@ describe('relief: face regions', () => {
     expect(rigUniforms(rig, pose({ jawOpen: 0.6, mouthPress: 1 }), {}).upperLift).toBe(0);
   });
 
-  it('the opening is a lens: it spans the corners where they are now, narrow for O / U', () => {
+  it('the opening is a lens: it spans the corners where they are now, narrower still for O / U', () => {
     const rest = rigUniforms(rig, pose({}), {});
     expect(rest.lens[0]).toBe(1);
     expect(rest.lens[1]).toBe(RIG_LIMITS.cornerJawShare);
-    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeCloseTo(1 - RIG_LIMITS.roundCornerHw, 9);
+    // (rounded lips protrude and meet beside a small orifice, narrower than the corners: an 'oo'
+    // about half an 'ah''s width. It used to span the corners, 74 % of an 'ah''s width: a slit)
+    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeCloseTo((1 - RIG_LIMITS.roundCornerHw) * (1 - RIG_LIMITS.roundLensHw), 9);
+    expect(rigUniforms(rig, pose({ mouthRound: 1 }), {}).lens[0]).toBeLessThan(0.5);
     expect(rigUniforms(rig, pose({ mouthWide: 1 }), {}).lens[0]).toBeGreaterThan(1);
     expect(RIG_CHUNK).toMatch(/uniform vec4 uLens;/);
     // its outline: a slender almond at rest and for a rounded opening, fuller toward the corners

@@ -115,12 +115,28 @@ describe('relief rig: speech channels', () => {
     expect(n.cornerL[1]).toBeCloseTo(-RIG_LIMITS.asymFh * fh, 9);  // clamped to -1
   });
 
+  it('f / v: the incisors keep their crown height and give way as the jaw opens (no stretched bars)', () => {
+    const f = reliefShaders.CAVITY_FRAG;
+    expect(reliefShaders.TUCK_CROWN_PX).toBeGreaterThan(8);
+    expect(reliefShaders.TUCK_CROWN_PX).toBeLessThan(16);
+    // (the crowns map over TUCK_CROWN_PX under the upper lip, not over the whole opening)
+    expect(f).toMatch(/clamp\(yPx \/ TUCK_CROWN_PX, 0\.0, 1\.0\)/);
+    expect(f).not.toMatch(/mix\(uIncisors\.x, uIncisors\.y, clamp\(op\.x/);
+    // they fade out as the opening grows past a tucked lip's
+    expect(f).toMatch(/1\.0 - smoothstep\(TUCK_CROWN_PX \+ 3\.0, TUCK_CROWN_PX \+ 12\.0, uOpen\.x \+ uOpen\.y\)/);
+    // a steady f / v opening is about one crown high
+    const u = rigUniforms(rig, pose({ mouthTuck: 1, jawOpen: 0.1 }), {});
+    expect(u.open[0] + u.open[1]).toBeGreaterThan(reliefShaders.TUCK_CROWN_PX - 4);
+    expect(u.open[0] + u.open[1]).toBeLessThan(reliefShaders.TUCK_CROWN_PX + 3);
+  });
+
   it('round pulls the corners in and leaves a small orifice (the jaw sets how open it is)', () => {
     const u = rigUniforms(rig, pose({ mouthRound: 1 }), {});
     expect(-u.cornerR[0]).toBeCloseTo(RIG_LIMITS.roundCornerHw * rig.mouthHalfW, 9);
-    // (v0.4: rounding alone used to part the lips by 0.052 fh, so an "oo" gaped wider than an "ah")
-    expect(opening(u)).toBeGreaterThan(0.012 * fh);
-    expect(opening(u)).toBeLessThan(0.025 * fh);
+    // (v0.4: rounding alone used to part the lips by 0.052 fh, so an "oo" gaped wider than an "ah";
+    // 0.016 fh then left a closed 'oo' a flat slit: now 0.028 fh, a small round orifice)
+    expect(opening(u)).toBeGreaterThan(0.02 * fh);
+    expect(opening(u)).toBeLessThan(0.035 * fh);
     const oh = rigUniforms(rig, pose({ mouthRound: 0.8, jawOpen: 0.45 }), {});
     expect(opening(oh)).toBeGreaterThan(2 * opening(u));
   });

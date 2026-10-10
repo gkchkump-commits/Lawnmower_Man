@@ -390,7 +390,11 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(applyHead(p), 1.0);
 }`;
 
+/** Height (plate px) of the upper incisors' crowns that a tucked lower lip (f / v) shows. */
+export const TUCK_CROWN_PX = 12;
+
 export const CAVITY_FRAG = /* glsl */ `
+#define TUCK_CROWN_PX ${TUCK_CROWN_PX.toFixed(1)}
 uniform sampler2D tMouth;
 uniform float uTeeth;      // upper teeth visibility (an O / U pucker shows the dark interior, few teeth)
 uniform float uTeethLo;    // lower teeth visibility (they ride on the jaw behind the lower lip)
@@ -459,12 +463,18 @@ void main() {
     c = mix(c, tg.rgb, tg.a * (1.0 - 0.45 * teethLum));
     // f / v: the lower lip is drawn up under the upper incisors, whose crowns fill the opening
     // down to it (no dark gap under the teeth; the gaps between them stay dark), lit like the
-    // teeth of an open mouth
+    // teeth of an open mouth. The crowns keep their own height (TUCK_CROWN_PX under the upper
+    // lip's edge; the interior below them stays as it is), and they give way to the open mouth's
+    // own teeth as the opening grows past a tucked lip's: as the jaw opens for the next vowel the
+    // lower lip has left them (else they stretch into tall bars over a 20-40 px opening)
     float tk = 0.0;
     if (uTuck > 0.01) {
-      vec2 tuv = vec2(vUvM.x, mix(uIncisors.x, uIncisors.y, clamp(op.x, 0.0, 1.0)));
-      tk = smoothstep(0.0, 0.5, uTuck) * smoothstep(0.1, 0.4, op.y);
-      c = mix(c, texture2D(tMouth, tuv).rgb * mix(0.7, 1.0, op.x), tk);
+      float yPx = vTongue.y + uOpen.x * op.y;   // plate px under the upper lip's edge
+      float cr = clamp(yPx / TUCK_CROWN_PX, 0.0, 1.0);
+      vec2 tuv = vec2(vUvM.x, mix(uIncisors.x, uIncisors.y, cr));
+      tk = smoothstep(0.0, 0.5, uTuck) * smoothstep(0.1, 0.4, op.y) * (1.0 - smoothstep(TUCK_CROWN_PX + 3.0, TUCK_CROWN_PX + 12.0, uOpen.x + uOpen.y))
+        * (1.0 - smoothstep(TUCK_CROWN_PX, TUCK_CROWN_PX + 2.0, yPx));
+      c = mix(c, texture2D(tMouth, tuv).rgb * mix(0.7, 1.0, cr), tk);
     }
     c = c * mix(shade, 1.0, 0.7 * tk) * (1.0 - 0.4 * uSleep);
     gl_FragColor = vec4(c, 1.0);

@@ -8,7 +8,7 @@ export const PROC_LIMITS = Object.freeze({
   wideCornerHw: 0.12,      // corners outward for mouthWide = 1
   jawCornerInHw: 0.06,     // the corners draw in a little as the jaw opens wide (the lips stretch down)
   wideLipFh: 0.006,        // upper lip lift / lower lip drop for wide
-  roundCornerHw: 0.3,      // corners inward for mouthRound = 1
+  roundCornerHw: 0.4,      // corners inward for mouthRound = 1 (the opening spans them: an 'oo' about half an 'ah''s width)
   roundPushFh: 0.03,       // lips forward for round
   smileUpFh: 0.03,         // corners up for smile
   smileOutHw: 0.09,

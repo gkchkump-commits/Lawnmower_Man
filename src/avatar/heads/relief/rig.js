@@ -28,7 +28,8 @@ export const RIG_LIMITS = {
   wideLipFh: 0.007,       // lips part (teeth show) for wide
   roundCornerHw: 0.4,     // corners inward for mouthRound = 1 (more stretches the cheek grid)
   roundPushFh: 0.05,      // lips forward for round
-  roundLipFh: 0.008,      // centre parting for round: rounded lips leave a small orifice (the jaw sets how open)
+  roundLipFh: 0.014,      // centre parting for round: rounded lips leave a small round orifice (the jaw sets how open)
+  roundLensHw: 0.35,      // ... narrower than the corners: protruded lips meet beside it (an 'oo' about half an 'ah''s width)
   smileUpFh: 0.032,       // corners up for smile
   smileOutHw: 0.07,
   smileLidFrac: 0.12,     // lower lid squint
@@ -208,9 +209,10 @@ export function rigUniforms(rig, a, u) {
   u.cornerR = u.cornerR || [0, 0];
   u.cornerL[0] = -out; u.cornerL[1] = up + tilt;
   u.cornerR[0] = out; u.cornerR[1] = up - tilt;
-  // the lens of the opening spans the corners where they are now (narrow for O / U, wide for E)
+  // the lens of the opening spans the corners where they are now (wide for E); rounded lips leave
+  // an orifice narrower still (the lips protrude and meet beside it: O / U)
   u.lens = u.lens || [1, L.cornerJawShare, 0.75, 0.55];
-  u.lens[0] = Math.max(0.35, (1 + out / hw) * (1 - L.tuckLensHw * tuck));
+  u.lens[0] = Math.max(0.35, (1 + out / hw) * (1 - L.roundLensHw * round) * (1 - L.tuckLensHw * tuck));
   u.lens[1] = L.cornerJawShare;
   // the opening's outline: a slender almond for a small or rounded opening; an open vowel's and a
   // spread one's are fuller toward the corners (rounder ends, a flatter middle: a smaller

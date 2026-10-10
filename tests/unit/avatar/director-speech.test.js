@@ -1,7 +1,7 @@
 // Director: the lip-sync channels (press, tuck, teeth, tongue, asymmetry) and the secondary
 // speech motion driven by prosody cues (nods, brows, phrase-end blinks, micro-smiles).
 import { describe, expect, it } from 'vitest';
-import { Director, MOUTH_OMEGA, createAnimState, LIP_CONTACT } from '../../../src/avatar/director.js';
+import { Director, JAW_BEHIND_SEAL, MOUTH_OMEGA, createAnimState, LIP_CONTACT, lipContact } from '../../../src/avatar/director.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -50,9 +50,13 @@ describe('Director: speech channels', () => {
     }
     let a;
     for (let i = 2; i < 30; i++) { d.setMouth(target); a = d.update(1 / 60, 0.5 + i / 60); }
-    // (pressing and tucking lips meet in contact: their shown value saturates, LIP_CONTACT)
-    const shown = (m) => (m === 'press' || m === 'tuck' ? Math.min(1, LIP_CONTACT * target[m]) : target[m]);
+    // (pressing and tucking lips meet in contact: their shown value saturates, lipContact; with
+    // the lips closed for a sound the jaw waits behind them, JAW_BEHIND_SEAL: a 0.6 jaw under a
+    // 0.9 press is held at 0.4 — v0.4 let it drop behind the sealed lips, so the release popped)
+    const shown = (m) => (m === 'press' || m === 'tuck' ? lipContact(target[m], target[m], JAW_BEHIND_SEAL)
+      : m === 'jaw' ? Math.min(target.jaw, JAW_BEHIND_SEAL) : target[m]);
     for (const [m, k] of Object.entries(CH)) expect(a[k], k).toBeCloseTo(shown(m), 2);
+    expect(a.mouthPress).toBeGreaterThan(Math.min(1, LIP_CONTACT * target.press) - 0.02);   // in contact
     for (let i = 30; i < 70; i++) { d.setMouth({}); a = d.update(1 / 60, 0.5 + i / 60); }
     for (const k of Object.values(CH)) expect(a[k], k).toBeLessThan(0.01);
   });
@@ -78,6 +82,33 @@ describe('Director: speech channels', () => {
     for (let i = 0; i < 4; i++) opening.push(step({ jaw: 0.5 }));
     expect(opening[3]).toBeLessThan(0.35);                               // parted within 50 ms
     expect(LIP_CONTACT).toBeGreaterThan(1);
+  });
+
+  it('the lips hold contact only while closing for a sound; the jaw waits behind them', () => {
+    // contact while the target is full; a falling target (a release, a short vowel between two
+    // closures) shows the spring as it is, so the lips part as soon as they move
+    expect(lipContact(0.85, 1, 0.5)).toBe(1);
+    expect(lipContact(0.85, 0.2, 0.5)).toBeCloseTo(0.85, 9);
+    expect(lipContact(0, 1, 0.5)).toBe(0);
+    // from a small opening the lips meet sooner (a shorter way)
+    expect(lipContact(0.6, 1, 0)).toBe(1);
+    expect(lipContact(0.6, 1, 0.5)).toBeCloseTo(0.6 * LIP_CONTACT, 9);
+    // the jaw: an open vowel's target behind sealed lips waits at JAW_BEHIND_SEAL, then opens
+    // over several frames as they part
+    let time = 0;
+    const d = new Director({ seed: 7, idleMotion: 0 });
+    d.setState('speaking');
+    const step = (m) => { d.setMouth(m); time += 1 / 60; return d.update(1 / 60, time); };
+    for (let i = 0; i < 40; i++) step({ jaw: 0.1, press: 1 });
+    let a;
+    for (let i = 0; i < 6; i++) a = step({ jaw: 0.8, press: 1 });
+    expect(a.jawOpen).toBeLessThan(JAW_BEHIND_SEAL + 0.01);
+    expect(a.mouthPress).toBe(1);
+    const jaws = [a.jawOpen], presses = [a.mouthPress];
+    for (let i = 0; i < 12; i++) { a = step({ jaw: 0.8 }); jaws.push(a.jawOpen); presses.push(a.mouthPress); }
+    expect(presses[2]).toBeLessThan(0.6);                  // parted within two frames
+    expect(jaws.at(-1)).toBeGreaterThan(0.72);             // then the jaw goes on to the vowel
+    for (let i = 1; i < jaws.length; i++) expect(jaws[i] - jaws[i - 1]).toBeLessThan(0.17);
   });
 
   it('presses and tucks fast, rounds slower; the jaw follows into a closure faster than into rest', () => {

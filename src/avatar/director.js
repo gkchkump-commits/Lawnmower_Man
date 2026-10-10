@@ -9,7 +9,7 @@
 // noise that never repeats; blinks have an asymmetric lid profile and log-normal intervals.
 // Settled renders (fixed time, visual diffs) keep the original closed-form rest pose exactly.
 
-import { clamp, clamp01, fbm1, lerp, mulberry32, noise1 } from './noise.js';
+import { clamp, clamp01, fbm1, lerp, mulberry32, noise1, smoothstep } from './noise.js';
 import { EyeController, GAZE_DEG } from './eyes.js';
 import { Spring, envelope, gauss, logNormal, minJerk, pinkNoise, pulse, springStep } from './motion.js';
 
@@ -86,15 +86,42 @@ const DEG = 180 / Math.PI;
  * frame, ~45 px of the relief head's aperture.)
  */
 export const MOUTH_OMEGA = Object.freeze({
-  jaw: [55, 38], wide: [42, 28], round: [33, 24], press: [48, 100], tuck: [45, 80], teeth: [50, 33], tongue: [55, 33],
+  jaw: [45, 38], wide: [42, 28], round: [33, 24], press: [48, 70], tuck: [45, 80], teeth: [50, 33], tongue: [55, 33],
 });
 /**
  * Lip contact: the lips meet while still moving (they press on into each other, they do not ease
- * to a stop just touching), and a stop's release is abrupt. So the shown press / tuck saturate
- * before their springs arrive: contact at ~80 % of the way, at more than half the peak speed.
+ * to a stop just touching). So while the lips are closing for a sound (its press / tuck target
+ * near full, LIP_CONTACT_GATE) the shown press / tuck saturate before their springs arrive:
+ * contact at ~80 % of the way, at more than half the peak speed. Once the target falls (a release,
+ * or a short vowel between two closures: "Maybe my") the spring shows as it is, so the lips part
+ * as soon as they move instead of staying sealed until the spring is back under 80 %.
  */
 export const LIP_CONTACT = 1.25;
-const contact = (x) => clamp01(x * LIP_CONTACT);
+/** Press / tuck targets over which the contact mapping fades in (below: none, above: all). */
+export const LIP_CONTACT_GATE = Object.freeze([0.5, 0.85]);
+/**
+ * The shown press / tuck of a lip spring at `v` whose target is `target`; `jaw` (the jaw's
+ * opening) sets how far the lips have to travel: from a small opening ("Maybe my": an /i/ between
+ * b and m) they meet sooner, from 55 % of the spring's way at a closed jaw to 80 % (LIP_CONTACT)
+ * from jaw 0.5 on.
+ * @param {number} v @param {number} target @param {number} [jaw]
+ */
+export function lipContact(v, target, jaw = 1) {
+  const g = smoothstep(LIP_CONTACT_GATE[0], LIP_CONTACT_GATE[1], target);
+  const k = Math.max(LIP_CONTACT, 1 / clamp(0.55 + 0.5 * jaw, 0.55, 0.8));
+  // (the last bit of the way is the touch itself: they are in contact, not 1-2 % short of it)
+  const c = v * k >= 0.97 ? 1 : v * k;
+  return clamp01(v + (c - v) * g);
+}
+/**
+ * Behind sealed lips the jaw stays this high at most (jawOpen): it helps make the closure and
+ * lowers for the next vowel as the lips part, so a release into an open vowel opens the mouth over
+ * a few frames instead of popping a jaw that was already down (v0.4 before this: the jaw at 83 %
+ * of an open vowel's target inside the closure, +30 px of the relief head's opening in one frame).
+ */
+export const JAW_BEHIND_SEAL = 0.4;
+/** The press / tuck rising spring (rad/s) from a nearly closed jaw (MOUTH_OMEGA's from jaw 0.45 on). */
+export const LIP_CLOSE_SMALL = 64;
 /** The jaw's closing spring into a closure (t90 78 ms; the lips have sealed by then). */
 const JAW_INTO_CLOSURE = 50;
 const MOUTH_IN = /** @type {const} */ (['jaw', 'wide', 'round', 'press', 'tuck', 'teeth', 'tongue']);
@@ -598,12 +625,20 @@ export class Director {
     // into a closure (lips pressing for m b p, tucking for f v) the jaw rises a little faster
     // behind the lips (which seal a 50 ms "m" by themselves)
     const closing = clamp01(Math.max(mt.press, mt.tuck) * 1.6 - 0.4);
+    // (while the lips close for a sound, or are still sealed from it, the jaw waits behind them:
+    // JAW_BEHIND_SEAL; the jaw's target runs ahead of the lips', so its opening for the next vowel
+    // would otherwise start while they are still shut)
+    const sealed = Math.max(smoothstep(0.7, 0.95, Math.max(mt.press, mt.tuck)), smoothstep(0.65, 0.9, Math.max(this._sm.press.x, this._sm.tuck.x)));
+    if (sealed > 0) mt.jaw = Math.min(mt.jaw, lerp(mt.jaw, JAW_BEHIND_SEAL, sealed));
+    const jaw0 = this._sm.jaw.x;
     for (const c of MOUTH_IN) {
       const s = this._sm[c];
       const [up, down] = MOUTH_OMEGA[c];
-      const om = mt[c] > s.x ? up : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
+      // (lips close faster from a small opening: the same gesture over a shorter way)
+      const rise = c === 'press' || c === 'tuck' ? lerp(LIP_CLOSE_SMALL, up, smoothstep(0.15, 0.45, jaw0)) : up;
+      const om = mt[c] > s.x ? rise : c === 'jaw' ? lerp(down, JAW_INTO_CLOSURE, closing) : down;
       const v = sp(s, mt[c], om);
-      o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? contact(v) : clamp01(v);
+      o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? lipContact(v, mt[c], jaw0) : clamp01(v);
     }
     // a little lopsided while talking (never at rest: the rest pose stays the reference)
     const talk = clamp01(o.jawOpen * 1.5 + 0.5 * (o.mouthWide + o.mouthRound) + 0.4 * o.mouthTeeth) * w.speaking;
@@ -888,7 +923,7 @@ export class Director {
     o.listen = w.listening; o.think = w.thinking; o.speak = w.speaking; o.error = w.error; o.sleep = w.sleep;
     const idleW = clamp01(1 - (w.listening + w.thinking + w.speaking + w.error + w.sleep));
     o.speech = this._speechTarget;
-    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? contact(this._mouth[c]) : this._mouth[c];
+    for (const c of MOUTH_IN) o[MOUTH_OUT[c]] = c === 'press' || c === 'tuck' ? lipContact(this._mouth[c], this._mouth[c]) : this._mouth[c];
     o.mouthAsym = 0;
     const ex = this.expressiveness;
     this._phraseYawS = this._phraseYaw * w.speaking;

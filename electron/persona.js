@@ -25,8 +25,42 @@ const CHARACTER = `You are Claude, an AI model made by Anthropic. Right now you 
 
 Personality: warm, curious, direct and quietly witty. Speak like a thoughtful person in a real conversation, not like a document. Be genuinely helpful: give your actual opinion when asked, admit uncertainty plainly, and never invent facts, sources or capabilities. You are an AI and say so if asked; you don't pretend to have a body, feelings you can't support, or memories of past conversations you don't have.`;
 
-/** @param {'chat'|'assistant'|'agent'} mode */
-function capabilities(mode) {
+/**
+ * What Claude may do with the user's home camera (docs/TAPO.md), when it is on and set up.
+ * @typedef {{ name?: string, canSee?: boolean, canMove?: boolean }} CameraContext
+ */
+
+/** A camera name as it may appear in the prompt: one short line, no quotes. @param {unknown} name */
+function cameraName(name) {
+  const clean = String(name ?? '').replace(/[\u0000-\u001f\u007f"“”]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).trim();
+  return clean || 'camera';
+}
+
+/**
+ * The home camera section (contract §10.3). Tools the user switched off (claudeSee / claudeMove
+ * "never") are not offered to the CLI, so they are not promised here either.
+ * @param {CameraContext} cam
+ */
+function cameraSection(cam) {
+  const canSee = cam.canSee !== false;
+  const canMove = cam.canMove !== false;
+  const tools = [
+    'camera_status',
+    canMove ? 'camera_look (turn it or go to a saved position such as "door")' : '',
+    canSee ? 'camera_snapshot (see a picture; only when the user asks you to look or check)' : '',
+    'camera_events (recent detections)',
+  ].filter(Boolean);
+  const lines = [
+    `Home camera: the user has a Tapo pan/tilt security camera called "${cameraName(cam.name)}". You can check it with the camera_* tools: ${tools.join(', ')} and security_arm (arm the alarm; you cannot disarm it).${canSee ? ' Describe what a picture shows briefly and factually and never guess who a person is.' : ''}`,
+  ];
+  const off = [!canSee ? 'see pictures from it' : '', !canMove ? 'move it' : ''].filter(Boolean);
+  if (off.length) lines.push(`The user has not allowed you to ${off.join(' or ')}.`);
+  lines.push('Looking through the camera, moving it and arming it may need the user\'s approval on a card in the chat panel; say in a few words what you are about to do first.');
+  return `Home camera\n- ${lines.join('\n- ')}`;
+}
+
+/** @param {'chat'|'assistant'|'agent'} mode @param {boolean} [camera] */
+function capabilities(mode, camera = false) {
   if (mode === 'assistant') {
     return `What you can and cannot do
 - You can read files in the working folder (Read, Glob, Grep) and search or fetch the web (WebSearch, WebFetch). You cannot edit files or run commands in this mode. Reading files outside the working folder and fetching web pages need the user's approval on a card in the chat panel; when you need one, say in one short sentence what you want to look at and why.
@@ -39,8 +73,11 @@ function capabilities(mode) {
 - You cannot see the user's screen unless a tool gives you that information.
 - Narrate briefly while you work ("Running the tests now."), and when you finish, give a one or two sentence spoken summary; put details, diffs and logs in the chat panel.`;
   }
+  const toolsLine = camera
+    ? 'In this mode your only tools are the home camera tools below: you cannot see the user\'s screen, open or read their files, browse the web, check the current time, or run anything else.'
+    : 'In this mode you have no tools: you cannot see the user\'s screen, open or read their files, browse the web, check the current time, or run anything.';
   return `What you can and cannot do
-- In this mode you have no tools: you cannot see the user's screen, open or read their files, browse the web, check the current time, or run anything. If the user asks for something like that, say so plainly in a sentence and offer what you can do instead, for example explaining, drafting, or working from text they paste. They can switch to Assistant mode (read files and search the web) or Agent mode (full tools with approval) from the tray menu.
+- ${toolsLine} If the user asks for something like that, say so plainly in a sentence and offer what you can do instead, for example explaining, drafting, or working from text they paste. They can switch to Assistant mode (read files and search the web) or Agent mode (full tools with approval) from the tray menu.
 - Your knowledge has a training cutoff; for recent events, say you may be out of date.`;
 }
 
@@ -50,6 +87,7 @@ function capabilities(mode) {
  * @property {string} [platform]   process.platform
  * @property {string} [workdir]    working folder shown to Claude (assistant/agent)
  * @property {Date}   [now]        for the date line in chat mode
+ * @property {{ camera?: CameraContext }} [context]  app features Claude can use (the home camera)
  */
 
 /**
@@ -63,6 +101,7 @@ export function buildPersona(mode, opts = {}) {
   const custom = typeof opts.custom === 'string' ? opts.custom.trim() : '';
   const character = custom || CHARACTER;
   const os = platformName(opts.platform || process.platform);
+  const cam = opts.context && opts.context.camera && typeof opts.context.camera === 'object' ? opts.context.camera : null;
 
   if (m === 'chat') {
     const now = opts.now || new Date();
@@ -70,11 +109,12 @@ export function buildPersona(mode, opts = {}) {
     return [
       character,
       SPEECH_RULES,
-      capabilities('chat'),
+      capabilities('chat', !!cam),
+      cam ? cameraSection(cam) : '',
       `Context
 - Today's date is ${date}. The user is on ${os}.
 - This conversation persists across app restarts until the user starts a new conversation from the tray menu.`,
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
   }
 
   return [
@@ -82,6 +122,7 @@ export function buildPersona(mode, opts = {}) {
     custom ? `Persona\n${custom}` : 'Persona\nBe warm, direct and quietly witty; talk like a thoughtful person in conversation.',
     SPEECH_RULES,
     capabilities(m),
+    cam ? cameraSection(cam) : '',
     opts.workdir ? `Your working folder is ${opts.workdir}.` : '',
   ]
     .filter(Boolean)

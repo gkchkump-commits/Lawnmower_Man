@@ -71,6 +71,20 @@ test.describe('hardening (mock bridge)', () => {
     await expect(card.locator('.perm-showall')).toHaveCount(0);
   });
 
+  test('a Home camera card: the app\'s own words are not "Claude says", the tool reads "Camera: snapshot"', async ({ page }) => {
+    await boot(page);
+    await page.evaluate(() => window.__app.bridge.__mock.emitClaude({
+      type: 'permission_request', turnId: null, requestId: 'perm-cam', toolName: 'mcp__lawnmower-camera__camera_snapshot', input: {},
+    }));
+    const card = page.locator('.perm-card');
+    await expect(card).toBeVisible();
+    await expect(card.locator('.perm-tool')).toHaveText('Camera: snapshot');
+    await expect(card.locator('.perm-title')).toHaveText('Look through the home camera');
+    await expect(card.locator('.perm-desc')).toHaveText('Claude gets one picture from the camera (it becomes part of the conversation).');
+    await expect(card).not.toContainText('Claude says');
+    await expect(card).not.toContainText('mcp__');
+  });
+
   test('without a global cursor (browser preview) the eyes follow pointer moves over the page', async ({ page }) => {
     await boot(page);
     expect(await page.evaluate(() => typeof window.__app.bridge.onCursor)).toBe('undefined');

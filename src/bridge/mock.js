@@ -16,8 +16,13 @@
 // claude.send(text, { images }) checks images like main does (≤ 2 JPEG/PNG/WebP, base64 without
 // a data: prefix, ≤ 1.5 MB) and acknowledges them in the reply; __mock.images() lists what
 // arrived (for the camera tests).
+// Home camera: the `tapo` namespace (contract §6.2) is backed by the pretend camera of
+// mock-tapo.js (?tapo=<scenario>); __mock.tapoAlert({ kind, quiet }) sends an alert like main's
+// (lm:tapo:alert) and __mock.tapoLook(p) a look toward the camera window.
+/* global URLSearchParams */
 
 import { DEFAULT_SETTINGS, clone, deepMerge, isPlainObject } from '../app/settings-defaults.js';
+import { createMockTapoCore, sanitizeTapoValue } from './mock-tapo.js';
 import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
 
 /**
@@ -33,6 +38,7 @@ import { FAKE_HEALTH, createFakeVoiceFetch } from './mock-voice.js';
  * @property {number} [claudeRetries]             retry() calls that still fail (default 0)
  * @property {'failed'} [voiceSetup]              start after a failed "Set up local voice…" run
  *                                                (the half-installed venv of a real bug report)
+ * @property {string} [tapo]                      Home camera scenario (mock-tapo.js); default ?tapo= or 'online'
  */
 
 /** The output tail of the failed setup step that ?voiceSetup=failed shows. */
@@ -141,6 +147,14 @@ function sanitizePatch(base, patch) {
   if (!isPlainObject(patch)) return out;
   for (const [group, gp] of Object.entries(patch)) {
     if (!isPlainObject(gp) || !isPlainObject(base[group])) continue;
+    if (group === 'tapo' || group === 'security') {
+      // ---- Home camera: checked like electron/settings.js (mock-tapo.js)
+      for (const [k, v] of Object.entries(gp)) {
+        const r = sanitizeTapoValue(`${group}.${k}`, v);
+        if (r) (out[group] ||= {})[k] = r.value;
+      }
+      continue;
+    }
     for (const [k, v] of Object.entries(gp)) {
       if (!(k in base[group])) continue;
       const def = /** @type {any} */ (DEFAULT_SETTINGS)[group]?.[k];
@@ -157,6 +171,23 @@ function sanitizePatch(base, patch) {
   // a size preset replaces a free size, as in electron/settings.js applyPatch
   if (out.window && typeof out.window.sizePreset === 'string' && !('avatarWidth' in out.window)) out.window.avatarWidth = null;
   return out;
+}
+
+/** A small JPEG (base64, no data: prefix) standing in for an alert snapshot. */
+async function mockSnapshot() {
+  const C = globalThis.OffscreenCanvas;
+  if (typeof C !== 'function') return undefined;
+  const c = new C(320, 180);
+  const g = c.getContext('2d');
+  g.fillStyle = '#4a4740';
+  g.fillRect(0, 0, 320, 180);
+  g.fillStyle = '#00d000';
+  g.fillRect(140, 50, 40, 110);
+  const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.7 });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return { mediaType: 'image/jpeg', data: btoa(bin) };
 }
 
 /**
@@ -555,16 +586,92 @@ export function createMockBridge(options = {}) {
       const clean = sanitizePatch(settings, patch);
       const next = deepMerge(settings, clean);
       if (JSON.stringify(next) !== JSON.stringify(settings)) {
+        const prev = settings;
         settings = next;
         queueMicrotask(() => {
           deliver('settings', settings);
           voiceChanged();
         });
+        tapoSettingsChanged(prev, settings);
       }
       return clone(settings);
     },
     onChange: (cb) => subscribe('settings', cb),
   };
+
+  // ---------------------------------------------------------------- Home camera (tapo)
+  const tapoScenario = opt.tapo || new URLSearchParams(globalThis.location?.search || '').get('tapo') || 'online';
+  const tapoCore = createMockTapoCore({
+    scenario: tapoScenario,
+    getSettings: () => settings,
+    patchSettings: (p) => {
+      settingsApi.set(p);
+    },
+  });
+  /** @type {{ alert: Set<Function>, look: Set<Function> }} */
+  const tapoListeners = { alert: new Set(), look: new Set() };
+  /** @param {'alert'|'look'} kind @param {any} payload */
+  const tapoDeliver = (kind, payload) => {
+    for (const cb of [...tapoListeners[kind]]) {
+      try {
+        cb(clone(payload));
+      } catch (err) {
+        console.error(`[mock] tapo ${kind} listener threw`, err);
+      }
+    }
+  };
+  /** @param {any} prev @param {any} next */
+  function tapoSettingsChanged(prev, next) {
+    if (['enabled', 'host', 'username', 'onvifPort'].some((k) => prev.tapo[k] !== next.tapo[k])) tapoCore.reconnect();
+    else tapoCore.emitStatus();
+    if (!prev.security.armed && next.security.armed && !tapoCore.security.armed && !tapoCore.security.arming) tapoCore.arm({ armed: true });
+    if (prev.security.armed && !next.security.armed && (tapoCore.security.armed || tapoCore.security.arming)) tapoCore.arm({ armed: false });
+  }
+  if (settings.tapo.enabled) tapoCore.reconnect();
+  const tapo = {
+    status: () => tapoCore.status(),
+    /** @param {boolean} armed */
+    arm: (armed) => tapoCore.arm({ armed: !!armed }),
+    ptz: (cmd) => tapoCore.ptz(cmd),
+    presets: () => tapoCore.presets(),
+    events: (q) => tapoCore.listEvents(q),
+    /** a browser tab cannot open the camera window: recorded (Playwright checks it) */
+    async openWindow(o) {
+      calls.push(['tapo.openWindow', { show: true, ...(o || {}) }]);
+      return { ok: true };
+    },
+    async openClips() {
+      calls.push(['tapo.openClips']);
+      return tapoCore.openClips();
+    },
+    onStatus: (cb) => tapoCore.subscribe('status', cb),
+    onAlert: (cb) => {
+      tapoListeners.alert.add(cb);
+      return () => tapoListeners.alert.delete(cb);
+    },
+    onLook: (cb) => {
+      tapoListeners.look.add(cb);
+      return () => tapoListeners.look.delete(cb);
+    },
+  };
+  /**
+   * An alert like main's announce action (contract §8.11 AvatarAlert), with a look toward the
+   * camera window (to the left of the avatar).
+   * @param {{ kind?: 'person'|'motion'|'tamper', quiet?: boolean, look?: { x: number, y: number, holdMs: number }|null }} [o]
+   */
+  async function tapoAlert(o = {}) {
+    const kind = o.kind || 'person';
+    const name = settings.tapo.name || 'camera';
+    const line = kind === 'person' ? `Someone is at the ${name}.` : kind === 'motion' ? `I noticed movement on the ${name}.` : `The ${name} may have been covered or moved.`;
+    const describe = !!settings.security.describe && kind === 'person';
+    /** @type {any} */
+    const alert = { id: `mock-${Date.now().toString(36)}`, kind, at: Date.now(), cameraName: name, line, quiet: !!o.quiet, describe };
+    if (describe) alert.snapshot = await mockSnapshot();
+    calls.push(['tapo.alert', { kind, quiet: alert.quiet, describe }]);
+    tapoDeliver('alert', alert);
+    if (o.look !== null && !alert.quiet) tapoDeliver('look', o.look || { x: -420, y: 180, holdMs: 4000 });
+    return alert;
+  }
 
   const record = (name) => (...args) => {
     calls.push([name, ...args]);
@@ -574,6 +681,7 @@ export function createMockBridge(options = {}) {
     claude,
     voice,
     settings: settingsApi,
+    tapo,
     window: {
       setIgnoreMouse: record('setIgnoreMouse'),
       setSizePreset: record('setSizePreset'),
@@ -618,7 +726,15 @@ export function createMockBridge(options = {}) {
       /** Images claude.send() received, oldest first ({ turnId, text, mediaType, data }). */
       images: () => received.map((r) => ({ ...r })),
       pendingPermissions: () => [...permissions.keys()],
-      dispose: () => clearTimeout(startTimer),
+      /** Home camera: an alert (Someone is at the camera.) and a look toward its window. */
+      tapoAlert,
+      /** @param {{ x: number, y: number, holdMs: number }} p */
+      tapoLook: (p) => tapoDeliver('look', p),
+      tapo: tapoCore,
+      dispose: () => {
+        clearTimeout(startTimer);
+        tapoCore.dispose();
+      },
     },
   };
   return bridge;

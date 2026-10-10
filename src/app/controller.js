@@ -71,6 +71,13 @@ const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watc
  * @property {(o: { source: string, hidden: boolean }) => Promise<Array<{ mediaType: string, data: string, thumb?: string }>>} capture
  */
 
+/**
+ * A local command handler (the Home camera's intents, src/tapo/intents.js): it decides
+ * synchronously whether it handles a user message; only `true` counts (the work it starts can be
+ * asynchronous). A handled message shows as the user's bubble and never reaches Claude.
+ * @typedef {(text: string, o: { source: string }) => boolean} CommandInterceptor
+ */
+
 /** @param {unknown} err */
 const errMsg = (err) => (err && typeof err === 'object' && 'message' in err ? String(/** @type {any} */ (err).message) : String(err || 'unknown error'));
 
@@ -157,6 +164,10 @@ export class Controller extends Emitter {
     /** Hands-free may listen (the camera's look-to-talk closes it while the user looks away). */
     this._listenGate = true;
     this._sayCounter = 0;
+    /** @type {CommandInterceptor|null} local commands (the Home camera's "camera left") */
+    this._interceptor = null;
+    /** when wake() last woke the avatar (postpones sleep, but is not user activity) */
+    this._wokeAt = -Infinity;
   }
 
   // ------------------------------------------------------------------------------------------
@@ -275,7 +286,10 @@ export class Controller extends Emitter {
   /**
    * Send a user message (typed, or transcribed speech).
    * hidden: an app-generated prompt (the camera greeting): no user bubble, `note` instead.
-   * @param {string} text @param {{ source?: 'text'|'voice'|'camera', hidden?: boolean, note?: string }} [o]
+   * images: pictures that go with it as they are (the Home camera's alert snapshot); the
+   * snapshot provider (the webcam) is not asked then.
+   * @param {string} text
+   * @param {{ source?: 'text'|'voice'|'camera', hidden?: boolean, note?: string, images?: Array<{ mediaType: string, data: string }> }} [o]
    * @returns {boolean} false when the text was empty
    */
   sendText(text, o = {}) {
@@ -285,6 +299,8 @@ export class Controller extends Emitter {
     const hidden = !!o.hidden;
     if (!hidden) this.noteActivity();
     if (this.listen) this._cancelListening();
+    // a local command ("camera left"): the user's bubble, no Claude turn
+    if (!hidden && this._interceptor && this._intercepted(clean, source)) return true;
     // Newer input wins: the running reply is interrupted and older messages that have not
     // started yet are dropped (they would otherwise be answered — and spoken — first).
     if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
@@ -297,14 +313,20 @@ export class Controller extends Emitter {
     this.pendingSends++;
     const gen = ++this._sendGen;
     this._setState('thinking');
+    // pictures given by the caller go as they are (the Home camera's alert snapshot)
+    const given = Array.isArray(o.images) ? o.images.filter((x) => x && typeof x.data === 'string' && x.data && typeof x.mediaType === 'string') : [];
     // a picture goes with it (the camera's "Let Claude see me" / 📷): taken now, sent with the text
     let wantsShot = false;
-    try {
-      wantsShot = !!this._snapshots?.wants({ source, hidden });
-    } catch (err) {
-      console.warn('[controller] snapshot provider failed', err);
+    if (!given.length) {
+      try {
+        wantsShot = !!this._snapshots?.wants({ source, hidden });
+      } catch (err) {
+        console.warn('[controller] snapshot provider failed', err);
+      }
     }
-    const send = wantsShot
+    const send = given.length
+      ? Promise.resolve().then(() => this.bridge.claude.send(clean, { images: given.map((x) => ({ mediaType: x.mediaType, data: x.data })) }))
+      : wantsShot
       ? Promise.resolve()
         .then(() => /** @type {SnapshotProvider} */ (this._snapshots).capture({ source, hidden }))
         .then((shots) => shots, (err) => {
@@ -514,6 +536,31 @@ export class Controller extends Emitter {
   }
 
   /**
+   * Local commands that run without a Claude turn (the Home camera's "camera left", "arm the
+   * camera"); null = none. Asked first for every message the user types or says.
+   * @param {CommandInterceptor|null} fn
+   */
+  setCommandInterceptor(fn) {
+    this._interceptor = typeof fn === 'function' ? fn : null;
+  }
+
+  /** @param {string} text @param {string} source @returns {boolean} handled */
+  _intercepted(text, source) {
+    let handled = false;
+    try {
+      handled = /** @type {CommandInterceptor} */ (this._interceptor)(text, { source }) === true;
+    } catch (err) {
+      console.warn('[controller] command interceptor failed', err);
+    }
+    if (!handled) return false;
+    // newer input wins, as for a message to Claude; the command confirms itself with say()
+    if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
+    this.view.addUserMessage?.(text, { source });
+    this._maybeIdle();
+    return true;
+  }
+
+  /**
    * Hands-free listening may run (true) or must wait (false): the camera's look-to-talk closes
    * the gate while the user looks away. An utterance already in progress is not cut off.
    * @param {boolean} open
@@ -573,6 +620,19 @@ export class Controller extends Emitter {
   /** Pointer/keyboard activity: wakes the avatar and postpones sleep. */
   noteActivity() {
     this._lastActivity = this._now();
+    this._wakeUp();
+  }
+
+  /**
+   * Wake the avatar up (the Home camera's alert) without it counting as the user being active:
+   * lastActivityAt (the webcam's presence logic) does not change; the doze timer starts over.
+   */
+  wake() {
+    this._wokeAt = this._now();
+    this._wakeUp();
+  }
+
+  _wakeUp() {
     if (this.sleeping) {
       this.sleeping = false;
       this.view.setSleep?.(false);
@@ -605,7 +665,7 @@ export class Controller extends Emitter {
       this.avatar?.setUser?.({ voice: level });
     }
     if (this.sleepAfterMs > 0 && !this.sleeping && this.state === 'idle' && !this.listen && !this.permissions.size
-      && this._now() - this._lastActivity > this.sleepAfterMs) {
+      && this._now() - Math.max(this._lastActivity, this._wokeAt) > this.sleepAfterMs) {
       this.sleeping = true;
       this.view.setSleep?.(true);
       if (!this._errorFlash) this.avatar?.setState?.('sleep');
@@ -805,7 +865,7 @@ export class Controller extends Emitter {
     const t = turnId ? this._turn(turnId) : null;
     if (this.settings.voice.speakReplies && this.tts.available() && !(t && t.silenced)) {
       if (t) this._enqueue(t, t.chunker.flush()); // what was said before the request comes first
-      this.speech.push(spokenPermissionPrompt(toolName, input), { turnId, kind: 'prompt' });
+      this.speech.push(spokenPermissionPrompt(toolName, input, { cameraName: this.settings.tapo?.name }), { turnId, kind: 'prompt' });
     }
     this._busyThinking();
     this.emit('permission', ev);

@@ -69,6 +69,63 @@ export const DEFAULT_SETTINGS = Object.freeze({
     greeting: 'hello', // 'off' | 'hello' (quick spoken hello) | 'claude' (Claude says hello)
     lookToTalk: false,
   },
+  // ---- Home camera (Tapo pan/tilt camera + home security; docs/TAPO.md) ---------------------
+  // Mirror of electron/settings.js; main validates every value. The camera password is never a
+  // setting (main keeps it encrypted, the renderer never sees it).
+  tapo: {
+    enabled: false, // the whole feature: camera window, video component, ONVIF
+    name: 'camera', // spoken/display name ("front door camera")
+    host: '', // '' or the camera's LAN address (IP or name, never a URL)
+    onvifPort: 2020,
+    rtspPort: 554,
+    username: '', // the Tapo Camera Account user (not secret)
+    stream: 'stream1', // 'stream1' | 'stream2'
+    ptz: 'auto', // 'auto' | 'relative' | 'continuous' | 'off'
+    invertPan: false,
+    invertTilt: false,
+    stepSmall: 0.15, // nudge sizes as fractions of the view
+    stepMedium: 0.35,
+    stepLarge: 0.75,
+    viewUnitsX: 0.5, // ONVIF units that turn the view by one width / height (calibration)
+    viewUnitsY: 1.4,
+    minStep: 0.05,
+    holdSpeed: 0.5,
+    msPerUnit: 6000,
+    homePreset: '', // a preset token; '' = AbsoluteMove(0,0) when supported
+    localPresets: /** @type {Array<{ name: string, x: number, y: number }>} */ ([]),
+    calibratedAt: '', // ISO time of the last calibration, '' = never
+    windowBounds: /** @type {{x:number,y:number,width:number,height:number}|null} */ (null),
+    windowOnTop: false,
+    showDetections: false, // person boxes in the live view while disarmed
+  },
+  security: {
+    armed: false, // persisted: an armed app re-arms after a restart
+    armDelaySec: 30, // exit delay after arming in the app
+    people: true,
+    motion: true,
+    notify: 'person', // 'person' | 'motion' | 'off'
+    record: 'person', // 'person' | 'motion' | 'off'
+    preRollSec: 5,
+    postRollSec: 10,
+    maxClipSec: 120,
+    retentionDays: 7,
+    maxStorageGB: 5,
+    clipsDir: '', // '' = <Videos>/Lawnmower Man/Security
+    sensitivity: 'medium', // 'low' | 'medium' | 'high'
+    cameraEvents: true,
+    confirmLocally: true,
+    cooldownSec: 60,
+    quietHours: '', // '' | 'HH:MM-HH:MM'
+    announce: true, // the avatar says it
+    showOnAlert: true,
+    describe: false, // Claude describes the alert snapshot (consent card first)
+    claudeSee: 'ask', // 'ask' | 'always' | 'never'  camera_snapshot
+    claudeMove: 'ask', // 'ask' | 'always' | 'never'  camera_look
+    voiceCommands: true, // "camera left", "arm the camera" run locally, without a Claude turn
+    startAtLogin: false, // start with Windows (hidden): an armed alarm comes back after a restart
+    startAtLoginOffered: false,
+  },
+  // ---- end Home camera -----------------------------------------------------------------------
 });
 
 /** @param {unknown} v @returns {v is Record<string, any>} */

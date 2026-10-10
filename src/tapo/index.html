@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>Home camera</title>
+    <link rel="stylesheet" href="../styles/app.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <!-- The Home camera window (contract §9): live view, pan/tilt, presets, arming, events, setup.
+       It stays open (hidden) while the app runs: its worker does the local detection. -->
+  <body class="tapo" data-boot="loading" data-side="open">
+    <div id="cam" class="cam">
+      <header id="cam-head" class="cam-head"></header>
+      <div id="banners" class="banners" aria-live="polite"></div>
+      <main class="cam-main">
+        <section id="live" class="live" aria-label="Live view">
+          <canvas id="live-canvas" class="live-canvas"></canvas>
+          <div id="dpad"></div>
+          <div id="toasts" class="toasts"></div>
+        </section>
+        <aside id="side" class="side" aria-label="Positions and events">
+          <section id="presets" class="side-sec side-presets"></section>
+          <section id="events" class="side-sec side-events"></section>
+        </aside>
+        <section id="setup" class="setup" hidden aria-label="Camera settings"></section>
+      </main>
+      <footer id="cam-foot" class="cam-foot">
+        <span id="foot-stream" class="foot-stream"></span>
+        <span id="foot-store" class="foot-store"></span>
+      </footer>
+    </div>
+    <div id="dialogs"></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

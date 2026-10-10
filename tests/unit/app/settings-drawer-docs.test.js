@@ -13,12 +13,17 @@ const docs = ['README.md', ...readdirSync(path.join(root, 'docs')).filter((f) =>
 // switch — not the app's drawer
 const OS_SETTINGS = new Set(['System', 'Apps', 'Privacy']);
 
+// a section is one capitalized word, or a drawer section title of several words ("Home camera")
+const escape = (/** @type {string} */ t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const MULTI_WORD = SECTIONS.map((s) => s.title).filter((t) => /\s/.test(t)).sort((x, y) => y.length - x.length).map(escape);
+const REF = new RegExp(`Settings ?[→›] ?(${[...MULTI_WORD, '[A-Z][A-Za-z]+'].join('|')})(?: ?[→›] ?([A-Za-z][A-Za-z /()-]*[A-Za-z)]))?`, 'g');
+
 /** @returns {Array<{ file: string, section: string, field?: string }>} */
 function references() {
   const out = [];
   for (const file of docs) {
     const text = readFileSync(path.join(root, file), 'utf8');
-    for (const m of text.matchAll(/Settings ?[→›] ?([A-Z][A-Za-z]+)(?: ?[→›] ?([A-Za-z][A-Za-z /()-]*[A-Za-z)]))?/g)) {
+    for (const m of text.matchAll(REF)) {
       out.push({ file, section: m[1], field: m[2] });
     }
   }

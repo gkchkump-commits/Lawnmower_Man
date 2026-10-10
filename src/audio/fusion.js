@@ -337,3 +337,26 @@ export function fuseTimeline(tl, ac, speaker, f0, targetOf) {
   const amounts = al.map((s, i) => (vas[i] ? vowelAmounts(s.viseme, vas[i], norms, clipNorm, targetOf(s.viseme)) : null));
   return { tl: al, amounts, vowels: measured.map((v) => ({ f1: v.f1, f2: v.f2 })), anchors };
 }
+
+let _warm = false;
+/**
+ * Run the fusion once on a small synthetic clip so the JavaScript engine has compiled it before
+ * the first real clip (cold, the first rebuild costs several milliseconds). Idempotent.
+ * @param {(viseme: string) => number[]} targetOf @returns {boolean} true when it ran now
+ */
+export function warmUpFusion(targetOf) {
+  if (_warm) return false;
+  _warm = true;
+  const n = 120, hop = 0.005;
+  const mk = () => new Float32Array(n);
+  const ac = { hop, n, done: n, duration: n * hop, e: mk(), lo: mk(), hi: mk(), f1: mk(), f2: mk(), f3: mk(), voiced: mk() };
+  for (let i = 0; i < n; i++) {
+    const t = i * hop, on = t > 0.1 && t < 0.5 && !(t > 0.3 && t < 0.34);
+    ac.e[i] = on ? -22 : -70; ac.lo[i] = ac.e[i] - 3; ac.hi[i] = -80;
+    ac.f1[i] = on ? 700 : 0; ac.f2[i] = on ? 1500 : 0; ac.voiced[i] = on ? 0.9 : 0;
+  }
+  const tl = [{ start: 0, end: 0.08, viseme: 'sil' }, { start: 0.08, end: 0.3, viseme: 'aa' }, { start: 0.3, end: 0.34, viseme: 'PP' },
+    { start: 0.34, end: 0.5, viseme: 'E' }, { start: 0.5, end: 0.6, viseme: 'sil' }];
+  fuseTimeline(tl, ac, null, 150, targetOf);
+  return true;
+}

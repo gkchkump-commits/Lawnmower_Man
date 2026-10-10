@@ -24,7 +24,7 @@ import { bandEnergies, dbToUnit, toDb } from './dsp.js';
 import { springStep } from '../avatar/motion.js';
 import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms, warmUpAnalysis } from './prosody.js';
 import { AcousticsClient } from './acoustics-client.js';
-import { SpeakerFormants, fuseTimeline } from './fusion.js';
+import { SpeakerFormants, fuseTimeline, warmUpFusion } from './fusion.js';
 import { base64ToBytes, decodeWav } from './wav.js';
 
 export { CHANNELS, VISEME_SHAPES, planSpeech };
@@ -605,7 +605,7 @@ export class LipSync {
     this._offs = [];
     // compile the analysis while the app is idle, not on the first clip's frames (browser only)
     if (typeof globalThis.requestIdleCallback === 'function') {
-      globalThis.requestIdleCallback(() => { warmUpAnalysis(); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
+      globalThis.requestIdleCallback(() => { warmUpAnalysis(); warmUpFusion(visemeTarget); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
     }
     const p = this.player;
     if (p && typeof p.on === 'function') {

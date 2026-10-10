@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyseAcoustics } from '../../../src/audio/acoustics.js';
 import {
-  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, findDip, fuseTimeline, landmarks, priorNorms, vowelAmounts, warpTime,
+  JAW_RANGE, SpeakerFormants, acousticOnset, alignTimeline, findDip, fuseTimeline, landmarks, priorNorms, vowelAmounts, warmUpFusion, warpTime,
 } from '../../../src/audio/fusion.js';
 import { visemeTarget } from '../../../src/audio/articulation.js';
 import { decodeWav } from '../../../src/audio/wav.js';
@@ -149,5 +149,12 @@ describe('on a real Kokoro clip', () => {
     const jaw = (ids) => mean(f.tl.map((s, i) => (ids.includes(s.viseme) && f.amounts[i] ? f.amounts[i].jaw : NaN)).filter(Number.isFinite));
     expect(jaw(['aa'])).toBeGreaterThan(2 * jaw(['I', 'U']));
     expect(f.vowels.length).toBeGreaterThan(10);
+  });
+
+  it('warmUpFusion runs once (it only compiles the code; the results are unchanged)', () => {
+    const first = warmUpFusion(visemeTarget);
+    expect(warmUpFusion(visemeTarget)).toBe(false);
+    expect(typeof first).toBe('boolean');
+    expect(fuseTimeline(meta.visemes, ac, null, 200, visemeTarget)).toEqual(f);
   });
 });

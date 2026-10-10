@@ -77,6 +77,25 @@ describe('applyPatch validation', () => {
     expect(warnings.join('\n')).toMatch(/unknown setting "window.nope"/);
   });
 
+  it('window.avatarWidth: a free size in px (clamped, even) or null; picking a preset clears it', () => {
+    expect(base.window.avatarWidth).toBe(null);
+    const a = applyPatch(base, { window: { avatarWidth: 451 } });
+    expect(a.warnings).toEqual([]);
+    expect(a.settings.window.avatarWidth).toBe(452);
+    expect(applyPatch(base, { window: { avatarWidth: 5 } }).settings.window.avatarWidth).toBe(200);
+    expect(applyPatch(base, { window: { avatarWidth: 99999 } }).settings.window.avatarWidth).toBe(1200);
+    const bad = applyPatch(a.settings, { window: { avatarWidth: '600' } });
+    expect(bad.settings.window.avatarWidth).toBe(452);
+    expect(bad.warnings.join('\n')).toMatch(/avatarWidth/);
+    // a preset (tray, drawer S/M/L) replaces the free size, also the same preset again
+    expect(applyPatch(a.settings, { window: { sizePreset: 'large' } }).settings.window).toMatchObject({ sizePreset: 'large', avatarWidth: null });
+    expect(applyPatch(a.settings, { window: { sizePreset: 'medium' } }).settings.window.avatarWidth).toBe(null);
+    // …but not an invalid preset, and not a patch that sets both (a whole settings file)
+    expect(applyPatch(a.settings, { window: { sizePreset: 'huge' } }).settings.window.avatarWidth).toBe(452);
+    expect(applyPatch(base, { window: { sizePreset: 'small', avatarWidth: 640 } }).settings.window).toMatchObject({ sizePreset: 'small', avatarWidth: 640 });
+    expect(sanitizeSettings({ window: { sizePreset: 'large', avatarWidth: 700 } }).settings.window.avatarWidth).toBe(700);
+  });
+
   it('clamps numbers into range', () => {
     const { settings } = applyPatch(base, { avatar: { particles: 5, bloom: -1 }, voice: { ttsSpeed: 0.1 } });
     expect(settings.avatar.particles).toBe(2);

@@ -127,6 +127,8 @@ const NUMBER_RANGES = /** @type {Record<string, [number, number]>} */ ({
   'avatar.particles': [0, 2],
   'avatar.bloom': [0, 2],
 });
+/** Settings whose default is null but that hold a number (clamped, even) once set. */
+const NULLABLE_NUMBERS = /** @type {Record<string, [number, number]>} */ ({ 'window.avatarWidth': [200, 1200] });
 
 /**
  * Light validation of a settings patch against the defaults' shapes (the real store in
@@ -142,13 +144,18 @@ function sanitizePatch(base, patch) {
     for (const [k, v] of Object.entries(gp)) {
       if (!(k in base[group])) continue;
       const def = /** @type {any} */ (DEFAULT_SETTINGS)[group]?.[k];
-      const ok = def === null ? v === null || isPlainObject(v) : typeof v === typeof def;
+      const nullable = NULLABLE_NUMBERS[`${group}.${k}`];
+      const ok = nullable ? v === null || typeof v === 'number' : def === null ? v === null || isPlainObject(v) : typeof v === typeof def;
       if (!ok) continue;
       if (typeof v === 'number' && !Number.isFinite(v)) continue;
       const range = NUMBER_RANGES[`${group}.${k}`];
-      (out[group] ||= {})[k] = range ? Math.min(range[1], Math.max(range[0], v)) : v;
+      (out[group] ||= {})[k] = nullable && v !== null
+        ? Math.round(Math.min(nullable[1], Math.max(nullable[0], v)) / 2) * 2
+        : range ? Math.min(range[1], Math.max(range[0], v)) : v;
     }
   }
+  // a size preset replaces a free size, as in electron/settings.js applyPatch
+  if (out.window && typeof out.window.sizePreset === 'string' && !('avatarWidth' in out.window)) out.window.avatarWidth = null;
   return out;
 }
 
@@ -574,6 +581,9 @@ export function createMockBridge(options = {}) {
       // a browser tab cannot move its window: just record (Playwright checks the calls)
       dragStart: record('dragStart'),
       dragEnd: record('dragEnd'),
+      resizeStart: record('resizeStart'),
+      resizeEnd: record('resizeEnd'),
+      setAvatarWidth: record('setAvatarWidth'),
       resetPosition: record('resetPosition'),
       minimize: record('minimize'),
       hide: record('hide'),

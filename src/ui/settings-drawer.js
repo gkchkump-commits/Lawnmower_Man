@@ -7,6 +7,7 @@
 /* global Node */
 
 import { patchFor, getPath } from '../app/settings-defaults.js';
+import { MAX_AVATAR_WIDTH, MIN_AVATAR_WIDTH, PRESET_WIDTHS } from '../app/window-drag.js';
 import { acceleratorFromEvent, formatAccelerator } from './accelerator.js';
 import { clear, h, icon } from './dom.js';
 
@@ -25,6 +26,7 @@ import { clear, h, icon } from './dom.js';
  * @property {string} [action]
  * @property {string} [id]
  * @property {string} [variant]
+ * @property {(settings: any) => any} [value]  what the control shows, when not simply the value at `path`
  */
 
 /** The voice character's hint: what it applies to, with the voice that is speaking now. */
@@ -102,11 +104,15 @@ export const SECTIONS = [
     id: 'window',
     title: 'Window',
     fields: [
-      { type: 'segmented', path: 'window.sizePreset', label: 'Size', options: [['small', 'S'], ['medium', 'M'], ['large', 'L']], hint: 'Or Ctrl + mouse wheel over the head' },
+      // a free size (from a corner grip, Ctrl + wheel or the slider) selects no preset
+      { type: 'segmented', path: 'window.sizePreset', label: 'Size', options: [['small', 'S'], ['medium', 'M'], ['large', 'L']], value: (s) => (s.window.avatarWidth == null ? s.window.sizePreset : '') },
+      { type: 'range', path: 'window.avatarWidth', label: 'Width', min: MIN_AVATAR_WIDTH, max: MAX_AVATAR_WIDTH, step: 10, format: (v) => `${Math.round(v)} px`,
+        value: (s) => s.window.avatarWidth ?? PRESET_WIDTHS[/** @type {'small'|'medium'|'large'} */ (s.window.sizePreset)] ?? PRESET_WIDTHS.medium,
+        hint: 'Or drag a corner of the window, or Ctrl + mouse wheel over the head' },
       { type: 'toggle', path: 'window.showChat', label: 'Chat panel', hint: 'Off = the panel drops down below the face only when needed' },
       { type: 'toggle', path: 'window.alwaysOnTop', label: 'Always on top' },
       { type: 'toggle', path: 'window.clickThrough', label: 'Click-through', hint: 'Clicks on empty space reach the desktop' },
-      { type: 'toggle', path: 'window.lockPosition', label: 'Lock position', hint: 'Off = drag the head to move the avatar' },
+      { type: 'toggle', path: 'window.lockPosition', label: 'Lock position', hint: 'Off = drag the head to move the avatar, a corner to resize it' },
       { type: 'toggle', path: 'window.snapToEdges', label: 'Snap to screen edges', hint: 'Locks flush against edges and corners while you drag' },
       { type: 'button', label: 'Reset position', action: 'resetPosition', variant: 'ghost' },
     ],
@@ -143,7 +149,7 @@ export class SettingsDrawer {
     this.onAction = o.onAction;
     this.onToggle = o.onToggle || (() => {});
     this.platform = o.platform || 'win32';
-    /** @type {Map<string, { set: (v: any) => void, el: HTMLElement, row: HTMLElement }>} */
+    /** @type {Map<string, { set: (v: any) => void, el: HTMLElement, row: HTMLElement, value?: (settings: any) => any }>} */
     this.controls = new Map();
     /** @type {Map<string, HTMLElement>} */
     this.infos = new Map();
@@ -183,7 +189,7 @@ export class SettingsDrawer {
   update(settings) {
     this.settings = settings;
     for (const [path, c] of this.controls) {
-      const v = getPath(settings, path);
+      const v = c.value ? c.value(settings) : getPath(settings, path);
       if (v !== undefined) c.set(v);
     }
     // the intensity of 'natural' means nothing
@@ -439,7 +445,7 @@ export class SettingsDrawer {
         el = h('span');
         set = () => {};
     }
-    this.controls.set(path, { set, el, row });
+    this.controls.set(path, { set, el, row, value: f.value });
     return row;
   }
 

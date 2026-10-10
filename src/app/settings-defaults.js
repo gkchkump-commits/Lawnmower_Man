@@ -42,6 +42,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   },
   window: {
     sizePreset: 'medium',
+    avatarWidth: null, // a free size from resizing (px), null = the preset
     alwaysOnTop: true,
     clickThrough: true,
     position: /** @type {{x:number,y:number}|null} */ (null),

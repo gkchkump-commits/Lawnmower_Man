@@ -132,10 +132,13 @@ lawnmower = {
   },
   window: {
     setIgnoreMouse(ignore: boolean): void,  // click-through for transparent pixels (forward:true)
-    setSizePreset(preset: 'small'|'medium'|'large'): void,
+    setSizePreset(preset: 'small'|'medium'|'large'): void,   // clears a free size (avatarWidth)
+    setAvatarWidth(px: number): void,       // a free size (Ctrl + wheel); clamped 200..1200, even
     setAlwaysOnTop(on: boolean): void,
     dragStart(): void,     // primary button pressed on the head / status bar / settings header
     dragEnd(): void,       // released (or blur / hidden): settle on the display, save the position
+    resizeStart(corner: 'tl'|'tr'|'bl'|'br'): void,   // primary button pressed on a corner grip
+    resizeEnd(): void,     // released: keep the size as window.avatarWidth
     resetPosition(): void, // default corner of the current display
     minimize(): void, hide(): void, quit(): void,
     onVisibility(cb: (v: { visible: boolean }) => void): () => void,
@@ -165,6 +168,18 @@ Like a normal window, the avatar snaps to screen edges while it is dragged (`sna
 `electron/window-manager.js`): within 24 DIP of an edge of the work area it locks flush against it
 (two edges: a corner) and lets go once the cursor pulls it further away; `window.snapToEdges: false`
 turns this off.
+
+Resizing works the same way, because transparent windows cannot use the native resize border on
+Windows: the renderer draws a grip (a bracket) at each corner, shown on hover like the toolbar, and
+calls `resizeStart(corner)` on a press; main follows the cursor (`resizeBounds` in
+`electron/window-manager.js`) with the opposite corner fixed. The avatar area stays 2:3 and the chat
+strip follows the width (`chatHeightFor`: through the presets' 200 / 240 / 280 px, 140..340 px), so a
+corner changes just the width: the cursor axis that asks for the bigger change wins, and the window
+never grows past the work area on the dragged side. On release the width is saved as
+`window.avatarWidth` (200..1200 px, even); `windowLayout` then gives the same size, so nothing moves.
+Ctrl + wheel over the head steps it by 8 % (`setAvatarWidth`), the drawer has a *Width* slider, and a
+size preset (drawer S/M/L, tray *Size*) clears it again (`applyPatch`). `window.lockPosition` hides
+the grips and refuses resizing too.
 
 Renderer use of `onCursor`: the eyes follow the cursor anywhere on the desktop (`src/app/gaze.js`:
 inside the avatar stage exactly like pointer tracking, outside it the gaze keeps the direction but
@@ -287,11 +302,12 @@ command line — user text only ever travels over stdin; long prompts go in file
   },
   window: {
     sizePreset: 'medium',        // small 300x450, medium 400x600, large 560x840 (avatar area; chat panel extra)
+    avatarWidth: null,           // a free size from resizing (px, 200..1200; height 1.5x + strip); null = the preset
     alwaysOnTop: true,
     clickThrough: true,          // transparent pixels pass clicks to the desktop
     position: null,              // {x,y} remembered
     showChat: true,
-    lockPosition: false,         // true: pressing on the head does not move the window
+    lockPosition: false,         // true: pressing on the head does not move the window (nor a grip resize it)
     snapToEdges: true,           // a dragged window locks flush against screen edges and corners
   },
   hotkeys: {                     // Linux/macOS defaults

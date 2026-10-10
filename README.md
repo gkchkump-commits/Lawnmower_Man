@@ -86,10 +86,11 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | **Ctrl+Shift+F9** (global; Linux/macOS: Ctrl+Alt+C) | show/hide the chat panel |
 | **Esc** | cancel listening, stop speaking, or stop the reply |
 | drag the head (or the chat's status bar) | move the window; near a screen edge or corner it snaps flush against it like a normal window, settles fully on the screen you drop it on (sized to fit that screen) and remembers the place |
-| **Ctrl + mouse wheel** over the head | bigger / smaller (small, medium, large) |
+| drag a **corner** of the window (a bracket shows on hover) | resize it like a normal window; the opposite corner stays put and the face keeps its shape |
+| **Ctrl + mouse wheel** over the head | bigger / smaller in small steps |
 | tray icon | show/hide, always on top, click-through, lock / reset position, camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
-Hotkeys, window size (small/medium/large), click-through, renderer, voice, speed, hands-free mode, the camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
+Hotkeys, window size (small/medium/large presets or any *Width*), click-through, renderer, voice, speed, hands-free mode, the camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves and resizes; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
 Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
 

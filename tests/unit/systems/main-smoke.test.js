@@ -422,6 +422,98 @@ describe('electron/main.js wiring', () => {
     expect((await invoke('lm:settings:get')).window.sizePreset).toBe('large');
   });
 
+  it('resizes from a corner grip like a normal window: the opposite corner stays, 2:3 kept, the size saved', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeout = 2000) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > timeout) throw new Error('timeout');
+        await sleep(10);
+      }
+    };
+    const send = (ch, ...args) => m.listeners.get(`lm:window:${ch}`)(trusted(), ...args);
+    const wa = m.display.workArea;
+    try {
+      await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true, lockPosition: false } });
+      win.setBounds({ x: 1000, y: 180, width: 400, height: 840 }); // room above for 500 wide
+      const start = win.getBounds();
+      Object.assign(m.cursor, { x: 1002, y: 182 });
+
+      // top-left grip: a click does nothing
+      send('resize-start', 'tl');
+      expect(main.__test.state.resize).not.toBe(null);
+      expect(win.setResizable).toHaveBeenLastCalledWith(true);
+      m.cursor.x -= 2;
+      await sleep(60);
+      expect(win.bounds).toEqual(start);
+      // pulled out by 100 px: 500 wide, 2:3 avatar + the strip, bottom-right corner unchanged
+      Object.assign(m.cursor, { x: 902, y: 182 });
+      await until(() => win.bounds.width === 500);
+      expect(win.bounds.height).toBe(750 + windowLayout('medium', true, undefined, 500).chat.height);
+      expect(win.bounds.x + win.bounds.width).toBe(start.x + start.width);
+      expect(win.bounds.y + win.bounds.height).toBe(start.y + start.height);
+      // the renderer cannot make the window click-through mid-resize
+      send('set-ignore-mouse', true);
+      expect(main.__test.state.ignoreMouse).toBe(false);
+      // never past the top of the work area: the width stops where the window fits
+      Object.assign(m.cursor, { x: -3000, y: -3000 });
+      await sleep(60);
+      expect(win.bounds.y).toBeGreaterThanOrEqual(wa.y);
+      expect(win.bounds.y + win.bounds.height).toBe(start.y + start.height);
+      Object.assign(m.cursor, { x: 902, y: 182 });
+      await until(() => win.bounds.width === 500);
+      send('resize-end');
+      expect(main.__test.state.resize).toBe(null);
+      expect(win.setResizable).toHaveBeenLastCalledWith(false);
+      const saved = (await invoke('lm:settings:get')).window;
+      expect(saved.avatarWidth).toBe(500);
+      expect(saved.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+      // the settings change re-applies the layout: the same size, nothing moves
+      await sleep(20);
+      expect(win.bounds.width).toBe(500);
+      const after = win.getBounds();
+      Object.assign(m.cursor, { x: 10, y: 10 });
+      await sleep(40);
+      expect(win.bounds).toEqual(after); // no timer left running
+
+      // bottom-right grip, smaller: the top-left corner stays
+      Object.assign(m.cursor, { x: after.x + after.width, y: after.y + after.height });
+      send('resize-start', 'br');
+      Object.assign(m.cursor, { x: after.x + after.width - 160, y: after.y + after.height });
+      await until(() => win.bounds.width === 340);
+      expect({ x: win.bounds.x, y: win.bounds.y }).toEqual({ x: after.x, y: after.y });
+      send('resize-end');
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(340);
+
+      // Ctrl + wheel: a free width through IPC (clamped and even)
+      send('set-avatar-width', 431);
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(432);
+      expect(win.bounds.width).toBe(432);
+      send('set-avatar-width', 'big');
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(432);
+      // the tray shows the free size; a preset replaces it
+      expect(main.__test.state.tray.menu.template.find((i) => i.label === 'Size').submenu.some((i) => i.label === 'Custom (432 px wide)' && i.checked)).toBe(true);
+      send('set-size-preset', 'small');
+      const s = (await invoke('lm:settings:get')).window;
+      expect([s.sizePreset, s.avatarWidth]).toEqual(['small', null]);
+      expect(win.bounds.width).toBe(300);
+
+      // locked (position and size), a bad corner, the window hidden: no resize
+      await invoke('lm:settings:set', { window: { lockPosition: true } });
+      send('resize-start', 'br');
+      expect(main.__test.state.resize).toBe(null);
+      await invoke('lm:settings:set', { window: { lockPosition: false } });
+      send('resize-start', 'middle');
+      expect(main.__test.state.resize).toBe(null);
+      send('resize-start', 'bl');
+      win.hide();
+      expect(main.__test.state.resize).toBe(null);
+      win.show();
+    } finally {
+      await invoke('lm:settings:set', { window: { sizePreset: 'large', lockPosition: false } }); // as the tests below expect
+    }
+  });
+
   it('cancel IPC validates the turn id', async () => {
     await expect(invoke('lm:claude:cancel', '../x')).rejects.toThrow(/turn id/);
     expect(await invoke('lm:claude:cancel', 'turn-1-unknown')).toEqual({ cancelled: false, interrupted: false });

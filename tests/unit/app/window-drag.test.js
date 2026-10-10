@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { WindowDrag, nextSizePreset } from '../../../src/app/window-drag.js';
+import { WindowDrag, nextAvatarWidth, PRESET_WIDTHS } from '../../../src/app/window-drag.js';
+import { SIZE_PRESETS } from '../../../electron/window-manager.js';
 import { ClickThroughGate } from '../../../src/app/click-through.js';
 
 function setup({ locked = false, win } = {}) {
@@ -80,13 +81,63 @@ describe('WindowDrag', () => {
   });
 });
 
-describe('nextSizePreset (Ctrl + wheel)', () => {
-  it('wheel up grows, wheel down shrinks, and stops at either end', () => {
-    expect(nextSizePreset('medium', -100)).toBe('large');
-    expect(nextSizePreset('medium', 100)).toBe('small');
-    expect(nextSizePreset('large', -100)).toBe(null);
-    expect(nextSizePreset('small', 100)).toBe(null);
-    expect(nextSizePreset('medium', 0)).toBe(null);
-    expect(nextSizePreset('bogus', -1)).toBe('medium');
+describe('resizing by a corner grip', () => {
+  const resizeSetup = (opts = {}) => {
+    const calls = [];
+    const win = {
+      dragStart: vi.fn(() => calls.push('drag-start')),
+      dragEnd: vi.fn(() => calls.push('drag-end')),
+      resizeStart: vi.fn((c) => calls.push(`resize-start:${c}`)),
+      resizeEnd: vi.fn(() => calls.push('resize-end')),
+    };
+    return { ...setup({ win, ...opts }), calls };
+  };
+
+  it('a press on a grip resizes from that corner, holding the window interactive until the release', () => {
+    const { drag, calls, gate, states } = resizeSetup();
+    expect(drag.resizeSupported).toBe(true);
+    expect(drag.press(press(), 'br')).toBe(true);
+    expect([drag.mode, drag.corner]).toEqual(['resize', 'br']);
+    gate.update(false);
+    expect(gate.ignoring).toBe(false);
+    drag.release({ pointerId: 1 });
+    expect(calls).toEqual(['resize-start:br', 'resize-end']);
+    expect([drag.mode, drag.corner, drag.active]).toEqual([null, null, false]);
+    expect(states).toEqual([true, false]);
+  });
+
+  it('a drag and a resize never overlap; unknown corners and a lock do nothing', () => {
+    const { drag, calls, lock } = resizeSetup();
+    drag.press(press({ pointerId: 1 }), true);
+    drag.press(press({ pointerId: 2 }), 'tl'); // lost pointer-up
+    drag.release();
+    expect(calls).toEqual(['drag-start', 'drag-end', 'resize-start:tl', 'resize-end']);
+    expect(drag.press(press(), 'middle')).toBe(false);
+    lock.on = true;
+    expect(drag.press(press(), 'br')).toBe(false);
+    expect(calls).toHaveLength(4);
+  });
+
+  it('an older main process without resizing: grips do nothing, dragging still works', () => {
+    const { drag } = setup();
+    expect(drag.resizeSupported).toBe(false);
+    expect(drag.press(press(), 'br')).toBe(false);
+    expect(drag.press(press(), true)).toBe(true);
+  });
+});
+
+describe('nextAvatarWidth (Ctrl + wheel)', () => {
+  it('wheel up grows, wheel down shrinks, in small even steps, and stops at either end', () => {
+    expect(nextAvatarWidth(400, -100)).toBe(432);
+    expect(nextAvatarWidth(400, 100)).toBe(370);
+    expect(nextAvatarWidth(1200, -100)).toBe(null);
+    expect(nextAvatarWidth(200, 100)).toBe(null);
+    expect(nextAvatarWidth(1150, -1)).toBe(1200);
+    expect(nextAvatarWidth(400, 0)).toBe(null);
+    expect(nextAvatarWidth(NaN, -1)).toBe(null);
+  });
+
+  it('the renderer and main agree on the presets\' widths', () => {
+    for (const p of /** @type {const} */ (['small', 'medium', 'large'])) expect(PRESET_WIDTHS[p]).toBe(SIZE_PRESETS[p].width);
   });
 });

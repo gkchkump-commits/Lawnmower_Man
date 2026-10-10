@@ -264,18 +264,50 @@ test.describe('app (mock bridge)', () => {
     await expect.poll(async () => (await ignores()).at(-1)).toBe(true);
   });
 
-  test('Ctrl + mouse wheel over the head changes the size preset', async ({ page }) => {
+  test('Ctrl + mouse wheel over the head resizes in small steps', async ({ page }) => {
     await boot(page);
-    const sizes = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setSizePreset').map((c) => c[1]));
+    const widths = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setAvatarWidth').map((c) => c[1]));
     const box = await page.locator('#stage').boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4);
+    const w0 = await page.evaluate(() => window.innerWidth);
     await page.keyboard.down('Control');
     await page.mouse.wheel(0, -120);
     await page.keyboard.up('Control');
-    await expect.poll(sizes).toEqual(['large']);
+    await expect.poll(widths).toEqual([Math.round(Math.min(1200, w0 * 1.08) / 2) * 2]);
     await page.mouse.wheel(0, -120); // without Ctrl: nothing
-    await page.waitForTimeout(400);
-    expect(await sizes()).toEqual(['large']);
+    await page.waitForTimeout(300);
+    expect(await widths()).toHaveLength(1);
+  });
+
+  test('corner grips resize the window; hidden while the position is locked', async ({ page }) => {
+    await boot(page);
+    const calls = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => /^resize/.test(c[0])).map((c) => c.join(':')));
+    const grip = page.locator('.grip.br');
+    await page.mouse.move(10, 10); // hover the window: the grips show, like the toolbar
+    await expect(grip).toBeVisible();
+    await expect.poll(() => grip.evaluate((el) => Number(getComputedStyle(el).opacity))).toBeGreaterThan(0.5);
+    const b = await grip.boundingBox();
+    // the bottom-right grip is the window's corner (full chat mode)
+    const vp = page.viewportSize();
+    expect(Math.round(b.x + b.width)).toBe(vp.width);
+    expect(Math.round(b.y + b.height)).toBe(vp.height);
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+    await page.mouse.down();
+    await expect(page.locator('body')).toHaveAttribute('data-resizing', 'br');
+    await page.mouse.move(b.x - 40, b.y - 40, { steps: 3 });
+    await page.mouse.up();
+    await expect.poll(calls).toEqual(['resizeStart:br', 'resizeEnd']);
+    await expect(page.locator('body')).not.toHaveAttribute('data-resizing', /./);
+    // the top-left one
+    const tl = await page.locator('.grip.tl').boundingBox();
+    expect([Math.round(tl.x), Math.round(tl.y)]).toEqual([0, 0]);
+    // the drawer's Width slider shows the size (the preset's while no free size is set)
+    await page.locator('#btn-settings').click();
+    await expect(page.locator('[data-path="window.avatarWidth"] output')).toHaveText('400 px');
+    await page.keyboard.press('Escape');
+    // locked: no grips
+    await page.evaluate(() => window.__app.bridge.settings.set({ window: { lockPosition: true } }));
+    await expect(grip).toBeHidden();
   });
 });
 

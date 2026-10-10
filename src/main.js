@@ -7,7 +7,7 @@
 /* global URLSearchParams, location, innerWidth, innerHeight */
 
 import { ClickThroughGate, probeAvatar } from './app/click-through.js';
-import { WindowDrag, nextSizePreset } from './app/window-drag.js';
+import { WindowDrag, nextAvatarWidth } from './app/window-drag.js';
 import { Controller } from './app/controller.js';
 import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
@@ -110,15 +110,22 @@ async function boot() {
   );
 
   const gate = new ClickThroughGate({ apply: (ignore) => bridge.window.setIgnoreMouse(ignore) });
-  // Moving the window by the head (wired to pointer events below; created early because settings
-  // changes consult it).
+  // Moving the window by the head and resizing it by a corner grip (wired to pointer events
+  // below; created early because settings changes consult it).
   const windowDrag = new WindowDrag({
     win: bridge.window,
     isLocked: () => !!settings.window.lockPosition,
     gate,
-    onChange: (on) => { body.dataset.dragging = on ? '1' : ''; },
+    onChange: (on, mode, corner) => {
+      body.dataset.dragging = on && mode === 'drag' ? '1' : '';
+      if (on && mode === 'resize' && corner) body.dataset.resizing = corner;
+      else delete body.dataset.resizing;
+    },
   });
-  const syncLockAttr = () => { body.dataset.lock = settings.window.lockPosition || !windowDrag.supported ? '1' : ''; };
+  const syncLockAttr = () => {
+    body.dataset.lock = settings.window.lockPosition || !windowDrag.supported ? '1' : '';
+    body.dataset.noresize = windowDrag.resizeSupported ? '' : '1';
+  };
   const clickThroughWanted = () => {
     if (!settings.window.clickThrough) return false;
     if (isMock) return q.get('clickThrough') === '1';
@@ -608,9 +615,10 @@ async function boot() {
       if (p && typeof p === 'object') lookAtPoint(Number(p.x), Number(p.y));
     });
   }
-  // ---------------------------------------------------------------- moving the window
+  // ---------------------------------------------------------------- moving and resizing the window
   // Press on the head (its visible silhouette), the chat status bar or the settings header and
-  // drag: main moves the window (see src/app/window-drag.js for why not CSS drag regions).
+  // drag: main moves the window (see src/app/window-drag.js for why not CSS drag regions). Press
+  // on a corner grip and drag: main resizes the window from that corner.
   const DRAG_CONTROLS = 'button, input, textarea, select, a, label, [contenteditable], .toolbar, .perm-card, .setup-card, .toast, .transcript, .composer';
   /** @param {PointerEvent|MouseEvent} e  over the head, away from any control */
   const overHeadAt = (e) => {
@@ -626,8 +634,13 @@ async function boot() {
     return overHeadAt(e);
   };
   syncLockAttr();
+  /** @param {PointerEvent} e @returns {string|null} the corner of the grip under the pointer */
+  const gripAt = (e) => {
+    const g = /** @type {HTMLElement|null} */ (/** @type {HTMLElement} */ (e.target)?.closest?.('.grip'));
+    return g?.dataset?.corner || null;
+  };
   window.addEventListener('pointerdown', (e) => {
-    if (!windowDrag.press(e, dragHandleAt(e))) return;
+    if (!windowDrag.press(e, /** @type {any} */ (gripAt(e)) || dragHandleAt(e))) return;
     e.preventDefault(); // no text selection or focus change while the window moves
     try {
       /** @type {HTMLElement} */ (e.target).setPointerCapture?.(e.pointerId);
@@ -638,24 +651,25 @@ async function boot() {
   }
   window.addEventListener('blur', () => windowDrag.release());
   document.addEventListener('visibilitychange', () => { if (document.hidden) windowDrag.release(); });
-  // Ctrl + mouse wheel over the head: next size preset (S / M / L)
+  // Ctrl + mouse wheel over the head: bigger / smaller in small steps (a free size, like a corner)
   let lastWheelSize = 0;
   window.addEventListener('wheel', (e) => {
     if (!e.ctrlKey || !overHeadAt(e)) return;
     e.preventDefault(); // never zoom the page
+    if (typeof bridge.window.setAvatarWidth !== 'function' || windowDrag.active) return;
     const now = performance.now();
-    if (now - lastWheelSize < 350) return;
-    const next = nextSizePreset(settings.window.sizePreset, e.deltaY);
+    if (now - lastWheelSize < 60) return;
+    const next = nextAvatarWidth(innerWidth, e.deltaY);
     if (!next) return;
     lastWheelSize = now;
-    bridge.window.setSizePreset(next);
+    bridge.window.setAvatarWidth(next);
   }, { passive: false });
 
   const stageEl = document.getElementById('stage');
   window.addEventListener('pointermove', (e) => {
     const t = /** @type {HTMLElement} */ (e.target);
     // (a folded panel has pointer-events: none, so it is never the target)
-    const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, button, input, textarea, select, a');
+    const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, .grip, button, input, textarea, select, a');
     // Minimal mode: only the avatar area (or UI that is showing) unfolds the panel. The folded
     // strip below the face is transparent and click-through: a pointer passing over it on the
     // way to the desktop must not drop the chat down and catch the click.

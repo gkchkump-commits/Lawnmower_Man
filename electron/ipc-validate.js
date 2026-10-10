@@ -122,6 +122,18 @@ export function validateSizePreset(v) {
   return v;
 }
 
+/** A resize grip from the renderer. @param {unknown} v @returns {'tl'|'tr'|'bl'|'br'} */
+export function validateCorner(v) {
+  if (v !== 'tl' && v !== 'tr' && v !== 'bl' && v !== 'br') throw new Error('Corner must be tl, tr, bl or br');
+  return v;
+}
+
+/** A free avatar width in px (Ctrl + wheel); the settings schema clamps it. @param {unknown} v */
+export function validateAvatarWidth(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('Avatar width must be a number of pixels');
+  return v;
+}
+
 /**
  * Options of voice.setup() from the renderer: only the CPU/GPU choice (undefined = decide by
  * the GPU that was detected). @param {unknown} v @returns {{ cpu?: boolean }}

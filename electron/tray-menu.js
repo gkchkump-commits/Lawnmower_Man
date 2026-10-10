@@ -87,12 +87,18 @@ export function buildTrayTemplate(st, a) {
     { type: 'separator' },
     {
       label: 'Size',
-      submenu: /** @type {const} */ (['small', 'medium', 'large']).map((p) => ({
-        label: SIZE_LABELS[p],
-        type: 'radio',
-        checked: s.window.sizePreset === p,
-        click: () => a.setSizePreset(p),
-      })),
+      submenu: [
+        ...(/** @type {const} */ (['small', 'medium', 'large'])).map((p) => ({
+          label: SIZE_LABELS[p],
+          type: 'radio',
+          checked: s.window.avatarWidth == null && s.window.sizePreset === p,
+          click: () => a.setSizePreset(p),
+        })),
+        // a free size from resizing (a corner grip, Ctrl + wheel): shown, picked by a preset above
+        ...(s.window.avatarWidth != null
+          ? [{ label: `Custom (${s.window.avatarWidth} px wide)`, type: 'radio', checked: true, enabled: false }]
+          : []),
+      ],
     },
     { label: 'Show chat panel', type: 'checkbox', checked: !!s.window.showChat, click: (/** @type {any} */ item) => a.setShowChat(!!item?.checked) },
     { label: 'Always on top', type: 'checkbox', checked: !!s.window.alwaysOnTop, click: (/** @type {any} */ item) => a.setAlwaysOnTop(!!item?.checked) },

@@ -48,7 +48,7 @@ import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.
 import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
-import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, snapToEdges, DRAG_MAX_MS } from './window-manager.js';
+import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, snapToEdges, resizeBounds, DRAG_MAX_MS } from './window-manager.js';
 import {
   APP_HOST,
   APP_ORIGIN,
@@ -64,7 +64,9 @@ import {
 } from './security.js';
 import { createAppProtocolHandler } from './app-protocol.js';
 import {
+  validateAvatarWidth,
   validateBoolean,
+  validateCorner,
   validateNoArgs,
   validatePermissionResponse,
   validateSettingsPatch,
@@ -107,6 +109,12 @@ const state = {
    * @type {{ from: {x:number,y:number}, start: {x:number,y:number,width:number,height:number}, moving: boolean, timer: NodeJS.Timeout, startedAt: number }|null}
    */
   drag: null,
+  /**
+   * Resize by a corner grip in progress: the grip, cursor and bounds at the press, the work area
+   * it is held to, and the free avatar width reached so far.
+   * @type {{ corner: import('./window-manager.js').Corner, from: {x:number,y:number}, start: {x:number,y:number,width:number,height:number}, workArea: {x:number,y:number,width:number,height:number}, moving: boolean, avatarWidth: number|null, timer: NodeJS.Timeout, startedAt: number }|null}
+   */
+  resize: null,
   quitting: false,
   cleanedUp: false,
   rendererCrashes: 0,
@@ -398,7 +406,7 @@ function appIcon() {
 function createWindow() {
   const s = /** @type {SettingsStore} */ (state.settings).get();
   const { bounds } = initialBounds({
-    saved: s.window.position, preset: s.window.sizePreset, showChat: s.window.showChat, displays: screen.getAllDisplays(), primary: screen.getPrimaryDisplay(),
+    saved: s.window.position, preset: s.window.sizePreset, showChat: s.window.showChat, avatarWidth: s.window.avatarWidth, displays: screen.getAllDisplays(), primary: screen.getPrimaryDisplay(),
   });
 
   const win = new BrowserWindow({
@@ -443,6 +451,7 @@ function createWindow() {
   });
   const onVisibility = () => {
     endDrag();
+    endResize();
     rebuildTray();
     syncCursorTracking();
   };
@@ -450,11 +459,13 @@ function createWindow() {
   win.on('hide', onVisibility);
   win.on('minimize', () => {
     endDrag();
+    endResize();
     syncCursorTracking();
   });
   win.on('restore', syncCursorTracking);
   win.on('closed', () => {
     endDrag();
+    endResize();
     if (state.win === win) state.win = null;
     syncCursorTracking();
   });
@@ -464,6 +475,7 @@ function createWindow() {
     // Fail safe: a click-through window with no live renderer could never turn interactive again
     // (and a drag it started could never end).
     endDrag();
+    endResize();
     applyMouseIgnore(false);
     if (state.quitting || details.reason === 'clean-exit') return;
     if (++state.rendererCrashes <= 3) setTimeout(() => loadRenderer(win), 1000);
@@ -532,8 +544,8 @@ function applyMouseIgnore(wantIgnore) {
   if (!win || win.isDestroyed()) return;
   // Without forwarded mouse moves (Linux) the renderer could never turn interactivity back on.
   const allowed = CLICK_THROUGH_SUPPORTED && !!state.settings?.get().window.clickThrough;
-  // never click-through mid-drag: the button-up must reach the renderer
-  const ignore = allowed && wantIgnore && !state.drag;
+  // never click-through mid-drag or mid-resize: the button-up must reach the renderer
+  const ignore = allowed && wantIgnore && !state.drag && !state.resize;
   if (state.ignoreMouse === ignore) return;
   state.ignoreMouse = ignore;
   win.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
@@ -562,6 +574,7 @@ function startDrag() {
   if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
   if (state.settings?.get().window.lockPosition) return;
   endDrag();
+  endResize();
   applyMouseIgnore(false);
   const drag = {
     from: screen.getCursorScreenPoint(),
@@ -617,11 +630,83 @@ function stepDragFinal(win, drag) {
   savePosition();
 }
 
+/**
+ * The renderer pressed a corner grip: follow the global cursor (~60 Hz) and resize from that
+ * corner, the opposite one staying put, until it reports the release. Moving starts only past
+ * DRAG_THRESHOLD, so a click on a grip does nothing.
+ * @param {import('./window-manager.js').Corner} corner
+ */
+function startResize(corner) {
+  const win = state.win;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+  if (state.settings?.get().window.lockPosition) return;
+  endDrag();
+  endResize();
+  applyMouseIgnore(false);
+  const start = win.getBounds();
+  state.resize = {
+    corner,
+    from: screen.getCursorScreenPoint(),
+    start,
+    workArea: screen.getDisplayMatching(start).workArea,
+    moving: false,
+    avatarWidth: /** @type {number|null} */ (null),
+    startedAt: Date.now(),
+    timer: setInterval(() => stepResize(), 16),
+  };
+  // Some window managers ignore programmatic resizes of non-resizable windows (see
+  // applyWindowLayout); resizable only while the grip is held.
+  win.setResizable(true);
+}
+
+function stepResize() {
+  const r = state.resize;
+  const win = state.win;
+  if (!r) return;
+  if (!win || win.isDestroyed() || Date.now() - r.startedAt > DRAG_MAX_MS) {
+    endResize();
+    return;
+  }
+  const next = resizeBounds(r.start, r.corner, r.from, screen.getCursorScreenPoint(), r.workArea, r.moving);
+  if (!next) return;
+  r.moving = true;
+  r.avatarWidth = next.avatarWidth;
+  const cur = win.getBounds();
+  const b = next.bounds;
+  if (cur.x !== b.x || cur.y !== b.y || cur.width !== b.width || cur.height !== b.height) win.setBounds(b);
+}
+
+/** Grip released (or the resize was abandoned): keep the new size as settings.window.avatarWidth. */
+function endResize() {
+  const r = state.resize;
+  if (!r) return;
+  clearInterval(r.timer);
+  state.resize = null;
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  if (r.moving) stepResizeFinal(win, r);
+  win.setResizable(false);
+}
+
+/** @param {import('electron').BrowserWindow} win @param {NonNullable<typeof state.resize>} r */
+function stepResizeFinal(win, r) {
+  const last = resizeBounds(r.start, r.corner, r.from, screen.getCursorScreenPoint(), r.workArea, true);
+  if (last) {
+    r.avatarWidth = last.avatarWidth;
+    win.setBounds(last.bounds);
+  }
+  win.setBounds(settleDrop(win.getBounds(), screen.getAllDisplays(), screen.getPrimaryDisplay()));
+  savePosition();
+  // the settings change re-applies the layout: the same size, so nothing moves
+  if (r.avatarWidth !== null) state.settings?.update({ window: { avatarWidth: r.avatarWidth } });
+}
+
 /** "Reset position": back to the default corner of the display the window is on. */
 function resetPosition() {
   const win = state.win;
   if (!win || win.isDestroyed()) return;
   endDrag();
+  endResize();
   const b = win.getBounds();
   win.setBounds(defaultBounds({ width: b.width, height: b.height }, screen.getDisplayMatching(b).workArea));
   savePosition();
@@ -650,8 +735,10 @@ function applyWindowLayout() {
   const s = /** @type {SettingsStore} */ (state.settings).get().window;
   const cur = win.getBounds();
   const display = screen.getDisplayMatching(cur);
-  const layout = windowLayout(s.sizePreset, s.showChat, display.workArea);
+  const layout = windowLayout(s.sizePreset, s.showChat, display.workArea, s.avatarWidth);
   if (cur.width === layout.width && cur.height === layout.height) return;
+  // a corner grip is being dragged: it owns the size until the release
+  if (state.resize) return;
   const next = resizeAnchored(cur, layout, display.workArea);
   // Some window managers ignore programmatic resizes of non-resizable windows.
   win.setResizable(true);
@@ -703,7 +790,8 @@ function onSettingsChanged(next, prev) {
     }
     if (next.window.skipTaskbar !== prev.window.skipTaskbar) win.setSkipTaskbar(next.window.skipTaskbar);
     if (next.window.clickThrough !== prev.window.clickThrough && !next.window.clickThrough) applyMouseIgnore(false);
-    if (next.window.sizePreset !== prev.window.sizePreset || next.window.showChat !== prev.window.showChat) applyWindowLayout();
+    if (next.window.sizePreset !== prev.window.sizePreset || next.window.avatarWidth !== prev.window.avatarWidth
+      || next.window.showChat !== prev.window.showChat) applyWindowLayout();
   }
   if (changed('window') || changed('claude') || changed('hotkeys') || changed('camera')) rebuildTray();
 }
@@ -735,6 +823,7 @@ const trayActions = {
   setClickThrough: (/** @type {boolean} */ on) => state.settings?.update({ window: { clickThrough: on } }),
   setShowChat: (/** @type {boolean} */ on) => state.settings?.update({ window: { showChat: on } }),
   setMode: (/** @type {string} */ mode) => state.settings?.update({ claude: { mode } }),
+  // (a preset replaces a free size from resizing: see applyPatch)
   setSizePreset: (/** @type {string} */ preset) => state.settings?.update({ window: { sizePreset: preset } }),
   setLockPosition: (/** @type {boolean} */ on) => state.settings?.update({ window: { lockPosition: on } }),
   resetPosition: () => resetPosition(),
@@ -871,7 +960,7 @@ function registerIpc() {
       electron: process.versions.electron,
       chrome: process.versions.chrome,
       // Extensions beyond the contract (renderer may ignore):
-      layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea()),
+      layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea(), s.window.avatarWidth),
       clickThroughSupported: CLICK_THROUGH_SUPPORTED,
       visible: !!state.win && !state.win.isDestroyed() && state.win.isVisible() && !state.win.isMinimized(),
       hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
@@ -891,6 +980,12 @@ function registerIpc() {
     validateNoArgs(args);
     endDrag();
   });
+  on('lm:window:resize-start', (corner) => startResize(validateCorner(corner)));
+  on('lm:window:resize-end', (...args) => {
+    validateNoArgs(args);
+    endResize();
+  });
+  on('lm:window:set-avatar-width', (w) => settings.update({ window: { avatarWidth: validateAvatarWidth(w) } }));
   on('lm:window:reset-position', (...args) => {
     validateNoArgs(args);
     resetPosition();
@@ -999,7 +1094,7 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
+export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, startResize, stepResize, endResize, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
 
 // scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
 // through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).

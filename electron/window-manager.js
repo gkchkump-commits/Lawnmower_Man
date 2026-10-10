@@ -23,8 +23,12 @@ export const SIZE_PRESETS = Object.freeze({
 /** Chat panel height per preset (added below the avatar area). */
 export const CHAT_PANEL_HEIGHT = Object.freeze({ small: 200, medium: 240, large: 280 });
 export const MIN_CHAT_PANEL_HEIGHT = 140;
+export const MAX_CHAT_PANEL_HEIGHT = 340;
 /** The avatar area never shrinks below this when fitting a short screen (2:3 → 200 × 300). */
 export const MIN_AVATAR_HEIGHT = 300;
+/** Free sizes (settings.window.avatarWidth, resizing by a corner): the avatar area's width range. */
+export const MIN_AVATAR_WIDTH = 200;
+export const MAX_AVATAR_WIDTH = 1200;
 /** Gap kept from the work-area edge for the default position. */
 export const EDGE_MARGIN = 24;
 /** At least this much of the window must stay on a display when restoring a position. */
@@ -36,17 +40,50 @@ export function normalizePreset(p) {
 }
 
 /**
- * Window size for a preset: the avatar area plus the chat strip below it (always reserved: in
- * minimal mode the panel drops down into it when needed). If a work area is given and the
- * window would not fit vertically, the chat strip shrinks first (down to MIN_CHAT_PANEL_HEIGHT).
- * @param {unknown} preset @param {boolean} showChat  panel always shown (false: drop-down)
- * @param {Rect} [workArea]
+ * A free avatar width (settings.window.avatarWidth): null when unset or not a number, else
+ * within MIN/MAX_AVATAR_WIDTH and even, so the 2:3 avatar height (1.5 × width) is whole pixels.
+ * @param {unknown} w @returns {number|null}
  */
-export function windowLayout(preset, showChat, workArea) {
+export function normalizeAvatarWidth(w) {
+  if (typeof w !== 'number' || !Number.isFinite(w)) return null;
+  return Math.round(Math.min(MAX_AVATAR_WIDTH, Math.max(MIN_AVATAR_WIDTH, w)) / 2) * 2;
+}
+
+/**
+ * Chat strip height for an avatar width: through the presets' own heights (S 300 → 200,
+ * M 400 → 240, L 560 → 280) and on along the nearest segment, within MIN/MAX_CHAT_PANEL_HEIGHT,
+ * so resizing from a preset continues it without a jump.
+ * @param {number} width
+ */
+export function chatHeightFor(width) {
+  const h = width <= SIZE_PRESETS.medium.width
+    ? CHAT_PANEL_HEIGHT.small + (width - SIZE_PRESETS.small.width) * 0.4
+    : CHAT_PANEL_HEIGHT.medium + (width - SIZE_PRESETS.medium.width) * 0.25;
+  return Math.round(Math.min(MAX_CHAT_PANEL_HEIGHT, Math.max(MIN_CHAT_PANEL_HEIGHT, h)));
+}
+
+/** Window height for a free avatar width before any fitting: the 2:3 avatar area plus the strip. @param {number} width */
+const freeHeight = (width) => width * 1.5 + chatHeightFor(width);
+
+/**
+ * Window size: the avatar area plus the chat strip below it (always reserved: in minimal mode
+ * the panel drops down into it when needed). The avatar area is the preset's, or a free width
+ * (settings.window.avatarWidth, set by resizing) when one is given. If a work area is given and
+ * the window would not fit vertically, the chat strip shrinks first (down to
+ * MIN_CHAT_PANEL_HEIGHT), then the avatar area; a window wider than the work area narrows.
+ * @param {unknown} preset @param {boolean} showChat  panel always shown (false: drop-down)
+ * @param {Rect} [workArea] @param {unknown} [avatarWidth]  a free width (null/undefined: the preset)
+ */
+export function windowLayout(preset, showChat, workArea, avatarWidth) {
   const p = normalizePreset(preset);
-  let avatar = { ...SIZE_PRESETS[p] };
-  let chatHeight = CHAT_PANEL_HEIGHT[p];
+  const free = normalizeAvatarWidth(avatarWidth);
+  let avatar = free ? { width: free, height: free * 1.5 } : { ...SIZE_PRESETS[p] };
+  let chatHeight = free ? chatHeightFor(free) : CHAT_PANEL_HEIGHT[p];
   if (workArea) {
+    if (avatar.width > workArea.width) {
+      const w = Math.max(MIN_AVATAR_WIDTH, Math.floor(workArea.width / 2) * 2);
+      avatar = { width: w, height: w * 1.5 };
+    }
     if (avatar.height + chatHeight > workArea.height) {
       chatHeight = Math.max(MIN_CHAT_PANEL_HEIGHT, workArea.height - avatar.height);
     }
@@ -61,6 +98,7 @@ export function windowLayout(preset, showChat, workArea) {
   }
   return {
     preset: p,
+    avatarWidth: free,
     width: avatar.width,
     height: avatar.height + chatHeight,
     avatar,
@@ -167,14 +205,14 @@ export function placeWindow({ saved, size, displays, primary }) {
  * Size and place the window at start: placeWindow, with the layout fitted to the display the
  * window opens on. A saved position on a shorter second screen needs a smaller window (2:3 avatar
  * + chat) than the primary display would give.
- * @param {{ saved: {x:number,y:number}|null|undefined, preset: unknown, showChat: boolean, displays: DisplayLike[], primary: DisplayLike }} o
+ * @param {{ saved: {x:number,y:number}|null|undefined, preset: unknown, showChat: boolean, avatarWidth?: unknown, displays: DisplayLike[], primary: DisplayLike }} o
  * @returns {{ layout: ReturnType<typeof windowLayout>, bounds: Rect }}
  */
-export function initialBounds({ saved, preset, showChat, displays, primary }) {
-  let layout = windowLayout(preset, showChat, primary.workArea);
+export function initialBounds({ saved, preset, showChat, avatarWidth, displays, primary }) {
+  let layout = windowLayout(preset, showChat, primary.workArea, avatarWidth);
   let bounds = placeWindow({ saved, size: layout, displays, primary });
   const d = pickDisplay(bounds, displays) || primary;
-  const fitted = windowLayout(preset, showChat, d.workArea);
+  const fitted = windowLayout(preset, showChat, d.workArea, avatarWidth);
   if (fitted.width !== layout.width || fitted.height !== layout.height) {
     layout = fitted;
     bounds = placeWindow({ saved, size: layout, displays, primary });
@@ -267,4 +305,83 @@ export function snapToEdges(b, displays, dist = SNAP_DISTANCE) {
 export function settleDrop(b, displays, primary) {
   const d = pickDisplay(b, displays) || primary;
   return clampToWorkArea(b, d.workArea);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Resizing by a corner, like a normal window. Transparent windows cannot use the native resize
+// border on Windows, so the renderer draws corner grips and main follows the global cursor, as
+// for dragging. The avatar keeps 2:3 and the chat strip follows the width (chatHeightFor), so a
+// corner changes one thing: the width.
+
+/** @typedef {'tl'|'tr'|'bl'|'br'} Corner */
+export const CORNERS = Object.freeze(/** @type {const} */ (['tl', 'tr', 'bl', 'br']));
+
+/**
+ * The widest free avatar width whose window fits in `room` (MIN_AVATAR_WIDTH if none does).
+ * @param {{ width: number, height: number }} room
+ */
+function widestFitting(room) {
+  let lo = MIN_AVATAR_WIDTH / 2;
+  let hi = MAX_AVATAR_WIDTH / 2;
+  if (2 * lo > room.width || freeHeight(2 * lo) > room.height) return MIN_AVATAR_WIDTH;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (2 * mid <= room.width && freeHeight(2 * mid) <= room.height) lo = mid;
+    else hi = mid - 1;
+  }
+  return 2 * lo;
+}
+
+/**
+ * The free width whose window is `height` tall (the inverse of freeHeight; it only grows).
+ * @param {number} height
+ */
+function widthForHeight(height) {
+  let lo = MIN_AVATAR_WIDTH / 2;
+  let hi = MAX_AVATAR_WIDTH / 2;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (freeHeight(2 * mid) <= height) lo = mid;
+    else hi = mid - 1;
+  }
+  return 2 * lo;
+}
+
+/**
+ * Window bounds while resizing from a corner: the opposite corner stays where it was, the width
+ * follows whichever cursor axis asks for the bigger change (the height follows the width), and
+ * the window never grows past the work area's edges on the dragged side. Returns null while the
+ * cursor is still within DRAG_THRESHOLD of the press.
+ * @param {Rect} start window bounds when the press started
+ * @param {Corner} corner the grip being dragged
+ * @param {{x:number,y:number}} from cursor when the press started
+ * @param {{x:number,y:number}} to current cursor
+ * @param {Rect} wa work area of the display the window is on
+ * @param {boolean} moving already past the threshold
+ * @returns {{ bounds: Rect, avatarWidth: number }|null}
+ */
+export function resizeBounds(start, corner, from, to, wa, moving) {
+  const dx = Math.round(to.x - from.x);
+  const dy = Math.round(to.y - from.y);
+  if (!moving && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return null;
+  const left = corner === 'tl' || corner === 'bl';
+  const top = corner === 'tl' || corner === 'tr';
+  const right = start.x + start.width;
+  const bottom = start.y + start.height;
+  // the start size as a free width: a preset window (or one fitted to a short screen) continues
+  // from the width it has
+  const w0 = start.width;
+  const byX = w0 + (left ? -dx : dx);
+  const byY = widthForHeight(freeHeight(w0) + (top ? -dy : dy));
+  let w = Math.abs(byX - w0) >= Math.abs(byY - w0) ? byX : byY;
+  const room = {
+    width: left ? right - wa.x : wa.x + wa.width - start.x,
+    height: top ? bottom - wa.y : wa.y + wa.height - start.y,
+  };
+  w = Math.min(normalizeAvatarWidth(w) ?? w0, widestFitting(room));
+  const height = Math.round(freeHeight(w));
+  return {
+    avatarWidth: w,
+    bounds: { x: left ? right - w : start.x, y: top ? bottom - height : start.y, width: w, height },
+  };
 }

@@ -66,6 +66,11 @@ const api = {
     // Moving the avatar: press on the head → main follows the global cursor until the release.
     dragStart: () => send('lm:window:drag-start'),
     dragEnd: () => send('lm:window:drag-end'),
+    // Resizing: press on a corner grip ('tl' | 'tr' | 'bl' | 'br') → main resizes from that
+    // corner until the release; setAvatarWidth(px) = a free size (Ctrl + wheel).
+    resizeStart: (corner) => send('lm:window:resize-start', corner),
+    resizeEnd: () => send('lm:window:resize-end'),
+    setAvatarWidth: (width) => send('lm:window:set-avatar-width', width),
     resetPosition: () => send('lm:window:reset-position'),
     minimize: () => send('lm:window:minimize'),
     hide: () => send('lm:window:hide'),

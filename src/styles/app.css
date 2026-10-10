@@ -126,6 +126,59 @@ textarea {
 body[data-over-head="1"]:not([data-lock="1"]) .stage { cursor: grab; }
 body[data-dragging="1"],
 body[data-dragging="1"] * { cursor: grabbing !important; }
+/* Resizing: a corner grip (bracket) at each corner of the window, shown on hover like the
+   toolbar; dragging it resizes from that corner, the opposite one staying put (main does the
+   resizing, src/app/window-drag.js). In minimal mode the bottom grips sit at the bottom of the
+   avatar area: the strip below is transparent while the panel is folded. */
+.grip {
+  position: absolute;
+  z-index: 25;
+  width: 16px;
+  height: 16px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  touch-action: none;
+}
+.grip::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border: 0 solid var(--cyan-soft);
+  filter: drop-shadow(0 0 2px rgba(127, 227, 255, 0.6));
+  transition: border-color 0.15s, inset 0.15s;
+}
+.grip.tl { top: 0; left: 0; cursor: nwse-resize; }
+.grip.tr { top: 0; right: 0; cursor: nesw-resize; }
+.grip.bl { bottom: 0; left: 0; cursor: nesw-resize; }
+.grip.br { bottom: 0; right: 0; cursor: nwse-resize; }
+.grip.tl::before { border-top-width: 2px; border-left-width: 2px; border-top-left-radius: 4px; }
+.grip.tr::before { border-top-width: 2px; border-right-width: 2px; border-top-right-radius: 4px; }
+.grip.bl::before { border-bottom-width: 2px; border-left-width: 2px; border-bottom-left-radius: 4px; }
+.grip.br::before { border-bottom-width: 2px; border-right-width: 2px; border-bottom-right-radius: 4px; }
+body[data-chat="minimal"] .grip.bl,
+body[data-chat="minimal"] .grip.br { bottom: var(--chat-h); }
+body:hover .grip,
+body[data-resizing] .grip { opacity: 0.85; }
+.grip:hover,
+body[data-resizing="tl"] .grip.tl,
+body[data-resizing="tr"] .grip.tr,
+body[data-resizing="bl"] .grip.bl,
+body[data-resizing="br"] .grip.br { opacity: 1; }
+.grip:hover::before,
+body[data-resizing] .grip::before { border-color: var(--cyan); inset: 1px; }
+body[data-lock="1"] .grip,
+body[data-noresize="1"] .grip,
+body[data-drawer="open"] .grip,
+body[data-dragging="1"] .grip { display: none; }
+body[data-resizing="tl"],
+body[data-resizing="tl"] *,
+body[data-resizing="br"],
+body[data-resizing="br"] * { cursor: nwse-resize !important; }
+body[data-resizing="tr"],
+body[data-resizing="tr"] *,
+body[data-resizing="bl"],
+body[data-resizing="bl"] * { cursor: nesw-resize !important; }
+
 /* A finger or pen on a drag handle moves the window: without this, Chromium starts a pan
    gesture after a few pixels and cancels the pointer (the drag would stop). Only the handles:
    the transcript, the cards and the settings body keep touch scrolling. The fallback orb lets

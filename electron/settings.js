@@ -6,6 +6,8 @@ import { EventEmitter } from 'node:events';
 import nodeFs from 'node:fs';
 import path from 'node:path';
 
+import { normalizeAvatarWidth } from './window-manager.js';
+
 /** @typedef {typeof DEFAULT_SETTINGS} Settings */
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -46,6 +48,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   },
   window: {
     sizePreset: 'medium', // 'small' | 'medium' | 'large'
+    // a free size set by resizing (a corner grip, Ctrl + wheel, the Size slider): the avatar
+    // area's width in px (200..1200, the height follows at 2:3); null = the preset's size
+    avatarWidth: /** @type {number|null} */ (null),
     alwaysOnTop: true,
     clickThrough: true,
     position: /** @type {{x:number,y:number}|null} */ (null),
@@ -223,6 +228,12 @@ const position = () => (/** @type {any} */ v) => {
   const c = (/** @type {number} */ n) => Math.round(Math.min(1e6, Math.max(-1e6, n)));
   return { ok: true, value: { x: c(x), y: c(y) } };
 };
+/** A free avatar width in px (clamped, even) or null (= the size preset). */
+const avatarWidth = () => (/** @type {unknown} */ v) => {
+  if (v === null) return { ok: true, value: null };
+  const w = normalizeAvatarWidth(v);
+  return w === null ? { ok: false, reason: 'expected a width in pixels or null' } : { ok: true, value: w };
+};
 const accelerator = () => (/** @type {unknown} */ v) => {
   const n = normalizeAccelerator(v);
   return n === null ? { ok: false, reason: 'is not a valid shortcut (e.g. "CommandOrControl+Alt+Space")' } : { ok: true, value: n };
@@ -267,6 +278,7 @@ const SCHEMA = {
   },
   window: {
     sizePreset: oneOf(['small', 'medium', 'large']),
+    avatarWidth: avatarWidth(),
     alwaysOnTop: bool(),
     clickThrough: bool(),
     position: position(),
@@ -358,6 +370,12 @@ export function applyPatch(base, patch) {
       const r = validate(value);
       if (r.ok) /** @type {any} */ (settings)[group][key] = r.value;
       else warnings.push(`"${group}.${key}" ${r.reason}; kept ${JSON.stringify(/** @type {any} */ (base)[group][key])}`);
+    }
+    // Picking a size preset (tray, drawer, IPC) replaces a free size from resizing, unless the
+    // same patch sets one too (a whole settings file has both).
+    if (group === 'window' && groupPatch.sizePreset !== undefined && !('avatarWidth' in groupPatch)
+      && settings.window.sizePreset === groupPatch.sizePreset) {
+      settings.window.avatarWidth = null;
     }
   }
   return { settings, warnings };

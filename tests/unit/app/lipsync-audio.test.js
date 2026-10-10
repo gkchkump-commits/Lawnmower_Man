@@ -178,6 +178,56 @@ describe('the speaker\'s usual pitch', () => {
   });
 });
 
+describe('the acoustics of a clip and the user\'s offset', () => {
+  it('prepare() analyses a clip before it plays (synchronously without a worker)', async () => {
+    const clip = makeClip();
+    const { ls } = rig(clip);
+    const track = await ls.prepare(clip);
+    expect(track.n).toBe(Math.ceil(clip.dur / 0.005));
+    expect(await ls.prepare(clip)).toBe(track);           // once per clip
+    expect(await ls.prepare({ kind: 'speech', text: 'hi' })).toBe(null);
+    expect(await ls.prepare({ kind: 'audio', audioB64: clip.audioB64, visemes: null })).toBe(null);
+  });
+
+  it('the fused timeline drives the clip (its acoustics retime and size the vowels)', () => {
+    const clip = makeClip();
+    const { ls, run } = rig(clip);
+    let fused = null;
+    run(0.3, () => { fused = ls._clips.get(clip)?.st?.fused ?? fused; });
+    expect(fused).toBeTruthy();
+    // the louder second "aa" gets more jaw than the quiet first one
+    const aa = fused.tl.map((s, i) => (s.viseme === 'aa' ? fused.amounts[i].jaw : null)).filter((x) => x !== null);
+    expect(aa[1]).toBeGreaterThan(aa[0] * 1.2);
+  });
+
+  it('setOffset(+s) moves the mouth (and what the voice drives) later; it is clamped to +-0.2 s', () => {
+    const traceWith = (off) => {
+      const clip = makeClip();
+      const { ls, run } = rig(clip);
+      ls.setOffset(off);
+      const jaw = [];
+      run(1.0, (t, m) => jaw.push(m.jaw));
+      return jaw;
+    };
+    const a = traceWith(0), b = traceWith(0.1);
+    // b lags a by 6 frames (100 ms at 60 Hz)
+    let best = 0, lag = 0;
+    for (let L = 0; L <= 10; L++) {
+      let c = 0;
+      for (let i = 0; i + L < b.length; i++) c += a[i] * b[i + L];
+      if (c > best) { best = c; lag = L; }
+    }
+    expect(lag).toBe(6);
+    const { ls } = rig(makeClip());
+    ls.setOffset(5);
+    expect(ls.offset).toBe(0.2);
+    ls.setOffset(-5);
+    expect(ls.offset).toBe(-0.2);
+    ls.setOffset('x');
+    expect(ls.offset).toBe(0);
+  });
+});
+
 describe('preparing a clip', () => {
   it('spreads the analysis over the first frames (no frame does it all) and plays the timeline meanwhile', () => {
     const clip = makeClip();

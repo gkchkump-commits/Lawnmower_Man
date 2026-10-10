@@ -73,12 +73,15 @@ describe('dominance blending', () => {
     expect(sampleSegments(segs, NaN)).toEqual(new Array(CHANNELS.length).fill(0));
   });
 
-  it('closes a 50 ms bilabial between two open vowels (press >= 0.8, jaw <= 0.06)', () => {
+  it('closes a 50 ms bilabial between two open vowels (press >= 0.8, the jaw nearly closed)', () => {
     for (const vowel of ['aa', 'E', 'O']) {
       const tl = timeline([['sil', 0.2], [vowel, 0.14], ['PP', 0.05], [vowel, 0.14], ['sil', 0.2]]);
       const m = at(segmentsFromVisemes(tl), 0.2 + 0.14 + 0.025);
       expect(m.press, vowel).toBeGreaterThanOrEqual(0.8);
-      expect(m.jaw, vowel).toBeLessThanOrEqual(0.06);
+      // (v0.4: the lips own the closure, the jaw only rises toward it: it stays a little open and
+      // is already lowering toward the next vowel, so the release is abrupt; the rigs seal the
+      // lips over it. It used to be forced shut, <= 0.06.)
+      expect(m.jaw, vowel).toBeLessThanOrEqual(0.12);
       expect(m.teeth, vowel).toBeLessThan(0.1);
       // and the vowels around it still open
       expect(at(segmentsFromVisemes(tl), 0.27).jaw).toBeGreaterThan(0.3);

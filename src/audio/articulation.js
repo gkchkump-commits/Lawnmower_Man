@@ -78,7 +78,7 @@ const A = {
   spread: /**/ [1.0, 1.0, 1.0, 0.4, 0.4, 0.8, 0.3], // i e: resist rounding
   rounded: /**/ [1.0, 0.8, 2.0, 0.4, 0.4, 0.6, 0.3],
   schwa: /*  */ [0.6, 0.4, 0.4, 0.3, 0.3, 0.4, 0.2],
-  PP: /*    */ [16, 0.3, 0.3, 16, 1.0, 3.0, 2.0],
+  PP: /*    */ [4.5, 0.3, 0.3, 16, 1.0, 3.0, 2.0],
   FF: /*    */ [6.0, 0.4, 0.3, 3.0, 12, 2.0, 2.0],
   TH: /*    */ [1.6, 0.4, 0.3, 1.0, 1.0, 1.2, 6.0],
   DD: /*    */ [0.8, 0.3, 0.2, 0.6, 0.6, 0.6, 1.0],
@@ -234,15 +234,24 @@ export function durationJawScale(s, medianDur) {
   return clamp(0.72 + 0.3 * ((s.end - s.start) / (medianDur || 0.1)), 0.7, 1.08);
 }
 
+/** The target (CHANNELS order) of a contract viseme id on its own. @param {string} id @returns {number[]} */
+export function visemeTarget(id) {
+  return (T[(VISEME[id] || VISEME.sil)[0]] || T.sil).slice();
+}
+
 /**
  * Segments from a voice-server viseme timeline ({start, end, viseme}, seconds). Vowel
  * prominence (and so the jaw) is estimated from duration — long vowels are the stressed ones —
- * unless `o.jawScale` measures it (e.g. from the audio). `o.vary` (a seed) gives every sound a
- * small deterministic variation of its jaw, spread and rounding, as no speaker says the same
- * syllable twice exactly alike. Rest segments are added before and after, so the mouth closes
- * at the edges.
+ * unless `o.jawScale` measures it (e.g. from the audio), or `o.amounts` gives a vowel's measured
+ * jaw / spread / rounding / teeth outright (fusion.js: from its formants and loudness). `o.vary`
+ * (a seed) gives every sound a small deterministic variation of its jaw, spread and rounding, as
+ * no speaker says the same syllable twice exactly alike. Rest segments are added before and
+ * after, so the mouth closes at the edges.
  * @param {Array<{start:number,end:number,viseme:string}>} tl
- * @param {{ jawScale?: (s: {start:number,end:number,viseme:string}, medianDur: number) => number, vary?: number }} [o]
+ * @param {{ jawScale?: (s: {start:number,end:number,viseme:string}, medianDur: number) => number, vary?: number,
+ *   amounts?: (s: {start:number,end:number,viseme:string}, i: number) => ({ jaw: number, wide: number, round: number, teeth: number }|null),
+ *   lipEdge?: number }} [o] lipEdge: scales how far the lip gesture of a closure (m b p) or a
+ *   tuck (f v) whose segment is its acoustic closure (`exact`, fusion.js) reaches beyond it
  * @returns {Segment[]}
  */
 export function segmentsFromVisemes(tl, o = {}) {
@@ -252,9 +261,21 @@ export function segmentsFromVisemes(tl, o = {}) {
   const jawScale = o.jawScale || durationJawScale;
   const out = [visemeSegment(tl[0].start - 0.3, tl[0].start, 'sil')];
   tl.forEach((s, i) => {
+    const amt = o.amounts ? o.amounts(s, i) : null;
     let js = 1;
-    if (['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = jawScale(s, median);
+    if (!amt && ['aa', 'E', 'I', 'O', 'U'].includes(s.viseme)) js = jawScale(s, median);
     const seg = visemeSegment(s.start, s.end, s.viseme, js);
+    if (o.lipEdge && o.lipEdge !== 1 && /** @type {any} */ (s).exact && (s.viseme === 'PP' || s.viseme === 'FF')) {
+      const c = s.viseme === 'PP' ? 3 : 4;
+      seg.ta = seg.ta.slice(); seg.tc = seg.tc.slice();
+      seg.ta[c] *= o.lipEdge; seg.tc[c] *= o.lipEdge;
+    }
+    if (amt) {
+      seg.T[0] = clamp(amt.jaw, 0, 1);
+      seg.T[1] = clamp(amt.wide, 0, 1);
+      seg.T[2] = clamp(amt.round, 0, 1);
+      seg.T[5] = clamp(amt.teeth, 0, 1);
+    }
     if (Number.isFinite(o.vary) && s.viseme !== 'sil') varySegment(seg, o.vary * 7919 + i);
     out.push(seg);
   });

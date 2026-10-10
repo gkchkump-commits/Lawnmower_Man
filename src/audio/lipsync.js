@@ -18,11 +18,13 @@
 
 import {
   CHANNELS, LEAD_IN, REST, TAIL, VISEME_SHAPES, closureCentreIn, planSpeech, sampleSegments, segmentsFromVisemes,
-  toShape,
+  toShape, visemeTarget,
 } from './articulation.js';
 import { bandEnergies, dbToUnit, toDb } from './dsp.js';
 import { springStep } from '../avatar/motion.js';
 import { ClipProsody, VoiceAnalysis, peakEnergy, trimPhraseEnds, vowelNorms, warmUpAnalysis } from './prosody.js';
+import { AcousticsClient } from './acoustics-client.js';
+import { SpeakerFormants, fuseTimeline } from './fusion.js';
 import { base64ToBytes, decodeWav } from './wav.js';
 
 export { CHANNELS, VISEME_SHAPES, planSpeech };
@@ -81,6 +83,20 @@ function segmentsFor(tl) {
  * lead plus the ~8 ms more the director's mouth springs take to get under way.)
  */
 export const VISEME_LEAD = 0.058;
+
+/**
+ * Visual leads of a clip whose timeline is aligned with its own sound (fusion.js): its closures
+ * ARE the acoustic closures, so the lips need only the lead of their fast springs and of the
+ * display (one to two frames); the heavier jaw is sampled further ahead (its spring is slower), so
+ * a vowel's opening peaks with its sound. Calibrated on 36 real Kokoro clips
+ * (tools/visual/lipsync-align.mjs and docs/VOICE.md).
+ */
+export const FUSED_LEAD = Object.freeze({ lips: 0.04, jaw: 0.06 });
+/** How far a closure's / tuck's lip gesture reaches beyond its (acoustic) segment, re the timeline's. */
+export const FUSED_LIP_EDGE = 0.6;
+
+/** The user's lip-sync offset (settings voice.lipSyncOffsetMs, s): + moves the mouth later. */
+export const OFFSET_MAX = 0.2;
 
 /**
  * Smooth maximum of two values (dB): exact where they are equal (a steady vowel), within `d`
@@ -180,6 +196,17 @@ export function energyJaw(db) {
 }
 
 /**
+ * The loudness factor on a jaw whose amounts already come from the sound (fusion.js: F1 and
+ * stress): a gentler one, 0.72 near silence to 1.05 at full voice (the jaw still eases in
+ * closures and pauses and follows a syllable's onset).
+ * @param {number} db loudness re the clip's loudest frame
+ */
+export function energyJawFused(db) {
+  const x = clamp01((db + 30) / 26);
+  return 0.72 + 0.33 * x * x * (3 - 2 * x);
+}
+
+/**
  * The text's phrase ends (punctuation, friendliness) with their relative position in the text,
  * for ClipProsody. @param {string} text
  */
@@ -201,22 +228,30 @@ function hashText(s) {
  * Mouth shape at playback time t from a viseme timeline, with coarticulation.
  * @param {VisemeSegment[]} tl
  * @param {number} t seconds into the clip
- * @param {{ lead?: number, prevT?: number, segs?: import('./articulation.js').Segment[] }} [opts]
- *   lead: the mouth leads the sound (default VISEME_LEAD); prevT: the previous sample time — a
- *   closure whose centre lies in between is sampled at its centre (never skipped); segs: the
- *   timeline's segments when the caller built them itself (measured prominence, variation)
+ * @param {{ lead?: number, leadLips?: number, prevT?: number, segs?: import('./articulation.js').Segment[] }} [opts]
+ *   lead: the mouth leads the sound (default VISEME_LEAD); leadLips: the lips' own lead (press,
+ *   tuck: default the same); prevT: the previous sample time — a closure whose centre lies in
+ *   between is sampled at its centre (never skipped); segs: the timeline's segments when the
+ *   caller built them itself (measured prominence, variation)
  * @returns {MouthShape}
  */
 export function mouthFromVisemes(tl, t, opts = {}) {
   if (!Array.isArray(tl) || !tl.length || !Number.isFinite(t)) return { ...SIL };
   const lead = opts.lead ?? VISEME_LEAD;
+  const leadLips = opts.leadLips ?? lead;
   const segs = opts.segs || segmentsFor(tl);
-  let tt = t + lead;
+  let tt = t + leadLips;
   if (Number.isFinite(opts.prevT)) {
-    const c = closureCentreIn(segs, /** @type {number} */ (opts.prevT) + lead, tt);
+    const c = closureCentreIn(segs, /** @type {number} */ (opts.prevT) + leadLips, tt);
     if (Number.isFinite(c)) tt = c;
   }
-  return toShape(sampleSegments(segs, tt));
+  const lips = toShape(sampleSegments(segs, tt));
+  if (leadLips === lead) return lips;
+  // the jaw, spread, rounding, teeth and tongue at their own lead; the lips' closures at theirs
+  const m = toShape(sampleSegments(segs, t + lead));
+  m.press = lips.press;
+  m.tuck = lips.tuck;
+  return m;
 }
 
 /**
@@ -446,11 +481,14 @@ export class SpeechTrack {
     }
   }
 
-  /** Mouth channels at the current plan position (a closure passed since the last frame is shown). */
-  sample() {
+  /**
+   * Mouth channels at the current plan position (a closure passed since the last frame is shown).
+   * @param {number} [shift] plan seconds the mouth runs behind the plan position (the user's offset)
+   */
+  sample(shift = 0) {
     const segs = this.plan.segs;
-    let t = this.p;
-    const c = closureCentreIn(segs, this.pPrev, this.p);
+    let t = this.p - shift;
+    const c = closureCentreIn(segs, this.pPrev - shift, this.p - shift);
     if (Number.isFinite(c)) t = c;
     return sampleSegments(segs, t);
   }
@@ -522,11 +560,19 @@ export function cuesFromVisemes(tl, text = '') {
  */
 export class LipSync {
   /**
-   * @param {{ player: any, now?: () => number }} deps
-   *   now: seconds clock, the same one passed to update()
+   * @param {{ player: any, now?: () => number, acoustics?: AcousticsClient|null }} deps
+   *   now: seconds clock, the same one passed to update(); acoustics: runs the clips' acoustic
+   *   analysis (a worker; null: timeline and loudness only)
    */
   constructor(deps) {
     this.player = deps.player;
+    this.acoustics = deps.acoustics === undefined ? new AcousticsClient() : deps.acoustics;
+    /** @type {WeakMap<any, import('./acoustics-client.js').AcousticJob>} the acoustic analysis of each clip */
+    this._jobs = new WeakMap();
+    /** the speaker's formant ranges (learned per voice, like the pitch) */
+    this._formants = new SpeakerFormants();
+    /** the user's lip-sync offset (s, + = the mouth later) */
+    this.offset = 0;
     this._now = deps.now || (() => (globalThis.performance?.now?.() ?? Date.now()) / 1000);
     this._freq = new Float32Array(1024);
     this._sm = { jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0 };
@@ -556,7 +602,9 @@ export class LipSync {
     /** @type {Array<() => void>} */
     this._offs = [];
     // compile the analysis while the app is idle, not on the first clip's frames (browser only)
-    if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(() => warmUpAnalysis(), { timeout: 5000 });
+    if (typeof globalThis.requestIdleCallback === 'function') {
+      globalThis.requestIdleCallback(() => { warmUpAnalysis(); this.acoustics?.warmUp?.(); }, { timeout: 5000 });
+    }
     const p = this.player;
     if (p && typeof p.on === 'function') {
       this._offs.push(
@@ -568,6 +616,35 @@ export class LipSync {
         p.on('end', (clip, info) => { if (clip === this._trackClip) this._endSpeech(!!info?.stopped); }),
       );
     }
+  }
+
+  /**
+   * Start analysing a clip's sound (its formants, loudness and voicing; in a worker) before it
+   * plays: the speech queue calls this as soon as a clip is synthesized, while the one before it
+   * plays. Optional: a clip that starts unprepared is analysed then (its first moments follow the
+   * timeline alone). Resolves when the analysis is complete (null without one).
+   * @param {any} clip @param {{ samples: Float32Array, sampleRate: number }} [src] its decoded samples
+   * @returns {Promise<any>}
+   */
+  prepare(clip, src) {
+    if (!clip || clip.kind !== 'audio' || !this.acoustics) return Promise.resolve(null);
+    if (!Array.isArray(clip.visemes) || !clip.visemes.length) return Promise.resolve(null);
+    let job = this._jobs.get(clip);
+    if (!job) {
+      job = this.acoustics.analyse(src || (clip.samples?.length ? { samples: clip.samples, sampleRate: clip.sampleRate } : clip.wav ? { wav: clip.wav } : { audioB64: clip.audioB64 }));
+      this._jobs.set(clip, job);
+    }
+    return job.promise;
+  }
+
+  /**
+   * The user's lip-sync offset (settings voice.lipSyncOffsetMs): + moves the mouth (and the head
+   * and face that go with the voice) later, - earlier, on top of the built-in timing.
+   * @param {number} sec clamped to +-OFFSET_MAX
+   */
+  setOffset(sec) {
+    const v = Number(sec);
+    this.offset = Number.isFinite(v) ? clamp(v, -OFFSET_MAX, OFFSET_MAX) : 0;
   }
 
   /** Learned speed factor for an utterance rate (1 = the plan's nominal tempo). @param {number} rate */
@@ -680,6 +757,7 @@ export class LipSync {
       if (this._speaker !== undefined) {
         this._poolI = 0;
         this.f0Ref = 0;
+        this._formants = new SpeakerFormants();
       }
       this._speaker = spk;
     }
@@ -694,12 +772,36 @@ export class LipSync {
     };
     const tl = trimPhraseEnds(clip.visemes, a);
     const norms = vowelNorms(a, tl);
+    const vary = hashText(clip.text || String(tl.length));
     const segs = segmentsFromVisemes(tl, {
       jawScale: (s) => stressJawScale(peakEnergy(a, s.start, s.end) - norms.energy, (s.end - s.start) / norms.dur),
-      vary: hashText(clip.text || String(tl.length)),
+      vary,
     });
     const prosody = new ClipProsody(a, tl, { ref, ends: textEnds(clip.text || '') });
-    return { a, tl, segs, prosody, learned: false };
+    // the clip's acoustics (started by prepare(), or now): they retime the timeline and set the
+    // amounts as soon as (and as far as) they are analysed
+    this.prepare(clip, src);
+    const st = { a, tl, segs, prosody, learned: false, ref, vary, job: this._jobs.get(clip) || null, acDone: -1, fused: null, formantsLearned: false };
+    this._refuse(st);
+    return st;
+  }
+
+  /**
+   * Rebuild a clip's segments from its acoustics when more of them have arrived (the worker posts
+   * the clip's start first, then the whole). Cheap (a few hundred frames are looked at).
+   * @param {any} st the clip state
+   */
+  _refuse(st) {
+    const tr = st.job?.track;
+    if (!tr || tr.done === st.acDone) return;
+    st.acDone = tr.done;
+    const f = fuseTimeline(st.tl, tr, this._formants, st.ref(), visemeTarget);
+    st.fused = f;
+    st.segs = segmentsFromVisemes(f.tl, { amounts: (_s, i) => f.amounts[i], vary: st.vary, lipEdge: FUSED_LIP_EDGE });
+    if (st.job.final && !st.formantsLearned) {
+      st.formantsLearned = true;
+      this._formants.add(f.vowels);
+    }
   }
 
   /**
@@ -721,11 +823,13 @@ export class LipSync {
     let into = null;
     if (cur && cur.kind === 'audio') {
       const tl = cur.clip.visemes;
-      const time = this.clock.sample(cur.clip, cur.time, dt);
+      // (the user's offset moves everything the voice drives: + = later)
+      const time = this.clock.sample(cur.clip, cur.time, dt) - this.offset;
       const prevT = cur.clip === this._prevClip ? this._prevT : NaN;
       const cs = tl && tl.length ? this._clipState(cur) : null;
       const st = cs?.st;
       if (st) {
+        this._refuse(st);
         // the clip's own analysis: the loudness envelope drives the jaw, the pitch the prosody
         const tt = time + VISEME_LEAD;
         st.a.advanceTo(Math.max(time + LOOKAHEAD, st.prosody.needBy(tt)), FRAMES_PER_UPDATE);
@@ -733,11 +837,13 @@ export class LipSync {
           st.learned = true;
           this._learnPitch(st.a);
         }
-        const m = mouthFromVisemes(st.tl, time, { prevT, segs: st.segs });
+        const m = st.fused
+          ? mouthFromVisemes(st.tl, time, { prevT, segs: st.segs, lead: FUSED_LEAD.jaw, leadLips: FUSED_LEAD.lips })
+          : mouthFromVisemes(st.tl, time, { prevT, segs: st.segs });
         // (the envelope a moment ahead too: the jaw opens with a syllable's onset, not after it;
         // a smooth max, so the jaw target has no corner where the two taps cross)
         const e = smoothMax(st.a.energyAt(tt - 0.005), st.a.energyAt(tt + 0.015));
-        m.jaw = clamp01(m.jaw * energyJaw(e));
+        m.jaw = clamp01(m.jaw * (st.fused ? energyJawFused(e) : energyJaw(e)));
         target = { ...m, level: clamp01((st.a.energyAt(tt) + 38) / 30) };
         source = 'visemes';
         cues = st.prosody.take(tt);
@@ -771,7 +877,7 @@ export class LipSync {
         this._learn(tr.rate, tr.speedSamples);
         tr.speedSamples = [];
       }
-      const v = toShape(tr.sample());
+      const v = toShape(tr.sample(this.offset * tr.speed));
       const voiced = tr.mode !== 'waiting' && tr.p > LEAD_IN && tr.p < tr.plan.duration;
       target = { ...v, level: voiced ? clamp01(0.12 + 0.8 * v.jaw + 0.2 * (v.wide + v.round)) : 0.04 };
       source = 'speech';

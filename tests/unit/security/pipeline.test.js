@@ -395,6 +395,65 @@ describe('SecurityPipeline: calibration shift gated by arrival (after)', () => {
     }
   });
 
+  it('says whether the picture settled: a timeout\'s newest frame, still turning, did not', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 1000, expectMove: true, after: 400 });
+    // the picture keeps sliding until the timeout (a video still catching up with the camera)
+    await s.feed(12, (i) => room({ offset: 0.02 * (i + 1) }), 10, arrived(500));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ id: 'm', gated: true, moved: true, settled: false });
+    // settled: moved, then still
+    s.main({ t: 'shift-ref', id: 'r2', after: 1400 });
+    await s.feed(4, () => room({ offset: 0.12 }), 10, arrived(1500));
+    s.main({ t: 'shift-measure', id: 'm2', timeoutMs: 6000, expectMove: true, after: 1800 });
+    await s.feed(8, (i) => room({ offset: 0.12 + Math.min(i, 3) * 0.02 }), 10, arrived(1900));
+    expect(s.of(s.toMain, 'shift').at(-1)).toMatchObject({ id: 'm2', moved: true, settled: true });
+    expect(s.of(s.toMain, 'shift').at(-1).contrast).toBeGreaterThan(8);
+  });
+
+  it('names the first frame it looked at and the first one that showed the move (a video that lags the motor)', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, expectMove: true, after: 400 });
+    // frames that arrived after the move ended but still show the camera before it
+    await s.feed(10, () => room(), 10, arrived(500));
+    expect(s.of(s.toMain, 'shift')).toEqual([]); // the camera reported the move: waited for
+    await s.feed(6, () => room({ offset: 0.1 }), 10, arrived(1200));
+    const [r] = s.of(s.toMain, 'shift');
+    expect(r).toMatchObject({ moved: true, settled: true, firstAt: 500, changedAt: 1200 });
+    expect(r.dx).toBeLessThan(-0.07);
+  });
+
+  it('a reference says how far it is from the frame the last measurement ended on (vsLast)', async () => {
+    const s = setup();
+    s.main({ t: 'shift-ref', id: 'r', after: 0 });
+    await s.feed(4, () => room(), 10, arrived(100));
+    const [first] = s.of(s.toMain, 'shift-ref-ok');
+    expect(first.vsLast).toBeUndefined(); // nothing measured yet
+    s.main({ t: 'shift-measure', id: 'm', timeoutMs: 6000, expectMove: true, after: 400 });
+    await s.feed(6, () => room({ offset: 0.1 }), 10, arrived(500));
+    const [m] = s.of(s.toMain, 'shift');
+    // the same picture at the turned position: it matches
+    s.main({ t: 'shift-ref', id: 'r2', after: 1000 });
+    await s.feed(4, () => room({ offset: 0.1 }), 10, arrived(1100));
+    const same = s.of(s.toMain, 'shift-ref-ok').at(-1);
+    expect(same.vsLast.at).toBe(m.at);
+    expect(Math.abs(same.vsLast.dx)).toBeLessThan(0.01);
+    expect(same.vsLast.score).toBeGreaterThan(0.15);
+    // a picture that moved on after the measurement ended (it was still catching up): it does not
+    s.main({ t: 'shift-measure', id: 'm2', timeoutMs: 6000, expectMove: true, after: 1500 });
+    await s.feed(6, () => room({ offset: 0.15 }), 10, arrived(1600));
+    const [, m2] = s.of(s.toMain, 'shift');
+    s.main({ t: 'shift-ref', id: 'r3', after: 2200 });
+    await s.feed(4, () => room({ offset: 0.22 }), 10, arrived(2300));
+    const moved = s.of(s.toMain, 'shift-ref-ok').at(-1);
+    expect(moved.vsLast.at).toBe(m2.at);
+    expect(moved.vsLast.dx).toBeLessThan(-0.04);
+  });
+
   it('a gated reference that never stands still (scene motion) is the newest current frame, marked not still', async () => {
     const s = setup();
     s.main({ t: 'shift-ref', id: 'w', after: 0 });

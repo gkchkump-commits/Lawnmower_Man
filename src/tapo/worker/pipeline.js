@@ -28,12 +28,18 @@
 // so a still picture is no proof of a current one. Only frames that reached main after `after`
 // (the end of the previous move, main's clock) are used, the stillness/settle checks run over
 // those frames only, and the answers say which frame was used (`at`, `refAt`) so main can check.
-// Without `after` (an older main) everything works as before.
+// A video can also lag the motor before it reaches main (the camera, the network, go2rtc on a
+// busy PC): those frames arrive after `after` and still show the camera before the move. So the
+// answers also say what main needs to tell: whether the picture settled (`settled`), when the
+// picture first changed (`changedAt`, against `firstAt`, the first frame looked at), and a new
+// reference how far it is from the frame the last measurement ended on (`vsLast`): a measurement
+// that ended on a picture still catching up with the camera does not match a reference taken
+// later. Without `after` (an older main) everything works as before.
 
 import { StreamDecoder } from './decoder.js';
 import { LiveCanvas } from './draw.js';
 import { MOTION_HEIGHT, MOTION_WIDTH, MotionDetector, changedFraction, lumaFromRgba } from './motion.js';
-import { SHIFT_HEIGHT, SHIFT_WIDTH, estimateShift } from './shift.js';
+import { SHIFT_HEIGHT, SHIFT_WIDTH, contrastOf, estimateShift } from './shift.js';
 import { encodeSnapshot } from './snapshot.js';
 import { PixelScratch, cpuReadable, frameToRgba } from './frame-pixels.js';
 import { stubDetect } from './stub-detector.js';
@@ -180,9 +186,12 @@ export class SecurityPipeline {
     /**
      * Calibration: `ref` is the reference luma and `refAt` its frame's arrival stamp (null: unknown);
      * `refReq` / `measure` the requests in progress (`refSeq` counts the reference requests);
-     * `busy` while a frame is being sampled.
+     * `busy` while a frame is being sampled; `last` the frame the last measurement ended on.
      */
-    this.shift = { wantRef: false, ref: /** @type {Uint8Array|null} */ (null), refAt: /** @type {number|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null), refSeq: 0 };
+    this.shift = {
+      wantRef: false, ref: /** @type {Uint8Array|null} */ (null), refAt: /** @type {number|null} */ (null), measure: /** @type {any} */ (null), busy: false, refReq: /** @type {any} */ (null), refSeq: 0,
+      last: /** @type {{ luma: Uint8Array, at: number }|null} */ (null),
+    };
     this._canvases = /** @type {Record<string, any>} */ ({});
     /** read decoded frames with VideoFrame.copyTo (off after one failure) */
     this._cpuPixels = true;
@@ -614,7 +623,11 @@ export class SecurityPipeline {
    * With `after` (gated): only frames that reached main after it count, the wait for a still
    * picture starts at the first of them, and the answer says whether there is a reference
    * (`ok`), the arrival stamp of its frame (`at`) and whether it was still. No such frame within
-   * SHIFT_REF_GIVE_UP_MS → `ok: false`: main must not measure against nothing.
+   * SHIFT_REF_GIVE_UP_MS → `ok: false`: main must not measure against nothing. With a reference
+   * it also carries `contrast` (the luma's standard deviation: a plain or dark view is low) and
+   * `vsLast`, the shift from the frame the last measurement ended on (`at`: that frame's stamp) to
+   * this reference: main takes the reference at the turned position only when nothing changed
+   * since that measurement (a picture still catching up with the camera would have).
    * @param {{ id?: unknown, after?: unknown }} msg
    */
   _shiftRef(msg) {
@@ -667,8 +680,16 @@ export class SecurityPipeline {
     s.refReq = null;
     if (!rr) return;
     this._clearTimeout(rr.timer);
-    if (rr.gate === null) this.postMain({ t: 'shift-ref-ok', id: rr.id });
-    else this.postMain({ t: 'shift-ref-ok', id: rr.id, gated: true, ok: true, still, ...(at !== null ? { at } : {}) });
+    if (rr.gate === null) {
+      this.postMain({ t: 'shift-ref-ok', id: rr.id });
+      return;
+    }
+    const last = s.last;
+    const vs = last ? estimateShift(last.luma, luma) : null;
+    this.postMain({
+      t: 'shift-ref-ok', id: rr.id, gated: true, ok: true, still, ...(at !== null ? { at } : {}), contrast: round3(contrastOf(luma)),
+      ...(last && vs ? { vsLast: { at: last.at, dx: round4(vs.dx), dy: round4(vs.dy), score: round3(vs.score) } } : {}),
+    });
   }
 
   /**
@@ -694,8 +715,11 @@ export class SecurityPipeline {
    * With `after` (gated): only frames that reached main after it are looked at (the minimum wait
    * starts at the first of them; a timeout before any such frame waits on, up to
    * MAX_SHIFT_TIMEOUT_MS), and the answer carries `gated: true`, the measured frame's arrival
-   * stamp `at`, the reference's `refAt`, how many current frames were looked at (`frames`) and
-   * whether the picture moved.
+   * stamp `at`, the reference's `refAt`, how many current frames were looked at (`frames`),
+   * whether the picture moved, whether it `settled` (still for SETTLE_FRAMES comparisons when the
+   * answer was made: a timeout's newest frame may be mid-turn), the arrival stamps of the first
+   * frame looked at (`firstAt`) and of the first one that showed the move (`changedAt`), and the
+   * picture's `contrast`.
    * @param {{ id: any, timeoutMs?: number, expectMove?: boolean, after?: unknown }} msg
    */
   _shiftMeasure(msg) {
@@ -705,6 +729,7 @@ export class SecurityPipeline {
       id: msg.id, gate: stampOf(msg.after), startedAt: this.now(), firstAt: /** @type {number|null} */ (null),
       prev: /** @type {Uint8Array|null} */ (null), latest: /** @type {Uint8Array|null} */ (null), latestAt: /** @type {number|null} */ (null),
       stable: 0, frames: 0, moved: false, expectMove: msg.expectMove === true, timer: /** @type {any} */ (null),
+      firstRx: /** @type {number|null} */ (null), changedRx: /** @type {number|null} */ (null),
     };
     const expire = () => {
       if (this.shift.measure !== m) return;
@@ -713,7 +738,7 @@ export class SecurityPipeline {
         m.timer = this._setTimeout(expire, left);
         return;
       }
-      this._finishShift(m, m.latest, m.latestAt);
+      this._finishShift(m, m.latest, m.latestAt, m.stable >= SETTLE_FRAMES);
     };
     m.timer = this._setTimeout(expire, timeout);
     this.shift.measure = m;
@@ -767,10 +792,14 @@ export class SecurityPipeline {
         if (!m || s.measure !== m) return; // finished meanwhile, or a newer measurement
         const now = this.now();
         if (m.firstAt === null) m.firstAt = now;
+        if (m.firstRx === null) m.firstRx = at;
         m.frames++;
         const change = m.prev ? changedFraction(m.prev, luma) : 1;
         // the camera turned: the picture changed between frames, or differs from the reference
-        if ((m.prev && change >= SHIFT_MOVING_FRACTION) || (s.ref && changedFraction(s.ref, luma) >= SHIFT_MOVING_FRACTION)) m.moved = true;
+        if (!m.moved && ((m.prev && change >= SHIFT_MOVING_FRACTION) || (s.ref && changedFraction(s.ref, luma) >= SHIFT_MOVING_FRACTION))) {
+          m.moved = true;
+          m.changedRx = at;
+        }
         if (m.prev && change < SETTLE_FRACTION) m.stable++;
         else m.stable = 0;
         m.prev = luma;
@@ -779,7 +808,7 @@ export class SecurityPipeline {
         // settled: still for SETTLE_FRAMES comparisons, after the picture moved (or long enough
         // that a camera which did not move at all is not waited for until the timeout)
         const since = m.gate === null ? m.startedAt : m.firstAt;
-        if (m.stable >= SETTLE_FRAMES && (m.moved || (!m.expectMove && now - since >= SHIFT_MIN_WAIT_MS))) this._finishShift(m, luma, at);
+        if (m.stable >= SETTLE_FRAMES && (m.moved || (!m.expectMove && now - since >= SHIFT_MIN_WAIT_MS))) this._finishShift(m, luma, at, true);
       })
       .catch((err) => console.warn('[tapo-worker] shift sample failed', err?.message || err))
       .finally(() => {
@@ -788,16 +817,23 @@ export class SecurityPipeline {
       });
   }
 
-  /** @param {any} m @param {Uint8Array|null} luma @param {number|null} at its frame's arrival stamp */
-  _finishShift(m, luma, at) {
+  /**
+   * @param {any} m @param {Uint8Array|null} luma @param {number|null} at its frame's arrival stamp
+   * @param {boolean} settled the picture was still for SETTLE_FRAMES comparisons
+   */
+  _finishShift(m, luma, at, settled) {
     this._clearTimeout(m.timer);
     if (this.shift.measure === m) this.shift.measure = null;
     const settledMs = Math.round(this.now() - m.startedAt);
+    // the frame this measurement ended on: the next reference says how far it is from it
+    if (luma && at !== null) this.shift.last = { luma, at };
     // gated: what main needs to check that the picture is current and the reference the one it
-    // was told about
+    // was told about, and that the picture had caught up with the camera
     const gated = m.gate === null ? {} : {
-      gated: true, frames: m.frames, moved: m.moved,
+      gated: true, frames: m.frames, moved: m.moved, settled: !!luma && settled,
       ...(luma && at !== null ? { at } : {}), ...(this.shift.ref && this.shift.refAt !== null ? { refAt: this.shift.refAt } : {}),
+      ...(m.firstRx !== null ? { firstAt: m.firstRx } : {}), ...(m.changedRx !== null ? { changedAt: m.changedRx } : {}),
+      ...(luma ? { contrast: round3(contrastOf(luma)) } : {}),
     };
     if (!this.shift.ref || !luma) {
       this.postMain({ t: 'shift', id: m.id, dx: 0, dy: 0, score: 0, settledMs, ...gated });

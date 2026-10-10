@@ -32,32 +32,40 @@ Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice se
 sends the CSP with HTML and with scripts (a worker takes its policy from its script's response),
 and the session cancels every network request that does not go to a loopback host
 (`isAllowedRequestUrl`, `electron/security.js`): the window talks to no server on the internet
-(the Claude CLI is a child process with its own connection).
+(the Claude CLI is a child process with its own connection). The same holds for the Home camera
+window (§9): all camera traffic is in main and its loopback-only video sidecar.
 
 ## 1. Processes
 
 ```
-┌─────────────────────────── Electron main (Node 22, ESM) ───────────────────────────┐
+┌─────────────────────────── Electron main (Node 22, ESM) ────────────────────────────┐
 │ electron/main.js          app lifecycle, BrowserWindow (transparent, frameless,     │
 │                           always-on-top), tray, global shortcuts, IPC wiring        │
 │ electron/claude-session.js ClaudeSession: spawns `claude -p` persistent stream-json │
+│                           (+ the app's in-process MCP servers: the camera tools)    │
 │ electron/voice-sidecar.js  VoiceSidecar: spawns/monitors the Python voice server    │
 │ electron/settings.js       Settings store (JSON in app.getPath('userData'))         │
 │ electron/preload.cjs       contextBridge → window.lawnmower (see §3)                │
-└──────────────┬───────────────────────────────────────────────┬─────────────────────┘
-               │ IPC (contextIsolation, sandbox)                │ spawn + stdio
-┌──────────────▼──────────── Renderer (Chromium, WebGL2) ──┐   ┌▼──────────────────────┐
-│ src/avatar/*   hologram renderer (three.js)              │   │ claude -p (user's CLI) │
-│ src/app/*      conversation controller & text pipeline   │   └───────────────────────┘
-│ src/audio/*    mic capture/VAD, playback, lip-sync        │
-│ src/speech/*   voice-server client + Web Speech fallback  │──HTTP──┐
-│ src/ui/*       chat panel, settings, permission cards     │        │ 127.0.0.1, bearer token
-│ src/vision/*   camera, face tracking (MediaPipe, worker)  │        │
-└───────────────────────────────────────────────────────────┘   ┌────▼──────────────────┐
-                                                                 │ voice/ (Python 3.12)  │
-                                                                 │ FastAPI: /stt /tts …  │
-                                                                 │ faster-whisper, Kokoro│
-                                                                 └───────────────────────┘
+│ electron/tapo/*            the Home camera (§9): ONVIF, PTZ, events, go2rtc, clips, │
+│                           security engine, notifications, camera MCP server         │
+└─────┬─────────────────────────────────────┬───────────────────────────────┬────────┬┘
+      │ IPC (contextIsolation,              │ IPC + MessagePort             │ spawn, │ spawn;
+      │ sandbox)                            │ (video frames)                │ stdio  │ HTTP 127.0.0.1
+┌─────▼─── avatar window ────────────┐ ┌────▼── Home camera window ─┐ ┌─────▼─────┐ ┌▼─────────────┐
+│ src/avatar/*  hologram (three.js)  │ │ src/tapo/*  live view,     │ │ claude -p │ │ go2rtc       │
+│ src/app/*     conversation         │ │ controls, events, setup    │ │ (user's   │ │ RTSP → fMP4  │
+│ src/audio/*   mic, VAD, lip-sync   │ │ worker: WebCodecs decode,  │ │  CLI)     │ │ on 127.0.0.1 │
+│ src/speech/*  voice client         │ │ motion, person detector    │ └───────────┘ └──────┬───────┘
+│ src/ui/*      chat, settings, cards│ │ preload-camera.cjs         │                      │ RTSP :554
+│ src/vision/*  webcam face tracking │ └────────────────────────────┘                      │
+│ src/tapo/avatar-link.js  alerts    │                                              ┌──────▼───────┐
+└─────┬──────────────────────────────┘                       main ── ONVIF :2020 ──►│ Tapo C211    │
+      │ HTTP 127.0.0.1, bearer token                                                │ (home LAN)   │
+┌─────▼─────────────────┐                                                           └──────────────┘
+│ voice/ (Python 3.12)  │
+│ FastAPI: /stt /tts …  │
+│ faster-whisper, Kokoro│
+└───────────────────────┘
 ```
 
 ## 2. Repository layout (and which build lane owns it)
@@ -73,6 +81,9 @@ and the session cancels every network request that does not go to a loopback hos
 | `public/assets/models/` | **procedural** | head mesh(es) for the procedural renderer + LICENSE notes (served at `./assets/models/`) |
 | `src/app/`, `src/audio/`, `src/speech/`, `src/ui/`, `src/bridge/`, `src/main.js`, `src/index.html`, `src/styles/` | **renderer-app** | conversation pipeline, audio, UI, mock bridge |
 | `src/vision/`, `public/assets/vision/`, `scripts/vite-vision-wasm.mjs` | **camera** | webcam capture, MediaPipe face tracking in a worker, attention/presence/gaze logic, snapshots for Claude ([CAMERA.md](CAMERA.md)) |
+| `electron/tapo/`, `electron/preload-camera.cjs`, `scripts/fetch-go2rtc.mjs`, `tools/tapo-probe.mjs`, `tests/unit/tapo/` | **tapo-main** | the Home camera's main-process side (§9) |
+| `src/tapo/`, `src/bridge/mock-tapo.js`, `public/assets/security/`, `tests/unit/security/`, `tests/e2e/tapo-window.spec.js` | **tapo-renderer** | the Home camera window, its security worker, the avatar's side (§9) |
+| `tools/tapo-sim/`, `tests/fixtures/tapo/`, `tests/unit/tapo-sim/`, `scripts/tapo-e2e.mjs`, `docs/TAPO.md` | **tapo-sim** | camera simulator, integration and Electron end-to-end tests, the user guide; also the camera tools in `electron/claude-session.js` / `persona.js` |
 | `voice/` | **voice** | Python package `lawnmower_voice`, pyproject, tests |
 | `scripts/` | **voice** (setup-voice.*) / **systems** (others) | setup scripts |
 | `src/dev/` | each lane its own file(s): `src/dev/avatar.html` (avatar-core), `src/dev/procedural.html` (procedural) | dev/visual harness pages served by Vite at `/dev/*.html` (add them to `build.rollupOptions.input` in vite.config.js if tests need them in `vite preview`) |
@@ -151,8 +162,33 @@ lawnmower = {
                           // (may be outside the window); ~30 Hz, only while the window is visible,
                           // avatar.followCursor is on and the cursor moved. Absent in the mock bridge.
   app: { info(): Promise<{ version: string, platform: string, electron: string, chrome: string }> },
+  tapo: {                                  // the Home camera (§9); invoke/subscribe wrappers only
+    status(): Promise<TapoStatus>,
+    arm(armed: boolean): Promise<{ armed, arming, armingEndsAt? }>,    // always with the exit delay from here
+    ptz(cmd: PtzCommand): Promise<PtzResult>,  // { op: 'nudge'|'hold'|'heartbeat'|'release'|'stop'|'center'|'preset'|'preset-name'|'home', … }
+    presets(o?: { refresh?: boolean }): Promise<Preset[]>,
+    events(q?: { beforeMs?, sinceMs?, kinds?, limit? }): Promise<{ events: EventSummary[], total: number }>,
+    openWindow(o?: { eventId?: string }): Promise<{ ok: true }>,     // show the camera window (and an event's clip)
+    openClips(): Promise<{ ok: boolean, path?: string, error?: string }>,
+    onStatus(cb: (st: TapoStatus) => void): () => void,             // on change, ≤ 4/s
+    onAlert(cb: (a: AvatarAlert) => void): () => void,              // { id, kind, at, cameraName, line, quiet, describe, snapshot? }
+    onLook(cb: (p: { x: number, y: number, holdMs: number }) => void): () => void,   // the camera window's centre (CSS px)
+  },
 }
 ```
+
+The Home camera window has its own preload, `electron/preload-camera.cjs`, which exposes exactly
+`window.lawnmowerCamera = { settings: { get, set, onChange }, tapo: { status, onStatus, onEvent,
+onOpenEvent, onCalibration, setCredentials, clearCredentials, test, discover, ptz, presets,
+savePreset, removePreset, arm, calibrate, events: { list, remove, ack, openFolder },
+setViewVisible, requestPort }, app: { info } }` — no Claude API. Its `settings.set` may change only
+the `tapo` and `security` groups (main checks with `validateCameraSettingsPatch`). The frame
+MessagePort cannot cross `contextBridge`: the preload forwards it with
+`window.postMessage({ type: 'lm:tapo:port' }, '*', ports)`. Main decides who may call a channel with
+`assertSender(event, kinds)` (`'avatar'` = the avatar window, `'camera'` = the camera window; the
+frame must show our own page); `lm:settings:get/set` and `lm:app:info` accept both, the camera's
+setup channels only the camera window. The channel table and payload types are in
+`electron/tapo/ipc.js` / `validate.js` and [TAPO.md §10](TAPO.md#10-how-it-works-technical).
 
 Moving the window: there are no CSS drag regions (`-webkit-app-region: drag`). On Windows they fight
 click-through: entering one reads as the pointer leaving the page, the click-through gate makes the
@@ -326,8 +362,40 @@ command line — user text only ever travels over stdin; long prompts go in file
                                  // controller.say), 'claude' (hidden prompt), 'off'
     lookToTalk: false,           // hands-free only listens while the user looks at the screen
   },
+  tapo: {                        // the Home camera (§9, TAPO.md); the camera password is NOT a setting
+    enabled: false,              // the whole feature: camera window, ONVIF, the go2rtc sidecar
+    name: 'camera',              // spoken/display name ("front door camera")
+    host: '',                    // '' or a home-network address (private IPv4, fc00::/7, .local/.lan/…); never a URL
+    onvifPort: 2020, rtspPort: 554,
+    username: '',                // the Tapo Camera Account user (not secret)
+    stream: 'stream1',           // 'stream1' | 'stream2'
+    ptz: 'auto',                 // 'auto' | 'relative' | 'continuous' | 'off'
+    invertPan: false, invertTilt: false,                 // set by calibration (or the user)
+    stepSmall: 0.15, stepMedium: 0.35, stepLarge: 0.75,  // nudges, as fractions of the view
+    viewUnitsX: 0.5, viewUnitsY: 1.4,                    // ONVIF units per view width / height (calibration)
+    minStep: 0.05, holdSpeed: 0.5, msPerUnit: 6000,
+    homePreset: '', localPresets: [], calibratedAt: '',
+    windowBounds: null, windowOnTop: false, showDetections: false,
+  },
+  security: {
+    armed: false,                // persisted: an armed app re-arms right after a restart
+    armDelaySec: 30,             // exit delay after arming in the app
+    people: true, motion: true,
+    notify: 'person', record: 'person',                  // 'person' | 'motion' | 'off'
+    preRollSec: 5, postRollSec: 10, maxClipSec: 120,
+    retentionDays: 7, maxStorageGB: 5, clipsDir: '',     // '' = <Videos>/Lawnmower Man/Security
+    sensitivity: 'medium', cameraEvents: true, confirmLocally: true,
+    cooldownSec: 60, quietHours: '',                     // '' | 'HH:MM-HH:MM'
+    announce: true, showOnAlert: true,
+    describe: false,             // the alert picture goes to Claude for a one-sentence description
+    claudeSee: 'ask', claudeMove: 'ask',                 // 'ask' | 'always' | 'never': camera_snapshot / camera_look
+    voiceCommands: true,         // "camera left", "arm the camera" … run locally, without a Claude turn
+  },
 }
 ```
+The `tapo` and `security` groups need no migration (new groups get their defaults); the renderer
+mirrors them in `src/app/settings-defaults.js` and the mock camera bridge validates like main
+(`tests/unit/tapo/settings-tapo.test.js` checks both).
 Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key> global shortcut would swallow AltGr characters
 (Polish ć/ź, Hungarian/Czech & and #, …). settings.json carries a top-level `"version"`; loading a v1
 file on Windows moves hotkeys that still hold the old Ctrl+Alt defaults to the new ones (once).
@@ -450,16 +518,88 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   privacy card and face tracking loading its wasm + model over app:// in a worker, on Chromium's
   fake camera; the worker runs under the CSP and no request leaves the PC, also when the camera is
   turned off), voice status and a clean boot without console errors.
+  It also checks the Home camera window without a camera: none while the feature is off; turned on,
+  a hidden, sandboxed window at `app://lawnmower/tapo/index.html` whose preload exposes exactly
+  `window.lawnmowerCamera`, which boots without errors, may change only its own settings groups and
+  sends no request off the PC; turned off, it is gone.
 * Camera in the browser: `tests/e2e/camera.spec.js` runs with Chromium's fake camera playing a frame
   of `docs/reference/neutral.jpg` (MediaPipe detects that face); see [CAMERA.md](CAMERA.md).
+* Home camera: `tests/unit/tapo/` (main-process modules with in-test fakes, a fake ONVIF camera and a
+  mini RTSP server; with `vendor/go2rtc/` also the real go2rtc), `tests/unit/tapo-sim/` (those modules
+  against the camera simulator `tools/tapo-sim/`), `tests/unit/security/` (the window's pure logic and
+  worker pipeline), `tests/e2e/tapo-window.spec.js` (the camera window and the avatar's side in
+  Chromium with the mock camera bridge), and `xvfb-run -a node scripts/tapo-e2e.mjs`: the real app
+  against the simulator with the real go2rtc (`npm run fetch:go2rtc`) — setup through the form,
+  calibration, PTZ, an armed person event with notification, avatar line and clip, Claude's camera
+  tools through the fake CLI, privacy mode, offline recovery and a clean quit
+  ([TAPO.md §10](TAPO.md#10-how-it-works-technical)). CI job `tapo-e2e-linux` runs it.
 * Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>
   node scripts/electron-e2e.mjs --packaged` (no app path) also checks `app.isPackaged`, the
   resources an installer must deliver, the per-user voice folder and — through the real launcher in
   `-CheckOnly` mode — that the bundled setup script reports that same folder. The fake CLI reaches
   the packaged app through `LAWNMOWER_CLAUDE_CLI` (honoured when packaged on purpose; threat model in
   `electron/main.js`), `LAWNMOWER_E2E=1` exposes a few main-process helpers to `app.evaluate()`.
-  `.github/workflows/release.yml` runs it against the silently installed NSIS build on windows-latest
+  With the Home camera it also checks `resources/tapo/go2rtc(.exe)` (it runs and reports 1.9.14), its
+  license, the camera page, preload and the person detector model inside `app.asar`.
+  `.github/workflows/release.yml` fetches go2rtc (`npm run fetch:go2rtc -- --platform win32-x64`)
+  before `dist:win`, checks the installed `go2rtc.exe` against the pinned SHA-256, and runs it against the silently installed NSIS build on windows-latest
   (`--software-webgl`: the runner has no GPU), then installs the same build over itself (the update
   path: the previous version's uninstaller runs with `/S --updated`) and checks that the per-user voice
   folder and the settings folder survive the update and a silent uninstall. An interactive uninstall
   asks before deleting those two folders (default No; `electron/assets/installer.nsh`).
+
+## 9. Home camera (Tapo C211)
+
+A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technical details in
+[TAPO.md](TAPO.md). Off by default (`tapo.enabled`).
+
+* **Main** (`electron/tapo/`, composed by `createTapo()` in `index.js`): ONVIF Profile S over plain
+  HTTP on port 2020 with hand-written SOAP and WS-Security PasswordDigest (`onvif-soap.js`,
+  `onvif-client.js`), pan/tilt with motor watchdogs, press-and-hold heartbeats and calibration
+  (`ptz.js`, `calibration.js`), the camera's PullPoint events (`events.js`), the bundled **go2rtc**
+  1.9.14 as a supervised sidecar on `127.0.0.1` (random port, random Basic credentials, the camera
+  password only in its environment; `go2rtc.js`), its fMP4 parsed in main (`fmp4.js`,
+  `stream-relay.js`) and fanned out to the clip recorder (`recorder.js`, `retention.js`,
+  `event-store.js`) and to the camera window's worker over a `MessagePortMain`, the pure security
+  engine (`security-engine.js`), Windows notifications (`alerts.js`), the password store
+  (`credentials.js`, `safeStorage` async / DPAPI) and the camera window (`camera-window.js`).
+  A wrong password is tried once and then not again until it or the address changes (camera
+  lockouts); go2rtc starts only after the ONVIF sign-in worked.
+* **Windows:** the Home camera window (`src/tapo/`, `app://lawnmower/tapo/index.html`) is a normal
+  framed, sandboxed window with its own preload (§3). Closing it hides it: its security worker
+  (WebCodecs decoding, 64×36 motion, the MediaPipe EfficientDet-Lite0 int8 person detector,
+  snapshots, the calibration's shift estimate) keeps running while the camera is armed. The avatar
+  window gets `window.lawnmower.tapo` (§3): alerts make the avatar wake, look toward the camera
+  window (`onLook`) and speak (`src/tapo/avatar-link.js`); short commands such as "camera left" run
+  locally (`src/tapo/intents.js`, through `controller.setCommandInterceptor`).
+* **Clips** are served to both windows by the `app://lawnmower/__clips/` mount of
+  `electron/app-protocol.js` (our file names only, Range requests for seeking); event `.json` files
+  are not served.
+* **Claude:** `createTapo().mcpServers()` is the in-process MCP server `lawnmower-camera`
+  (`camera-mcp.js`: `camera_status`, `camera_look`, `camera_snapshot`, `camera_events`,
+  `security_arm`; Claude can arm but never disarm). `ClaudeSession` offers it over the stream-json
+  control channel (`initialize.sdkMcpServers` + `control_request{subtype:'mcp_message'}`, "G1").
+  If a CLI's `system/init` then lacks the server's tools, the session switches for the rest of the
+  app session to the server's loopback Streamable-HTTP endpoint ("G2", `mcp-http.js`):
+  `startHttp(): Promise<{ url: 'http://127.0.0.1:<port>/mcp', token }>` (idempotent while running)
+  and `stopHttp(): Promise<void>`; the CLI gets `--mcp-config <userData>/mcp/lawnmower-camera.json`
+  (with `--strict-mcp-config`), whose `Authorization: Bearer ${LM_MCP_TOKEN}` header names an
+  environment variable set only in the CLI's environment; the endpoint refuses requests without the
+  token, with an `Origin` header or with another `Host`. `toolPermissions()` maps
+  `security.claudeSee` / `claudeMove` to `--allowedTools` / `--disallowedTools` (`camera_status` and
+  `camera_events` are always pre-approved, `security_arm` never), and `personaContext()` adds the
+  camera paragraph to the persona. Main hands both to the session again whenever they change
+  (a settings change or a status change, e.g. a password saved), which restarts the CLI after the
+  running turn and resumes the conversation.
+* **main.js wiring:** `createTapo()` runs after the settings are loaded, in the same synchronous
+  block as `protocol.handle` (whose `mounts` array then receives the clip mount; the camera window
+  opens on the next tick); `onSettingsChanged` calls `tapo.applySettings(next, prev)` and forwards
+  `lm:settings:changed` to the camera window; the tray gets a *Home camera* submenu
+  (`tapo.trayState()`, `tapo.trayActions`); `shutdown()` waits for `tapo.stop()` (bounded at about
+  4 s: Stop the motor, Unsubscribe, finish the clip, kill go2rtc); closing the avatar window quits
+  the app (the hidden camera window would otherwise keep it running); with `LAWNMOWER_E2E=1`,
+  `globalThis.__lawnmowerE2E.tapo` exposes the camera's test hooks.
+* **Packaging:** `npm run fetch:go2rtc` downloads the pinned go2rtc release (SHA-256 checked) into
+  `vendor/go2rtc/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy it
+  to `resources/tapo/go2rtc(.exe)` with `resources/tapo/go2rtc-LICENSE.txt`. The person detector
+  model is committed in `public/assets/security/` and ships in `app.asar`.

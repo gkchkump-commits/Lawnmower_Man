@@ -10,6 +10,7 @@ A holographic desktop avatar for Claude. A glowing wireframe head floats on your
 * **Face:** a real-time WebGL hologram on your GPU, built from the frames of the reference video (`docs/reference/`).
 * **Voice:** runs locally on an NVIDIA GPU. Speech to text is [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`large-v3-turbo`); text to speech is [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Both are tuned for an **RTX 5070 Laptop GPU (8 GB, Blackwell)** and fall back to the CPU automatically.
 * **Eyes (optional):** your webcam. Turned on, the avatar makes eye contact, notices when you come and go and smiles back, with face tracking that runs on your PC; Claude sees a picture only when you let it. Off by default ([docs/CAMERA.md](docs/CAMERA.md)).
+* **Home camera (optional):** a TP-Link **Tapo C211** pan/tilt camera on your home network becomes a simple home security camera. Watch and turn it in its own window (or say "camera left"), arm it when you leave, and when someone walks in you get a Windows notification, the avatar turns toward the camera window and tells you, and a short clip is saved on your PC. Claude can check the camera for you; it sees a picture only when you allow it. The video stays on your PC and your network. Off by default ([docs/TAPO.md](docs/TAPO.md)).
 
 ![Reference video frame vs. the relief renderer vs. the procedural renderer](docs/screenshots/compare_rest.jpg)
 
@@ -88,9 +89,9 @@ Then choose **Restart voice** in the tray menu, or restart the app. [docs/VOICE.
 | drag the head (or the chat's status bar) | move the window; near a screen edge or corner it snaps flush against it like a normal window, settles fully on the screen you drop it on (sized to fit that screen) and remembers the place |
 | drag a **corner** of the window (a bracket shows on hover) | resize it like a normal window; the opposite corner stays put and the face keeps its shape |
 | **Ctrl + mouse wheel** over the head | bigger / smaller in small steps |
-| tray icon | show/hide, always on top, click-through, lock / reset position, camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
+| tray icon | show/hide, always on top, click-through, lock / reset position, camera, home camera, Claude mode, new conversation, restart voice, set up local voice, logs, quit |
 
-Hotkeys, window size (small/medium/large presets or any *Width*), click-through, renderer, voice, speed, hands-free mode, the camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves and resizes; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
+Hotkeys, window size (small/medium/large presets or any *Width*), click-through, renderer, voice, speed, hands-free mode, the camera, the home camera and the Claude settings are all in the **settings drawer** (gear icon). With click-through on, clicks on the transparent parts of the window go to the desktop underneath. *Settings → Window → Lock position* stops accidental moves and resizes; *Reset position* puts the avatar back in the bottom-right corner. The eyes follow the mouse anywhere on the desktop (*Settings → Avatar → Eyes follow the cursor*).
 
 Windows avoids Ctrl+Alt global shortcuts: Windows reports AltGr as Ctrl+Alt, so they would swallow AltGr characters such as Polish ć/ź. Settings from an older version that still hold the Ctrl+Alt defaults are moved to the new ones once; shortcuts you chose yourself are kept.
 
@@ -105,6 +106,28 @@ Off by default. Turn it on with the toolbar's camera button, *Settings › Camer
 * optionally **listens only while you look at the screen** in hands-free mode (*Listen only when I look*).
 
 Face tracking (Google's MediaPipe Face Landmarker) runs inside the app, offline; no video is recorded or uploaded. **Claude sees you only** when *Settings › Camera › Let Claude see me* is on (a snapshot goes with every message) or when you press the camera button in the message box (the next message only); the chat shows the picture that was sent. The camera is released while the window is hidden or minimized. Details, privacy and troubleshooting: [docs/CAMERA.md](docs/CAMERA.md).
+
+### The home camera (Tapo C211)
+
+Off by default; nothing talks to a camera until you set it up. [docs/TAPO.md](docs/TAPO.md) has every step (with the Tapo app's menu paths), all controls, the troubleshooting table and the privacy details. In short:
+
+1. **In the Tapo app** (phone, once): create a **Camera Account** (camera › gear › *Advanced Settings › Camera Account*; a new password, **not** your TP-Link password), set the video quality to the best, turn on motion and person detection, keep privacy mode off, and don't use Tapo Care recording together with a microSD card. Third-Party Compatibility, your TP-Link password and port forwarding are **not** needed.
+2. **On your router** (once): give the camera a fixed address (a *DHCP reservation*). Never forward ports 554 or 2020 to the internet.
+3. **In Lawnmower Man:** tray › **Home camera › Set up the home camera…** (or *Settings › Home camera › Open camera window…*). Enter the camera's address (or press **Find cameras**), the Camera Account user name and password, a name such as *front door camera*, then **Test connection** and **Save**. Press **Calibrate…** once (the camera turns a little each way, about 30 s), so the arrows and clicks go the right way.
+4. **Arm** when you leave (top of the camera window, the tray's *Home camera › Armed*, *Settings › Home camera › Security*, or say "arm the camera"): you have 30 seconds to leave. When someone walks in, Windows shows "Person at the front door camera", the avatar wakes up, looks toward the camera window and says *"Someone is at the front door camera."*, and a clip from 5 s before to 10 s after is saved in `Videos\Lawnmower Man\Security` (kept 7 days, at most 5 GB). Closing the camera window only hides it; an armed camera keeps watching.
+
+| In the camera window | Action |
+|---|---|
+| click the picture | turn the camera so that spot moves to the middle |
+| on-screen arrows (bottom right) | click: one step; press and hold: keep turning, stops when you let go; **⌂**: home position |
+| **← → ↑ ↓** (Shift: a big step, Alt: a small step; hold to keep turning) | turn the camera |
+| **H** or **Home** · **1**–**8** | home position · a saved position (the sidebar's *Positions*, including the ones made in the Tapo app) |
+| **A** · **E** · **Space** | arm / disarm · show or hide the events (click one to play its clip) · copy a picture |
+| **F** or double-click · **Esc** · **?** | full screen · stop the camera, close a dialog · all keys |
+
+Typed or spoken to the avatar, short commands run at once without asking Claude: "camera left", "turn the camera right a bit", "look at the door" (a saved position), "camera home", "arm the camera" / "disarm the camera", "show me the camera". Anything else goes to Claude, who has camera tools too: ask *"Is anyone at the front door?"* and an approval card asks before Claude sees a picture (**Allow** sends one picture), or before it turns the camera. Claude can arm the alarm but never disarm it. In the camera window's gear › *Claude and the avatar* you can set looking and turning to *Always* or *Never*, and turn on *Claude describes alerts* (off by default: the alert picture then goes to Claude for a one-sentence description).
+
+The camera password is encrypted for your Windows user and never written to `settings.json` or a log. The video goes from the camera to this PC only; the bundled video component (go2rtc) listens on `127.0.0.1` only. Pictures leave the PC only when you allow Claude to see them.
 
 ### Claude modes
 
@@ -155,7 +178,14 @@ npm run lint
 npm run dist:win       # Windows installer + portable exe (electron-builder, unsigned) into release/
 npm run dist:linux-dir # unpacked Linux build in release/linux-unpacked (quick packaging check)
 npm run test:packaged  # scripts/electron-e2e.mjs --packaged; set ELECTRON_PATH to the built/installed app
+npm run fetch:go2rtc   # the home camera's video component (pinned go2rtc 1.9.14, SHA-256 checked) into vendor/go2rtc/
+                       #   (-- --platform win32-x64 | linux-x64 | all; dist:win needs the win32-x64 one)
+npm run sim:tapo       # a simulated Tapo camera on 127.0.0.1 (ONVIF 12020, RTSP 10554, control 12021)
+npm run test:tapo-e2e  # the home camera end to end in the real app against the simulator (xvfb-run -a on Linux)
+npm run probe:tapo -- --host <ip> --user <camera account> [--move]   # a diagnostic report for a real camera
 ```
+
+To try the camera window with the simulator, start the app with `LAWNMOWER_TAPO_ALLOW_LOOPBACK=1` (the app otherwise refuses non-home-network addresses, including `127.0.0.1`) and enter `127.0.0.1` with the simulator's ports under the camera window's *Ports and stream*; the simulator's Camera Account is `camacct` / `se&cret`. In a browser, `http://127.0.0.1:4173/tapo/index.html?mock=1` shows the camera window with a mock camera.
 
 Without Electron, open the app in a browser: `npm run build && npm run preview`, then go to `http://127.0.0.1:4173/index.html?mock=1`. The avatar harness with sliders for every rig control is at `/dev/avatar.html` (see [docs/RENDERER.md](docs/RENDERER.md)).
 
@@ -167,6 +197,9 @@ Without Electron, open the app in a browser: `npm run build && npm run preview`,
 | `src/avatar/` | hologram engine (three.js): stage, animation director, particles, bloom, relief / procedural / placeholder heads |
 | `src/app/`, `src/audio/`, `src/speech/`, `src/ui/` | conversation state machine, sentence chunking, lip-sync, mic and VAD, voice client, chat UI |
 | `src/vision/` | the camera: capture, face tracking (MediaPipe, in a worker), attention, presence, eye contact, snapshots ([docs/CAMERA.md](docs/CAMERA.md)) |
+| `electron/tapo/`, `electron/preload-camera.cjs` | the home camera's main-process side: ONVIF client, pan/tilt with motor watchdogs, camera events, the go2rtc video component, clips, the security engine, notifications, Claude's camera tools ([docs/TAPO.md](docs/TAPO.md)) |
+| `src/tapo/` | the home camera window (live view, controls, events, setup, calibration), its security worker (WebCodecs decoding, motion, the person detector), and the avatar's side (alerts, quick commands) |
+| `tools/tapo-sim/`, `tools/tapo-probe.mjs` | a Tapo camera simulator (ONVIF, RTSP, pan/tilt, events) for tests and development; the diagnostic report for a real camera |
 | `voice/` | Python voice server (FastAPI, faster-whisper, Kokoro) |
 | `tools/bake/`, `tools/procedural/`, `tools/visual/` | avatar pack baker, procedural head builder, screenshot and compare tools |
 | `tools/voicefx/` | renders the voice characters offline with the app's own DSP (demos, tuning) |
@@ -192,6 +225,7 @@ Settings live in `%APPDATA%\Lawnmower Man\settings.json` (Linux: `~/.config/Lawn
 * **"Local voice is not fully installed (missing: uvicorn)"**: an earlier setup stopped halfway. The app does not keep restarting the voice server in that state. Open *Settings › Voice*: the last lines of the failed step (pip's `ERROR: …`) are shown there, and **Open setup log** opens the whole log. Fix what it says (often: network, disk space, or a file locked by another program), then choose *Set up local voice again…*. If it fails again, send `setup.log`.
 * **Voice is slow the first time**: on RTX 50-series GPUs, the first Whisper GPU run compiles kernels once (30–90 s). After that it is fast.
 * **More voice issues** (driver, "no kernel image", cuDNN, CPU fallback): see [docs/VOICE.md § Troubleshooting](docs/VOICE.md#5-troubleshooting).
+* **Home camera: "Sign-in failed", offline, turns the wrong way, no notifications**: see the table in [docs/TAPO.md § Troubleshooting](docs/TAPO.md#7-troubleshooting). The app never retries a wrong camera password by itself (so the camera does not lock you out): fix it in the camera window's setup and press **Test connection**.
 * **"The camera is blocked"**: in Windows *Settings › Privacy & security › Camera*, turn on **Camera access** and **Let desktop apps access your camera**, then press **Try again** on the card. "In use": close Teams, Zoom, the Camera app or a video call in the browser. More in [docs/CAMERA.md](docs/CAMERA.md#when-the-camera-does-not-start).
 
 ## Credits

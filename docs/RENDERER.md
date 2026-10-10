@@ -66,12 +66,13 @@ each an articulatory target on seven channels, blended by dominance functions (C
 the lips own m/b/p (press) and f/v (tuck), the jaw owns the vowels, rounding spreads ~120 ms ahead
 into the consonants before an O / U (unless a spread vowel is in between), an h or a schwa takes
 its neighbours' shape, and a closure is dominant enough that a 50 ms "m" still closes (press ≥ 0.8,
-jaw ≤ 0.06). A closure passed between two frames is shown, and the director closes the jaw fast
-into it, so it also closes on screen at 30 fps.
+jaw ≤ 0.12: the lips do most of the closing, the jaw stays partly open between open vowels as it
+does in speech). A closure passed between two frames is shown, and the director closes the jaw
+fast into it, so it also closes on screen at 30 fps.
 
 | Source | Mouth |
 |---|---|
-| local voice (Kokoro) | the server's viseme timeline (aligned with the audio by the server, [VOICE.md](VOICE.md#21-http-api)) at the playback clock (smoothed, see [Motion](#motion)) + 58 ms visual lead, and the clip's own audio (the player's decoded buffer, or its WAV): the loudness envelope opens the jaw, sampled a moment ahead so a syllable's onset opens it as sharply as the sound starts; each vowel's jaw is scaled by its measured loudness and length (stressed syllables wider, reduced ones less); every sound varies a little (jaw ±8 %, spread, rounding), so repeated syllables are never identical; a phrase-final sound rests where the voice really stops (Kokoro holds a final "d" ~200 ms into the pause) |
+| local voice (Kokoro) | the server's viseme timeline, re-timed on the clip's own sound and given per-vowel amounts from its formants (below), at the playback clock (smoothed, see [Motion](#motion)) + 40 ms visual lead for the lips, 60 ms for the jaw (58 ms for both until the analysis is back), and the clip's own audio (the player's decoded buffer, or its WAV): the loudness envelope opens the jaw, sampled a moment ahead so a syllable's onset opens it as sharply as the sound starts; each vowel's jaw is scaled by its measured loudness and length (stressed syllables wider, reduced ones less); every sound varies a little (jaw ±8 %, spread, rounding), so repeated syllables are never identical; a phrase-final sound rests where the voice really stops (Kokoro holds a final "d" ~200 ms into the pause) |
 | system voice (Web Speech) | the utterance's words → phonemes (`g2p.js`: a ~500-word exception dictionary incl. "Claude", NRL letter-to-sound rules, stress, numbers, acronyms) → a timed plan (stressed vowels long, closures ≥ 50 ms, phrase-final lengthening, rests at punctuation that ends a word; a mark inside a token — `package.json`, `github.com`, `10:30` — is read straight through, with a spoken "dot" between letters). Word-boundary events (`charIndex`) anchor each word; between them the plan runs at a speed learned from the boundaries (per utterance rate); an early boundary compresses the rest of the word, a late one holds the word's last sound (or waits at rest in a pause). Voices without boundary events play the whole plan from `onstart`, and the next utterance uses the tempo the last one turned out to have. A voice that has not reported its start after 0.6 s is assumed to have started; when its real `onstart` (or first boundary) comes later, the mouth re-anchors there instead of leading the voice, and no tempo is learned from the guess. |
 | audio without visemes | RMS → jaw (noise gate), band ratios → spread / round, quiet hiss → teeth |
 
@@ -81,6 +82,28 @@ which the director turns into small nods, phrase lifts, a brow raise and head ti
 blinks at phrase boundaries rather than mid-word, and a micro-smile after a friendly sentence. All
 of it is pure and unit-tested (`tests/unit/app/{g2p,articulation,lipsync}.test.js`,
 `tests/unit/avatar/{director-speech,mouth-rig}.test.js`).
+
+**Listening to the voice (local voice).** The viseme timeline gives the categories (closed,
+tucked, spread, rounded, open); the sound gives the timing and the amounts. Each clip's WAV is
+analysed in a Web Worker (`src/audio/acoustics-worker.js` → `acoustics.js`; `acoustics-client.js`
+falls back to the main thread only where there is no Worker, e.g. Node): every 5 ms its loudness,
+a low band (< 400 Hz, the nasal murmur of m / n), a high band (> 3 kHz), voicing, and F1-F3 by LPC
+(order 14 at ~12 kHz, Levinson-Durbin, roots warm-started; F1 within 2-3 % of a numpy reference
+on the clips). The first 0.8 s are posted at once, the rest when done (~30 ms per 5 s of speech);
+the controller starts it when the speech queue has synthesised a clip, before it plays.
+`src/audio/fusion.js` (0.15-0.25 ms per clip, compiled at idle) then:
+
+| Step | What it does |
+|---|---|
+| landmarks | phrase onsets (the first frame within 22 dB of the phrase's peak); closures (m b p) and tucks (f v) between two vowels: the level dip below half its depth, only a true local minimum overlapping the segment (not the next consonant of a cluster) |
+| time warp | a monotonic piecewise-linear warp of the timeline onto them (slopes 0.4-2.5, at most 90 ms), so the segments stay contiguous; anchored closures are marked `exact` and get crisper lip edges |
+| amounts | per vowel: jaw from F1 (normalised to the voice's own range: the 12th-88th percentile of its vowels heard so far, from a prior by pitch), bounded per category (`JAW_RANGE`: U 0.04-0.3 … aa 0.3-0.95); spread from F2 (front vowels); stress from loudness and length (×0.62-1.18; reduced front vowels lose spread and teeth); rounded vowels 82-100 % rounded |
+
+Result on 36 real clips (af_heart, am_michael, bf_emma × six sentences × speeds 0.9 / 1.1), the
+relief head's aperture at the centre of each vowel: r(aperture, F1) 0.34 → 0.66; open vs close
+vowels 1.39x → 1.72x; stressed vs unstressed 1.45x → 1.61x. Before, the rounded vowels opened the
+most (ɔ / o 58-61 px, ahead of the open vowels' 50 px); now ɑ 52, æ 45, ɔ / o 40, ɪ / i 24-26,
+ʊ / u 21-24 px.
 
 **Prosody from the voice itself (local voice).** For a clip with audio, `src/audio/prosody.js`
 measures the loudness envelope (all at once, under a millisecond) and the pitch: YIN on a 1 kHz
@@ -96,7 +119,7 @@ text's for these clips:
 |---|---|---|
 | `inhale` | the silence before the first phrase and pauses ≥ 0.22 s, sized to the time left | nostrils flare, free lips part a little, the head and chest lift; breathing while speaking follows the pauses |
 | `phrase-start` | each run of speech between rests ≥ 100 ms | a small lift; some phrases start with a glance away |
-| `accent` | vowels whose pitch peak (re the speaker's usual pitch), rise, loudness and length beat the vowels within 0.3 s | a nod (varying in size) |
+| `accent` | vowels whose pitch peak (re the speaker's usual pitch), rise, loudness and length beat the vowels within 0.3 s | a phrase's strongest (nuclear) accent nods; weaker ones nod with a probability that grows with their strength, otherwise give a small turn / tilt beat, a brow flick, or nothing; nod sizes vary log-normally (±30 %), so the head never bobs once per stressed word |
 | `emphasis` | an accent ≥ 5 semitones above the usual pitch, rising ≥ 3 | brows lift, a firmer nod |
 | `phrase-end` | where the voice stops, with its final fall / rise (semitones), the pause after it and the text's punctuation | a fall settles the head (final lowering); a question or a rising end lifts the brows and tilts the head; eye contact again; a blink when the pause is real |
 
@@ -126,17 +149,32 @@ still while speaking. The face coupling is anatomy, so it keeps 40 % at 0.
 
 ![Mouth film strip of "Maybe we should move the meeting to Friday?" (Kokoro af_heart): before (top) and after (bottom)](screenshots/speech_real_voice.jpg)
 
-Timing, measured end to end on 12 real Kokoro clips with `tools/visual/lipsync-align.mjs` (the
-rendered mouth of LipSync + director at 60 Hz vs the audio; negative = the mouth leads):
+Timing, measured end to end with `tools/visual/lipsync-align.mjs` (the rendered mouth of LipSync
++ director + the relief head's rig at 60 Hz vs the audio; negative = the mouth leads), medians:
 
-| | before | after |
-|---|---|---|
-| fullest m / b / p closure vs the level dip | +12 ms | -35 ms |
-| jaw opening after a pause vs the acoustic onset | -6 ms | -52 ms |
-| jaw / level correlation lag | +17 ms | -33 ms |
+| | v0.2 | v0.3 | v0.4 |
+|---|---|---|---|
+| lips sealed (aperture < 1 px) vs the acoustic closure, start: median [IQR], 36 clips | | -32 [-37, -25] ms | -30 [-32, -25] ms |
+| ... end | | -15 [-22, +2] ms | -20 [-22, -15] ms |
+| ... start / end, the 12 clips of v0.3 | | -35 / -20 ms | -35 / -20 ms |
+| fullest m / b / p closure vs the level dip, 12 clips | +12 ms | -33 ms | -38 ms |
+| jaw opening after a pause vs the acoustic onset, 36 clips | | -53 ms | -49 ms |
+| m / b / p sealed (all of them, at Kokoro's phoneme times, 36 clips) | | 78 / 78 | 78 / 78 |
 
-The display adds one to two frames of its own, so on screen the closures land within a few ms of
-the sound instead of ~40 ms after it.
+(36 clips: af_heart, am_michael, bf_emma, six sentences each, speeds 0.9 and 1.1; the closures the
+tool scores are the m / b / p between vowels with a clear level dip.) The display adds one to two
+frames of its own, so on screen the seal lands within ~15 ms of the sound. The timing barely changed on average (it was right on average in v0.3); its spread did: the
+fused timeline puts each closure on its own sound instead of on a 25 ms timeline frame.
+*Settings → Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`, ±200 ms) shifts it for audio
+devices with an unreported delay (Bluetooth); **Test lip-sync** says a line of m / b / p to judge it
+by ([VOICE.md](VOICE.md#23-lip-sync-in-the-renderer)).
+
+Kinematics (36 clips, director springs `MOUTH_OMEGA`, `LIP_CONTACT`): the lips approach a closure
+over ~60 ms (the press spring rises at 48 rad/s, starting `LIP_CLOSE_EARLY` = 28 ms sooner than it
+falls) and meet at speed (contact at 80 % of the spring's way), then part abruptly (100 rad/s): the
+largest one-frame change of the relief head's aperture went from 45 px (a wide-open vowel snapping
+shut) to 31 px, its p99 from 18 to 17 px; the aperture's p95 closing / opening speed ratio is
+0.86-0.96 (0.72 before: the mouth opened fast and drifted shut).
 
 ![The fourteen visemes on the relief and the procedural head](screenshots/mouth_visemes.jpg)
 
@@ -149,10 +187,19 @@ curves that close into the seam without a kink over the last quarter of the way 
 beside an O); the parted lips' inner edges roll into the mouth (a soft shadow, a thin moist highlight) and
 the cavity darkens with depth. Its mouth region is refined to <= 6 px triangles at load (new
 vertices on the baked edges, so the rest render is unchanged), which keeps those curves smooth at a
-60 px jaw drop. It closes pressed lips over a slightly open jaw and thins them (the lip
+60 px jaw drop. The opening's outline follows the vowel: a slender almond for a small or rounded
+opening, rounder-ended and flatter in the middle for an open or spread one (`uLens` z / w: the
+lens profile's exponents for the upper and the lower lip), and the corners draw in a little as the
+jaw drops (by its square), so a wide-open mouth is not a slot. The teeth belong to the jaw
+(`heads/teeth.js`, shared by both heads): the upper incisors show with the parted lips (less
+behind rounded ones), the lower teeth only once the jaw has dropped (or for an ee / s), never
+behind pressed or tucked lips. It closes pressed lips over a slightly open jaw and thins them (the lip
 texture is compressed toward the seam and the rest gap skipped; the shapes' parting fades with the
 square of the press, so a press that is only half released still holds the lips together), brings a tucked lower lip up under
-the incisors (which fill the small opening), raises the upper lip for teeth (the incisors follow),
+the incisors for f / v: the upper lip keeps half of the neighbouring vowel's lift and the opening
+narrows by 20 %, so a narrow band of incisor crowns shows over the lower lip (the cavity shader
+fills it from the mouth texture's incisor rows, found at load, `incisorBand`), not a dark slot;
+it raises the upper lip for teeth (the incisors follow),
 draws a dim tongue tip at the teeth, pulls the corners in for round and out for spread, and tilts
 them slightly with `mouthAsym`. The procedural head does the same in its vertex rig and cavity
 shader; the placeholder maps wide / round / press onto its mouth line.

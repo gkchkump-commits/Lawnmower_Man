@@ -253,16 +253,53 @@ Without `--token` or `LAWNMOWER_VOICE_TOKEN`, a token is generated and included 
 
 ### 2.3 Lip-sync in the renderer
 
-`src/audio/lipsync.js` samples the timeline at the playback clock with a 50 ms visual lead and
-blends neighbouring visemes with the renderer's coarticulation model (`src/audio/articulation.js`,
-dominance functions): closures (`PP`) and tucks (`FF`) stay crisp even when they are only 50 ms
-long, and rounding (`O`, `U`) is anticipated by up to ~120 ms. The renderer also analyses the
-clip's own audio (`src/audio/prosody.js`): its loudness envelope opens the jaw (stressed, louder
-syllables wider), its pitch drives nods, brows, phrase-final lowering and breaths, and a
-phrase-final sound rests where the voice really stops. The 14 viseme ids and the WAV are the
-whole interface. Measured end to end with `tools/visual/lipsync-align.mjs` on real Kokoro clips,
-the rendered mouth now leads the sound by ~35 ms at closures (it trailed by ~12 ms before), which
-the display's own latency (one to two frames) brings close to zero on screen.
+`src/audio/lipsync.js` samples the timeline at the playback clock and blends neighbouring visemes
+with the renderer's coarticulation model (`src/audio/articulation.js`, dominance functions):
+closures (`PP`) and tucks (`FF`) stay crisp even when they are only 50 ms long, and rounding (`O`,
+`U`) is anticipated by up to ~120 ms. The 14 viseme ids and the WAV are the whole interface.
+
+**The sound decides the timing and the amounts.** The timeline says *which* shape (closed,
+tucked, spread, rounded, open); the clip's own audio says *when* and *how much*. When a clip
+arrives (the speech queue's `ready`, before it plays), a Web Worker (`src/audio/acoustics-worker.js`)
+analyses its WAV every 5 ms (`src/audio/acoustics.js`): loudness, a low band (< 400 Hz: the murmur
+of m n), a high band (> 3 kHz: frication), voicing, and the first three formants by LPC (order
+14, autocorrelation + Levinson-Durbin, the roots warm-started from the previous frame). The first
+0.8 s come back at once, the rest ~30 ms later for a 5 s clip; the main thread does nothing heavy.
+`src/audio/fusion.js` then:
+
+* warps the timeline monotonically onto the sound's landmarks: each phrase starts where its sound
+  starts, and an m / b / p or f / v between two vowels sits on its acoustic closure (the level dip
+  below half its depth; a dip that is not a local minimum inside the segment, e.g. the next
+  consonant of a cluster, is not used); boundaries move at most 90 ms;
+* gives every vowel its own amounts: the jaw from its F1 (open vowels 2-3x a close one), normalised
+  per voice (the formant range of the vowels heard so far in that voice, starting from a prior by
+  pitch), bounded by the viseme's category (`JAW_RANGE`: a U never opens like an aa); spread from
+  F2 for front vowels; stress from loudness and length (a stressed vowel opens ~1.6x a reduced
+  one; a reduced front vowel is neither spread nor toothy); stressed oo / o fully rounded;
+* samples the lips 40 ms ahead and the heavier jaw 60 ms ahead (`FUSED_LEAD`); the lips start
+  closing 28 ms sooner than they part (`LIP_CLOSE_EARLY`), so a closure is a ~60 ms approach that
+  meets at speed and a release that bursts.
+
+The loudness envelope still opens the jaw a moment ahead of each syllable, and the pitch drives
+nods, brows, phrase-final lowering and breaths (`src/audio/prosody.js`). A clip that starts before
+its analysis is back plays its first moments from the timeline alone; the system voice has no WAV
+and keeps the timeline-only path.
+
+**Timing.** Measured end to end with `tools/visual/lipsync-align.mjs` (LipSync + director +
+the relief head's rig at 60 Hz in Node) on real Kokoro clips (af_heart, am_michael, bf_emma; six
+sentences each at speeds 0.9 and 1.1, and the 12 clips of v0.3): the lips seal 22-35 ms before the
+acoustic closure starts and part 15-20 ms before it ends (all of them seal), the same at 144 Hz and
+with Windows' 10 ms audio clock. The display shows a frame one to two refreshes after it is
+rendered, so on screen the seal lands within ~15 ms of the sound. A mouth slightly early is also
+what people tolerate best (ITU-R BT.1359: sound ahead of the picture is noticed from ~45 ms, sound
+behind it only from ~125 ms).
+
+**Lip-sync timing (offset).** *Settings → Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`,
+-200..+200 ms, default 0) moves the mouth later (+) or earlier (-) for devices whose delay the
+browser does not report (Bluetooth headphones and some USB or HDMI audio play 100-250 ms late:
+try +100 to +200). **Test lip-sync** says a line full of m / b / p and pauses ("Bob, pop by at
+five. Maybe my mom made muffins."), so the lips' closures are easy to judge. The offset applies to
+both voices.
 
 When the local voice is not running, the system voice speaks and there is no timeline: the
 renderer predicts one from the words (`src/audio/g2p.js`) and anchors it on the voice's word
@@ -496,6 +533,7 @@ Start with `voice\.venv\Scripts\python -m lawnmower_voice.doctor --smoke --human
 | Port or start-up problems | The server prints `{"event":"ready",...}` only after binding, and exits non-zero if the port is taken. The app chooses a free port. Logs go to stderr, and the Electron log keeps the tail. |
 | The voice sounds unprocessed although *Character* is Synth, Vocoder or Robot | The system voice is speaking (only the local voice can be processed), or the effect could not start: the renderer then logs `[player] the voice character effect is unavailable (…)` (DevTools with F12 in a dev build, or `main.log` with `LAWNMOWER_DEBUG=1`). The voice keeps working unprocessed; restart the app. |
 | The synthetic voice is too much, or not enough | *Settings → Voice → Intensity*, or another *Character*; Natural turns it off. |
+| The mouth moves before or after the voice (often with Bluetooth headphones) | *Settings → Voice → Lip-sync timing*: + moves the mouth later (Bluetooth: try +100 to +200 ms), then **Test lip-sync** and watch the lips close on the b / p / m. |
 | *Server: disabled* — "Local voice is not fully installed (missing: uvicorn)" | The venv exists but the setup stopped before the packages were installed (the server reports `{"event":"not-installed","missing":[…]}` and exits with code 2). The app does not restart it in a loop; it waits for *Set up local voice again…*, *Restart voice* or a changed setting. Find out why the setup stopped in its log (5.1), fix that, run the setup again. |
 
 ### 5.1 When the setup fails

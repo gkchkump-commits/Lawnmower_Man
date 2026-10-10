@@ -95,8 +95,12 @@ describe('TapoService', () => {
     await until(() => win.count('hello') === 1);
     expect(win.received[0]).toEqual({ t: 'hello', detector: 'stub', wasmBase: 'app://lawnmower/assets/vision/wasm/', modelUrl: 'app://lawnmower/assets/security/efficientdet_lite0_int8.tflite' });
     await until(() => r.service.status().detector.state === 'on');
+    // the worker learns whether the window shows the picture (the page cannot tell it is hidden)
+    expect(win.received.filter((m) => m.t === 'view')).toEqual([{ t: 'view', visible: false }]);
     r.service.setViewVisible(true);
+    r.service.setViewVisible(true); // no repeat for the same state
     await until(() => win.count('chunk') >= 10);
+    expect(win.received.filter((m) => m.t === 'view')).toEqual([{ t: 'view', visible: false }, { t: 'view', visible: true }]);
     const cfg = win.received.find((m) => m.t === 'config');
     expect(cfg).toMatchObject({ codec: 'avc1.64001f', width: 160, height: 90 });
     expect(cfg.description).toBeInstanceOf(ArrayBuffer);
@@ -107,6 +111,8 @@ describe('TapoService', () => {
     r.service.setViewVisible(false);
     expect(r.relay.needed).toBe(false);
     await until(() => win.count('idle') >= 1);
+    await until(() => win.count('view') === 3);
+    expect(win.received.filter((m) => m.t === 'view').at(-1)).toEqual({ t: 'view', visible: false });
     // a replacement port closes the old one
     const old = win.port;
     r.service.attachWorker(win);

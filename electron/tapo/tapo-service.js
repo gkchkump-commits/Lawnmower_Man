@@ -460,9 +460,17 @@ export class TapoService extends EventEmitter {
     this._post({ t: 'chunk', gen: s.gen, key: s.key, ts: Math.round((s.pts * 1e6) / ts), dur: Math.round((s.duration * 1e6) / ts), data: toArrayBuffer(s.data) });
   }
 
-  /** The camera window's canvas is visible (shown and not minimized). @param {boolean} visible */
+  /**
+   * The camera window's canvas is visible (shown and not minimized). The worker is told too
+   * ({ t: 'view' }): the page cannot see that its window is hidden (backgroundThrottling is off),
+   * and a hidden window need not draw frames while an armed camera keeps decoding.
+   * @param {boolean} visible
+   */
   setViewVisible(visible) {
-    this._viewVisible = !!visible;
+    const v = !!visible;
+    const changed = v !== this._viewVisible;
+    this._viewVisible = v;
+    if (changed) this._post({ t: 'view', visible: v });
     this._updateStream();
   }
 
@@ -493,6 +501,7 @@ export class TapoService extends EventEmitter {
     const a = this._deps.assets || { wasmBase: '', modelUrl: '' };
     this._post({ t: 'hello', detector: this._deps.detector === 'stub' ? 'stub' : 'mediapipe', wasmBase: a.wasmBase, modelUrl: a.modelUrl });
     this._postArmed();
+    this._post({ t: 'view', visible: this._viewVisible });
     if (this.ptzCtl) this._post({ t: 'ptz', moving: this.ptzCtl.moving, settleUntil: this.ptzCtl.settleUntil });
     const init = this.relay.init;
     if (init && this.relay.state === 'live') this._post({ t: 'config', gen: this.relay.gen, codec: init.codec, description: toArrayBuffer(init.description), width: init.width, height: init.height });

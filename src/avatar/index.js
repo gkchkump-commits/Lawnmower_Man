@@ -145,7 +145,7 @@ export async function createAvatar(canvas, options = {}) {
       }
     }
     head?.update(dt, time, a);
-    particles?.update(dt, time, a);
+    particles?.update(dt, time, a, settle);
     if (projector?.mesh.visible) projector.update(time, a);
     post?.update(a);
   }

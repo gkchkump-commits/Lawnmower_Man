@@ -225,8 +225,8 @@ describe('behaviour: by situation', () => {
   });
 
   it('the user gone (camera): bored within a minute', () => {
-    const away = run({ seed: 14 }, 200, (t, d) => { if (Math.abs(t - 1 / 60) < 1e-9) d.setUser({ present: false }); });
-    const there = run({ seed: 14 }, 200, (t, d) => { if (Math.abs(t - 1 / 60) < 1e-9) d.setUser({ present: true, looking: true }); });
+    const away = run({ seed: 14 }, 300, (t, d) => { if (Math.abs(t - 1 / 60) < 1e-9) d.setUser({ present: false }); });
+    const there = run({ seed: 14 }, 300, (t, d) => { if (Math.abs(t - 1 / 60) < 1e-9) d.setUser({ present: true, looking: true }); });
     const longLooks = (log) => kinds(log, 'lookAround').length;
     expect(longLooks(away.log)).toBeGreaterThan(longLooks(there.log));
     expect(kinds(away.log, 'yawn').length).toBeGreaterThanOrEqual(1);

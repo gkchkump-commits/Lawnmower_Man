@@ -73,6 +73,11 @@ describe('the aura turns with the head (parallax)', () => {
     expect(yawOf()).toBeGreaterThan(0.17);           // half a second: nearly there
     expect(p.uniforms.uHeadXform.value.z).toBeGreaterThan(1.02);
     expect(p.uniforms.uHeadPivot.value.toArray()).toEqual([0, -0.05, -0.03]);
+    // a live frame rendered without a step (the harness's advance(0)) keeps the state
+    const held = yawOf(), pt = p.uniforms.uPTime.value;
+    p.update(0, 9, { ...a, headYaw: -0.3 }, false);
+    expect(yawOf()).toBeCloseTo(held, 9);
+    expect(p.uniforms.uPTime.value).toBe(pt);
     const q = new Particles({ maxCount: 10, count: 10, seed: 1, palette: { wisp: 0x1ec5ff, mote: 0xffc394 } });
     q.update(0, 5, a);
     expect(Math.asin(-q.uniforms.uHeadRot.value.elements[2])).toBeCloseTo(0.2, 6);

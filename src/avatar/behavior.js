@@ -115,7 +115,9 @@ const KINDS = {
       const more = small ? 0 : r() < 0.3 ? (r() < 0.2 ? 2 : 1) : 0;
       for (let i = 0; i < more; i++) {
         const p = fix[fix.length - 1];
-        fix.push({ x: p.x + side * (2 + 5 * r()) * (r() < 0.25 ? -1 : 1), y: p.y + (r() - 0.5) * 5, d: logNormal(r, 0.9, 0.4, 0.35, 3) * (1 + c.bored) });
+        // (never beyond 24 deg: the eyes stay in their range with the head's share)
+        const nx = clamp(p.x + side * (2 + 5 * r()) * (r() < 0.25 ? -1 : 1), -24, 24);
+        fix.push({ x: nx, y: p.y + (r() - 0.5) * 5, d: logNormal(r, 0.9, 0.4, 0.35, 3) * (1 + c.bored) });
       }
       // the head goes along with a good share of a look into the room (more when bored)
       return withHead({ fix, share: 0.3 + 0.12 * r() + 0.08 * c.bored, blink: amp > 11 && r() < 0.35 });
@@ -292,7 +294,7 @@ const KINDS = {
   yawn: {
     // bored: the mouth opens slowly with the eyes narrowing, the head tilts back, a deep breath
     tracks: ['face', 'head', 'breath'], refr: 110,
-    rate: (c) => (c.state === 'idle' && !c.typing && c.bored > 0.3 ? 0.45 * c.bored * c.bored : 0),
+    rate: (c) => (c.state === 'idle' && !c.typing && c.bored > 0.3 ? 0.7 * c.bored * c.bored : 0),
     make: (r) => {
       const a = 1.4 + 0.5 * r(), h = 0.7 + 0.7 * r(), rel = 1.1 + 0.4 * r();
       return { dur: a + h + rel + 0.2, a, h, rel, jaw: 0.42 + 0.18 * r(), back: 2.5 + 1.5 * r(), roll: (r() - 0.5) * 3 };
@@ -400,7 +402,7 @@ function postureBias(c, side) {
   if (c.state === 'listening') { b[1] = -1.0; b[2] = 1.3 * side; b[4] = 0.55; }
   else if (c.state === 'thinking') { b[4] = -0.15; }
   else if (c.state === 'idle') {
-    if (c.typing) { b[1] = -0.8; b[4] = 0.3; }
+    if (c.typing) { b[1] = -0.8; b[4] = 0.4; }
     else if (c.present && c.looking) b[4] = 0.22;
     // bored: slumping a little
     b[1] -= 1.3 * c.bored; b[4] -= 0.3 * c.bored;
@@ -616,8 +618,10 @@ export class Behavior {
         const R = rates.reduce((s, [, r]) => s + r, 0) * L;
         if (Number.isNaN(this._next[track])) {
           const from = Number.isFinite(this._freeAt[track]) && this._freeAt[track] <= t ? this._freeAt[track] : t;
-          // (a gamma(2) wait: random, but fewer very short or very long gaps than a pure Poisson)
-          this._next[track] = R > 0 ? from + 0.25 - (30 / R) * Math.log(Math.max(1e-9, this.rng() * this.rng())) : Infinity;
+          // (a gamma(2) wait: random, but fewer very short or very long gaps than a pure Poisson;
+          // the first one in a new state is half as long: settling into it, a person adjusts)
+          const settle = t - this._stateAt < 1 ? 0.5 : 1;
+          this._next[track] = R > 0 ? from + 0.25 - settle * (30 / R) * Math.log(Math.max(1e-9, this.rng() * this.rng())) : Infinity;
           continue;
         }
         const at = this._next[track];
@@ -668,7 +672,7 @@ export class Behavior {
       const ks = Math.min(1, L);
       this._postTarget = [
         (gauss(r) * 1.5 * A + b[0] * ks) * RAD, (gauss(r) * 0.8 * A + b[1] * ks) * RAD, (gauss(r) * 1.3 * A + b[2] * ks) * RAD,
-        clamp(gauss(r) * 0.35 * A + b[3] * ks, -1, 1), clamp(gauss(r) * 0.2 * A + b[4] * ks, -1, 1),
+        clamp(gauss(r) * 0.35 * A + b[3] * ks, -1, 1), clamp(gauss(r) * 0.13 * A + b[4] * ks, -1, 1),
       ];
       this._postOmega = 1.5 + 1.1 * r();
       // (from the scheduled time, not the frame's)

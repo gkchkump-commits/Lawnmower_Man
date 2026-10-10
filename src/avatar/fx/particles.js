@@ -548,15 +548,17 @@ export class Particles {
   /**
    * @param {number} dt @param {number} time
    * @param {import('../director.js').AnimState} a
+   * @param {boolean} [settle] a fixed-time render: everything a function of time (default: dt 0).
+   *   A live frame rendered without a step (dt 0, not settled) keeps the state as it is.
    */
-  update(dt, time, a) {
+  update(dt, time, a, settle = !(dt > 0)) {
     const u = this.uniforms;
     // Integrate particle time so speed changes never make the field jump.
     const speed = (1 - 0.72 * a.sleep) * (1 + 0.6 * a.think + 0.35 * a.speak * a.speech) * (1 + 0.5 * a.listen);
     if (dt > 0) {
       this._pt += dt * speed;
       this._swirl += dt * 0.32 * a.think;
-    } else {
+    } else if (settle) {
       // fixed-time renders: a deterministic function of time
       this._pt = time;
       this._swirl = 0;
@@ -566,7 +568,7 @@ export class Particles {
     for (let k = 0; k < 5; k++) {
       const s = this._follow[k];
       if (dt > 0) springStep(s, tgt[k], 12, dt);
-      else { s.x = tgt[k]; s.v = 0; }
+      else if (settle) { s.x = tgt[k]; s.v = 0; }
     }
     const f = this._follow;
     u.uHeadRot.value.fromArray(yprMatrix(f[0].x, f[1].x, f[2].x, this._rot));

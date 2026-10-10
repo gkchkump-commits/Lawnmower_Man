@@ -164,8 +164,9 @@ const HEAD_SHARE_FOLLOW = 0.38;
 const SETTLED_GY = 6.78 / GAZE_DEG.y;
 const WEIGHTED = /** @type {const} */ (['listening', 'thinking', 'speaking', 'error', 'sleep']);
 const WEIGHT_OMEGA = { listening: 8, thinking: 8, speaking: 8, error: 14, sleep: 3.2 };
-/** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
+/** No blink starts within this long (s) of the last one (requested and gaze-evoked ones neither). */
 const BLINK_REFRACTORY = 0.8;
+/** Blink interval medians (s) by state (log-normal, sigma 0.6, 0.8 s refractory). */
 const BLINK_MEDIAN = { idle: 2.8, listening: 4.0, thinking: 2.4, speaking: 2.3, error: 2.6, sleep: 3 };
 /** Idle sway (rad, rms: pinkNoise has unit rms): 1/f-like noise from 0.1 Hz (yaw, pitch) and
  * 0.09 Hz (roll) up, 1 deg yaw, 0.45 pitch, 0.26 roll (over 2 min: ~0.8 / 0.45 / 0.25 deg rms,

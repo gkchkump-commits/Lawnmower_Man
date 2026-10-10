@@ -615,6 +615,14 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
   `vendor/go2rtc/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy it
   to `resources/tapo/go2rtc(.exe)` with `resources/tapo/go2rtc-LICENSE.txt`. The person detector
   model is committed in `public/assets/security/` and ships in `app.asar`.
+* **Known issue (software GL):** the camera worker samples frames with `createImageBitmap` +
+  `getImageData` (motion, calibration shift). Without a GPU (SwiftShader under xvfb, CI) that
+  readback is a synchronous round trip to the GPU process and, on a loaded machine, took 0.8 s
+  and in some tapo-e2e runs blocked the worker for ~16 s while the calibration dialog was open
+  (measured with temporary instrumentation; the integrator's a71cdd1 shows the same failure).
+  Main's chunk flow control keeps the backlog bounded and calibration then asks instead of
+  failing, but the e2e's "calibration finishes on its own" check can still fail on such a
+  machine. Reading the Y plane with `VideoFrame.copyTo()` (asynchronous) would avoid it.
 * **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
   Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
   `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the

@@ -52,6 +52,37 @@ describe('EventStore', () => {
     expect(await s2.remove('nope')).toBe(false);
   });
 
+  it('a snapshot right after the first record of a fresh store is kept (no race with the first scan)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-evs-'));
+    fs.mkdirSync(path.join(dir, '2026-10-09'));
+    fs.writeFileSync(path.join(dir, '2026-10-09', '120000-motion-zzzz.json'), JSON.stringify({ v: 1, id: '20261009-120000-zzzz', kind: 'motion', startedAt: '2026-10-09T10:00:00.000Z', sources: [] }));
+    const s = new EventStore({ getDir: () => dir });
+    const id = '20261010-140000-aaaa';
+    const rec = s.upsert({ id, kind: 'person', camera: 'c', startedAt: new Date(2026, 9, 10, 14, 0, 0).toISOString(), sources: [] });
+    const jpg = s.writeSnapshot(id, Buffer.from([0xff, 0xd8, 0xff, 0xd9])); // not awaiting the upsert
+    await rec;
+    expect(await jpg).toBe(path.join(dir, '2026-10-10', '140000-person-aaaa.jpg'));
+    expect(s.get(id)?.snapshot).toBe('2026-10-10/140000-person-aaaa.jpg');
+    expect((await s.list()).total).toBe(2);
+  });
+
+  it('a rescan keeps records written or removed while it runs', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-evs-'));
+    const s = new EventStore({ getDir: () => dir });
+    await s.upsert({ id: '20261010-140000-aaaa', kind: 'person', camera: 'c', startedAt: new Date(2026, 9, 10, 14, 0, 0).toISOString(), sources: [] });
+    await s.upsert({ id: '20261010-150000-bbbb', kind: 'motion', camera: 'c', startedAt: new Date(2026, 9, 10, 15, 0, 0).toISOString(), sources: [] });
+    const scan = s.scan();
+    const scan2 = s.scan();
+    expect(scan2).toBe(scan); // one shared scan
+    const write = s.upsert({ id: '20261010-160000-cccc', kind: 'tamper', camera: 'c', startedAt: new Date(2026, 9, 10, 16, 0, 0).toISOString(), sources: [] });
+    const gone = s.remove('20261010-150000-bbbb');
+    await Promise.all([scan, write, gone]);
+    expect([...(await s.list()).events.map((e) => e.id)].sort()).toEqual(['20261010-140000-aaaa', '20261010-160000-cccc']);
+    // a later patch merges with the full record (not a fresh one)
+    await s.upsert({ id: '20261010-160000-cccc', bytes: 10 });
+    expect(s.get('20261010-160000-cccc')).toMatchObject({ kind: 'tamper', bytes: 10, base: '2026-10-10/160000-tamper-cccc' });
+  });
+
   it('toSummary has no paths, only app:// URLs', () => {
     const sum = toSummary({ v: 1, id: '20261010-140000-aaaa', camera: 'c', kind: 'tamper', startedAt: '2026-10-10T12:00:00.000Z', sources: ['camera-tamper'], unconfirmed: true, notified: false, announced: false, described: '', acknowledged: false, base: '2026-10-10/140000-tamper-aaaa', clip: '2026-10-10/140000-tamper-aaaa.mp4', maxScore: 0.8312 });
     expect(sum).toEqual({ id: '20261010-140000-aaaa', kind: 'tamper', startedAt: Date.parse('2026-10-10T12:00:00.000Z'), sources: ['camera-tamper'], notified: false, announced: false, acknowledged: false, unconfirmed: true, maxScore: 0.83, clipUrl: 'app://lawnmower/__clips/2026-10-10/140000-tamper-aaaa.mp4' });

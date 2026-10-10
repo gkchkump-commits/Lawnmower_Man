@@ -115,17 +115,44 @@ export class EventStore extends EventEmitter {
     this._scannedDir = '';
     /** serialize writes per event @type {Map<string, Promise<void>>} */
     this._writes = new Map();
+    /** @type {Promise<void>|null} */
+    this._scanning = null;
+    /** ids written during the running scan @type {Set<string>|null} */
+    this._touched = null;
   }
 
   get dir() {
     return this._getDir();
   }
 
-  /** (Re)build the index from the .json files of the clips folder. */
-  async scan() {
+  /**
+   * (Re)build the index from the .json files of the clips folder. Concurrent calls share one
+   * scan; records written while it runs (or still being written) keep their in-memory state.
+   */
+  scan() {
+    if (this._scanning) return this._scanning;
     const dir = this.dir;
-    this._index.clear();
-    this._scannedDir = dir;
+    /** @type {Map<string, EventRecord>} */
+    const next = new Map();
+    /** @type {Set<string>} */
+    const touched = new Set();
+    this._touched = touched;
+    this._scanning = this._readAll(dir, next).then(() => {
+      if (dir === this._scannedDir) {
+        for (const [id, r] of this._index) if (touched.has(id) || this._writes.has(id)) next.set(id, r);
+        for (const id of touched) if (!this._index.has(id)) next.delete(id); // removed meanwhile
+      }
+      this._index = next;
+      this._scannedDir = dir;
+    }).finally(() => {
+      this._scanning = null;
+      this._touched = null;
+    });
+    return this._scanning;
+  }
+
+  /** @param {string} dir @param {Map<string, EventRecord>} into */
+  async _readAll(dir, into) {
     let days = [];
     try {
       days = (await this._fs.readdir(dir, { withFileTypes: true })).filter((d) => d.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(d.name)).map((d) => d.name);
@@ -145,7 +172,7 @@ export class EventStore extends EventEmitter {
           const r = JSON.parse(await this._fs.readFile(path.join(dir, day, f), 'utf8'));
           if (r && r.v === 1 && typeof r.id === 'string') {
             r.base = `${day}/${f.slice(0, -5)}`;
-            this._index.set(r.id, r);
+            into.set(r.id, r);
           }
         } catch (err) {
           this._log('debug', `[tapo] skipping ${day}/${f}: ${/** @type {Error} */ (err).message}`);
@@ -156,6 +183,11 @@ export class EventStore extends EventEmitter {
 
   async _ensureScanned() {
     if (this._scannedDir !== this.dir) await this.scan();
+  }
+
+  /** @param {string} id */
+  _touch(id) {
+    this._touched?.add(id);
   }
 
   /** @param {string} id */
@@ -185,6 +217,7 @@ export class EventStore extends EventEmitter {
     const rec = /** @type {any} */ ({ v: 1, sources: [], unconfirmed: false, notified: false, announced: false, described: '', acknowledged: false, ...(prev || {}), ...patch });
     if (!rec.base) rec.base = eventBase(rec.id, rec.kind);
     this._index.set(rec.id, rec);
+    this._touch(rec.id);
     await this._write(rec);
     this.emit('change', rec);
     return rec;
@@ -213,6 +246,8 @@ export class EventStore extends EventEmitter {
 
   /** Save the event's snapshot as <base>.jpg. @param {string} id @param {Buffer} jpeg */
   async writeSnapshot(id, jpeg) {
+    // the event's first record may still be on its way (the very first scan of the folder)
+    await this._ensureScanned();
     const rec = this._index.get(id);
     if (!rec) return null;
     const rel = `${rec.base}.jpg`;
@@ -242,6 +277,7 @@ export class EventStore extends EventEmitter {
     const rels = new Set([`${rec.base}.json`, `${rec.base}.jpg`, `${rec.base}.mp4`, ...(rec.clips || []), ...(rec.clip ? [rec.clip] : []), ...(rec.snapshot ? [rec.snapshot] : [])]);
     for (const rel of rels) await this._fs.rm(this.abs(rel), { force: true }).catch(() => {});
     this._index.delete(id);
+    this._touch(id);
     this.emit('remove', id);
     return true;
   }

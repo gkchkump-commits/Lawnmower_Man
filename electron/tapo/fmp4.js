@@ -240,11 +240,12 @@ export function rewriteFragment(fragment, o) {
     const tfdt = childBox(out, traf, 'tfdt');
     if (!tfdt) continue;
     const at = tfdt.start + tfdt.header + 4;
+    // (a negative baseTime moves the fragment later; the result is clamped to the field)
     if (out[tfdt.start + tfdt.header] === 1) {
-      const v = out.readBigUInt64BE(at) - BigInt(Math.max(0, Math.round(o.baseTime)));
+      const v = out.readBigUInt64BE(at) - BigInt(Math.round(o.baseTime));
       out.writeBigUInt64BE(v < 0n ? 0n : v, at);
     } else {
-      out.writeUInt32BE(Math.max(0, out.readUInt32BE(at) - Math.max(0, Math.round(o.baseTime))), at);
+      out.writeUInt32BE(Math.min(0xffffffff, Math.max(0, out.readUInt32BE(at) - Math.round(o.baseTime))), at);
     }
   }
   return out;

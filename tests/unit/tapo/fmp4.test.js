@@ -86,6 +86,15 @@ describe('fragments', () => {
     expect(got[0].seq).toBe(3);
     expect(got[0].dts).toBe(s.dts - r.samples[0].dts);
     expect(Buffer.compare(got[0].data, s.data)).toBe(0);
+    // a negative baseTime moves it later (a looped replay); never below 0
+    const later = rewriteFragment(s.fragment, { seq: 4, baseTime: -90000 });
+    const back = [];
+    const p2 = new Fmp4Parser();
+    p2.on('sample', (x) => back.push(x));
+    p2.push(r.init.initSegment);
+    p2.push(later);
+    p2.push(rewriteFragment(s.fragment, { seq: 5, baseTime: s.dts + 1e9 }));
+    expect(back.map((x) => x.dts)).toEqual([s.dts + 90000, 0]);
   });
 
   it('handles 64-bit box sizes and refuses boxes over 16 MB', () => {

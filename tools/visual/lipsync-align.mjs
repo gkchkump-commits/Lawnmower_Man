@@ -4,20 +4,26 @@
 // LipSync and Director at 60 Hz on a simulated playback clock, and the mouth they produce is
 // compared with the audio:
 //   closures  time of the fullest lip closure (m b p between vowels) vs the energy dip in the audio
+//   seal      the relief head's lips sealed (rendered aperture < 1 px, the pack's real rig) vs the
+//             acoustic closure (the dip below half its depth): when the seal starts and ends, and
+//             how many closures seal at all
 //   onsets    the jaw opening (> 0.08) after a pause vs the acoustic onset (-30 dB re peak)
 //   xcorr     lag of the best correlation between jawOpen and the audio level (dB)
 // Negative numbers: the mouth is EARLY (leads the sound), as it should be by a few tens of ms.
 //
-//   node tools/visual/lipsync-align.mjs <dir with name.wav + name.json> [--latency 0.02] [--json out.json]
+//   node tools/visual/lipsync-align.mjs <dir with name.wav + name.json> [--latency 0.02]
+//        [--offset ms] [--json out.json]
 //
 // --latency: the player's output latency (s): the analyser sees the audio that long before it is
 // heard; the playback clock (player.current.time) is compensated for it, as in AudioPlayer.
+// --offset: Settings > Voice > Lip-sync timing (voice.lipSyncOffsetMs; + = mouth later).
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Emitter } from '../../src/app/emitter.js';
 import { LipSync } from '../../src/audio/lipsync.js';
 import { decodeWav } from '../../src/audio/wav.js';
 import { Director } from '../../src/avatar/director.js';
+import { buildRig, rigUniforms } from '../../src/avatar/heads/relief/rig.js';
 
 const args = process.argv.slice(2);
 const dir = args.find((a) => !a.startsWith('--'));
@@ -27,6 +33,11 @@ if (!dir) {
   process.exit(1);
 }
 const LATENCY = Number(opt('latency', 0.02));
+const OFFSET = Number(opt('offset', 0)) / 1000;
+const SEAL_PX = 1;
+const packDir = new URL('../../public/assets/avatars/reference/', import.meta.url);
+const pack = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8'));
+const rig = buildRig(pack, JSON.parse(readFileSync(new URL(pack.files.mesh, packDir), 'utf8')));
 const FPS = 60;
 const HOP = 0.005;
 const VOWELS = new Set(['aa', 'E', 'I', 'O', 'U', 'RR']);
@@ -60,12 +71,14 @@ function simulate(clip, samples, sr) {
   };
   let now = 0;
   const ls = new LipSync({ player, now: () => now });
+  ls.setOffset?.(OFFSET);
   const dr = new Director({ seed: 1, idleMotion: 0 });
   dr.setState('speaking');
   const dt = 1 / FPS;
   const dur = samples.length / sr;
   const rec = [];
   const pre = 0.4;
+  const u = {};
   for (let f = 0; f * dt < dur + pre + 0.5; f++) {
     now = f * dt;
     const t = now - pre;
@@ -81,7 +94,9 @@ function simulate(clip, samples, sr) {
     dr.setSpeechLevel(m.level);
     if (m.cues) dr.setProsody(m.cues);
     const a = dr.update(dt, now);
-    rec.push({ t, jaw: a.jawOpen, press: a.mouthPress, tuck: a.mouthTuck });
+    rigUniforms(rig, a, u);
+    // the relief head's lip aperture at the mouth's centre (rigUniforms gives it in plate px)
+    rec.push({ t, jaw: a.jawOpen, press: a.mouthPress, tuck: a.mouthTuck, ap: u.open[0] + u.open[1] });
   }
   return rec;
 }
@@ -94,7 +109,8 @@ function stats(v) {
   return `n=${String(s.length).padStart(3)} median ${q(0.5).toFixed(1).padStart(6)} ms  mean ${mean.toFixed(1).padStart(6)}  IQR [${q(0.25).toFixed(0)}, ${q(0.75).toFixed(0)}]`;
 }
 
-const pooled = { closure: [], onset: [], xcorr: [] };
+const pooled = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: [] };
+let nSealed = 0, nClosures = 0;
 const perClip = [];
 for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
   const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'));
@@ -112,7 +128,7 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
     for (let j = i + 1; j < Math.min(db.length, i + 25); j++) rr = Math.max(rr, db[j]);
     if (Math.min(l, rr) - db[i] >= 8 && db[i] > -45) dips.push(i * HOP);
   }
-  const r = { closure: [], onset: [], xcorr: 0 };
+  const r = { closure: [], sealOn: [], sealEnd: [], onset: [], xcorr: 0 };
   const tl = meta.visemes;
   for (let i = 1; i + 1 < tl.length; i++) {
     const s = tl[i];
@@ -130,6 +146,37 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
         if (score > best) { best = score; tm = q.t; }
       }
       if (Number.isFinite(tm)) r.closure.push(tm - ta);
+      // the acoustic closure: the deepest level within 50 ms of the segment, flanked within 150 ms
+      // by sound at least 6 dB louder; it lasts while the level is below half the dip's depth (an
+      // m whose murmur keeps the level up has none, and is skipped: not a dip of a neighbour)
+      const i0 = Math.max(0, Math.round((s.start - 0.05) / HOP)), i1 = Math.min(db.length - 1, Math.round((s.end + 0.05) / HOP));
+      let k = i0;
+      for (let j = i0; j <= i1; j++) if (db[j] < db[k]) k = j;
+      let fl = -Infinity, fr = -Infinity;
+      for (let j = Math.max(0, k - 30); j <= k; j++) fl = Math.max(fl, db[j]);
+      for (let j = k; j <= Math.min(db.length - 1, k + 30); j++) fr = Math.max(fr, db[j]);
+      const flank = Math.min(fl, fr);
+      if (flank - db[k] >= 6 && flank >= -30) {
+        const half = db[k] + 0.5 * (flank - db[k]);
+        let a0 = k, a1 = k;
+        while (a0 > 0 && db[a0 - 1] < half) a0--;
+        while (a1 + 1 < db.length && db[a1 + 1] < half) a1++;
+        const on = a0 * HOP, off = (a1 + 1) * HOP;
+        // the sealed run of frames (aperture < SEAL_PX) nearest the dip
+        const runs = [];
+        for (const q of rec) {
+          if (q.t < on - 0.15 || q.t > off + 0.15 || q.ap >= SEAL_PX) continue;
+          const last = runs[runs.length - 1];
+          if (last && q.t - last[1] < 1.5 / FPS) last[1] = q.t; else runs.push([q.t, q.t]);
+        }
+        nClosures++;
+        if (runs.length) {
+          const best = runs.reduce((b, x) => (Math.abs(0.5 * (x[0] + x[1]) - k * HOP) < Math.abs(0.5 * (b[0] + b[1]) - k * HOP) ? x : b));
+          nSealed++;
+          r.sealOn.push(best[0] - on);
+          r.sealEnd.push(best[1] + 1 / FPS - off);
+        }
+      }
     }
     if (s.viseme !== 'sil' && tl[i - 1].viseme === 'sil' && tl[i - 1].end - tl[i - 1].start >= 0.1) {
       let ta = NaN;
@@ -157,13 +204,15 @@ for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
   }
   // + lag: jaw[i + lag] matches audio[i], i.e. the mouth comes AFTER the sound
   r.xcorr = bestLag / FPS;
-  for (const k of ['closure', 'onset']) pooled[k].push(...r[k]);
+  for (const k of ['closure', 'sealOn', 'sealEnd', 'onset']) pooled[k].push(...r[k]);
   pooled.xcorr.push(r.xcorr);
   perClip.push({ clip: basename(f, '.json'), ...r, r: bestR });
   console.log(`${basename(f, '.json').padEnd(22)} xcorr ${(r.xcorr * 1000).toFixed(0).padStart(4)} ms (r=${bestR.toFixed(2)})  closures ${stats(r.closure)}`);
 }
 console.log(`--- pooled, rendered mouth vs audio (- = mouth early), latency ${LATENCY * 1000} ms ---`);
 console.log(`closure ${stats(pooled.closure)}`);
+console.log(`seal on ${stats(pooled.sealOn)}  (sealed ${nSealed}/${nClosures})`);
+console.log(`seal end ${stats(pooled.sealEnd)}`);
 console.log(`onset   ${stats(pooled.onset)}`);
 console.log(`xcorr   ${stats(pooled.xcorr)}`);
-if (opt('json')) writeFileSync(opt('json'), JSON.stringify({ pooled, perClip }, null, 1));
+if (opt('json')) writeFileSync(opt('json'), JSON.stringify({ pooled, sealed: [nSealed, nClosures], perClip }, null, 1));

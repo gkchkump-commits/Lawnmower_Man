@@ -59,6 +59,14 @@ for (const boundaries of [true, false]) {
     // Wait on the voice, not on a frame count: how many frames fit into it depends on the machine.
     await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 4 && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
     await waitIdle(page);
+    // ...then Settings › Voice › Test lip-sync, a line full of m / b / p. A sealed closure lasts
+    // ~0.1 s and software WebGL may draw only 2-4 frames a second, so the greeting's few closures
+    // alone can all fall between frames; with this line's dozen, some frames land on them.
+    await page.locator('#btn-settings').click();
+    await page.getByRole('button', { name: 'Test lip-sync' }).click();
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => /muffins/.test(window.speechSynthesis.spoken.at(-1)) && !window.speechSynthesis.speaking, null, { timeout: 60_000 });
+    await waitIdle(page);
     const m = await page.evaluate(() => window.__mouth);
     expect(m.length).toBeGreaterThan(15); // sampled while speaking, even at a few fps
     const max = (k) => Math.max(...m.map((x) => x[k]));
@@ -71,13 +79,14 @@ for (const boundaries of [true, false]) {
     expect(cycles).toBeGreaterThan(4);
     const spoken = await page.evaluate(() => window.speechSynthesis.spoken);
     expect(spoken[0]).toMatch(/^Hello!/);
+    expect(spoken.join(' ')).toContain('Bob, pop by at five.');
     // at rest after the reply
     await expect.poll(() => page.evaluate(() => window.__app.avatar.animState().jawOpen)).toBeLessThan(0.02);
 
     // interrupted mid-reply: the mouth closes too
     await send(page, 'hello');
     await page.waitForFunction(() => document.body.dataset.state === 'speaking', null, { timeout: 30_000 });
-    await page.waitForFunction(() => window.speechSynthesis.spoken.length >= 6, null, { timeout: 30_000 });
+    await page.waitForFunction((n) => window.speechSynthesis.spoken.length >= n + 2, spoken.length, { timeout: 30_000 });
     await page.keyboard.press('Escape');
     await waitIdle(page);
     await expect.poll(() => page.evaluate(() => window.__app.avatar.animState().jawOpen)).toBeLessThan(0.02);

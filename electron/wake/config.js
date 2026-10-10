@@ -55,8 +55,11 @@ export const VAD_DEFAULTS = Object.freeze({ threshold: 0.5, minSpeechDuration: 0
 /**
  * The onset recipe (§7.5): a fresh stream at each VAD onset after ≥ quietMs without speech, fed
  * prerollMs of the audio before it; nothing fed hangoverMs after the last speech; a JADE hit counts
- * only when its first token lies within namePrefixMs of the stream start. maxStreamMs = 0: off
- * (tools/wake/eval-folder.mjs --max-stream-ms evaluates it). agcLookaheadMs: at an utterance onset
+ * only when its first token lies within namePrefixMs of the stream start. maxStreamMs = 0: off.
+ * 8000 was evaluated (tools/wake/eval-folder.mjs --max-stream-ms) on 100 min of long prose
+ * (Kokoro + MS-SNSD speech) with the 252 positives spliced in 0-0.1 s apart: it cut false wakes
+ * from 3 to 1 but lost recall (243 → 237 of 252), and on the clean stream it changed nothing
+ * (246/252 either way), so it stays off (§7.5: only if no recall is lost). agcLookaheadMs: at an utterance onset
  * the spotters' feed waits until this much speech has set the utterance's own level (no added
  * latency: "Jade" ends later); measured on the eval's noisy mix, 198 → 202 of 252 against the
  * previous utterance's gain (docs: the lane report).

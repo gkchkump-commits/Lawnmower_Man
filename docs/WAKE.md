@@ -120,9 +120,9 @@ no chat entry. The tray tooltip says what she is doing: *Jade: listening for "He
 *listening*, *mic off*, *paused (PC locked)*, *microphone blocked*.
 
 *Settings › Voice* also shows a status line, the echo cancellation in use, and the **last 20
-wake events** with their times: "woke · 280 ms", "ignored · sounded like "Hey Jude"",
-"ignored · my own voice", "no command after 8 s". These keep only the kind of event, never what
-was said.
+wake events** with their times: *09:41 woke · 280 ms*, *09:43 ignored · sounded like “Hey
+Jude”*, *09:50 ignored · my own voice*, *10:02 no command after 8 s*. These keep only the kind of
+event, never what was said.
 
 ## 5. Settings
 

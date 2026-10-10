@@ -247,7 +247,9 @@ describe('AudioPlayer voice character', () => {
     const fx = FakeWorkletNode.last;
     expect(fx.name).toBe('lawnmower-voicefx');
     expect(fx.options).toMatchObject({ numberOfInputs: 1, outputChannelCount: [1], channelCount: 1, processorOptions: { character: 'robot', amount: 0.6 } });
-    expect(g.targets(fx)).toEqual([g.ctx.destination]);
+    // (through the master gain, which ducks her voice for "Hey Jade"; contract-wake §9.3)
+    expect(g.targets(fx)).toEqual([g.p.master]);
+    expect(g.targets(g.p.master)).toEqual([g.ctx.destination]);
     expect(g.p.voiceFx).toEqual({ character: 'robot', amount: 0.6, state: 'ready', active: true });
     // changes go to the processor (it ramps them)
     g.p.setVoiceFx({ amount: 0.9 });
@@ -276,6 +278,7 @@ describe('AudioPlayer voice character', () => {
     expect(outs).toContain(g.p.analyser);
     expect(outs).toContain(FakeWorkletNode.last);
     expect(outs).not.toContain(g.ctx.destination); // the dry voice is not heard next to the processed one
+    expect(outs).not.toContain(g.p.master);
     // the analyser is a muted tap
     const [mute] = g.targets(g.p.analyser);
     expect(mute.gain.value).toBe(0);
@@ -302,7 +305,7 @@ describe('AudioPlayer voice character', () => {
     expect(g.p.voiceFx.active).toBe(false);
     g.p.enqueue(clip(0.1, 'plain'));
     const outs = g.targets(sourceGain(g));
-    expect(outs).toEqual(expect.arrayContaining([g.p.analyser, g.ctx.destination]));
+    expect(outs).toEqual(expect.arrayContaining([g.p.analyser, g.p.master])); // (the master → the speakers)
     expect(outs).not.toContain(FakeWorkletNode.last);
     expect(FakeWorkletNode.last.posted.some((x) => x.m.type === 'clip')).toBe(false);
   });
@@ -318,7 +321,7 @@ describe('AudioPlayer voice character', () => {
     expect(Date.now() - t0).toBeLessThan(200);
     expect(ends).toEqual(['a']);
     // the effect node stays connected for the tail
-    expect(g.targets(FakeWorkletNode.last)).toEqual([g.ctx.destination]);
+    expect(g.targets(FakeWorkletNode.last)).toEqual([g.p.master]);
   });
 
   it('the first clip waits for the effect to load, but never longer than FX_WAIT_MS', async () => {
@@ -337,7 +340,7 @@ describe('AudioPlayer voice character', () => {
     await waitFor(() => slow.env.started === 1);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(FX_WAIT_MS - 5);
     expect(Date.now() - t0).toBeLessThan(FX_WAIT_MS + 150);
-    expect(g2targets(slow)).toContain(slow.ctx.destination);
+    expect(g2targets(slow)).toContain(slow.p.master);
     expect(await b).toEqual({ stopped: false });
     // stopped while waiting: resolved as stopped, nothing plays
     const stopped = make({ loadMs: Infinity });
@@ -353,7 +356,7 @@ describe('AudioPlayer voice character', () => {
     const none = make({ worklet: false });
     expect(none.p.fxState).toBe('unavailable');
     const a = none.p.enqueue(clip(0.05, 'a'));
-    expect(g2targets(none)).toContain(none.ctx.destination);
+    expect(g2targets(none)).toContain(none.p.master);
     await a;
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -364,7 +367,7 @@ describe('AudioPlayer voice character', () => {
     const errors = [];
     broken.p.on('error', (e) => errors.push(e));
     const b = broken.p.enqueue(clip(0.05, 'b'));
-    expect(g2targets(broken)).toContain(broken.ctx.destination);
+    expect(g2targets(broken)).toContain(broken.p.master);
     expect(await b).toEqual({ stopped: false });
     expect(errors).toEqual([]);
     broken.p.setVoiceFx({ character: 'robot' }); // no retry storm
@@ -381,7 +384,7 @@ describe('AudioPlayer voice character', () => {
     const fx = FakeWorkletNode.last;
     expect(g.targets(gain)).toContain(fx);
     fx.onprocessorerror();
-    expect(g.targets(gain)).toContain(g.ctx.destination);
+    expect(g.targets(gain)).toContain(g.p.master);
     expect(g.targets(gain)).not.toContain(fx);
     expect(g.p.voiceFx).toMatchObject({ state: 'unavailable', active: false });
     g.p.stop();
@@ -400,3 +403,72 @@ describe('AudioPlayer voice character', () => {
     return g.targets(sourceGain(g));
   }
 });
+
+// ---- "Hey Jade" (contract-wake §9.3, §11.2): the master gain ducks her voice; earcons ----
+describe('AudioPlayer: duck and cues', () => {
+  /** a context whose AudioParams record their automation */
+  function automationContext() {
+    const g = graphContext({ worklet: false });
+    const calls = [];
+    const param = (name) => ({
+      value: 1,
+      cancelScheduledValues(t) { calls.push([name, 'cancel', t]); },
+      setValueAtTime(v, t) { calls.push([name, 'set', v, t]); },
+      linearRampToValueAtTime(v, t) { calls.push([name, 'ramp', v, t]); this.value = v; },
+    });
+    let n = 0;
+    const createGain = g.ctx.createGain;
+    g.ctx.createGain = () => {
+      const node = createGain();
+      node.gain = param(`gain${++n}`);
+      return node;
+    };
+    return { ...g, calls };
+  }
+
+  it('duck() ramps the master to -15 dB in 60 ms; unduck() back in 300 ms (after a delay if asked)', () => {
+    const g = automationContext();
+    const p = new AudioPlayer({ createContext: () => /** @type {any} */ (g.ctx) });
+    p.duck(); // no context yet: nothing to duck
+    p.unlock();
+    g.env.time = 2;
+    p.duck();
+    expect(p.duckDb).toBe(-15);
+    const ramps = g.calls.filter((c) => c[1] === 'ramp');
+    expect(ramps.at(-1)[2]).toBeCloseTo(10 ** (-15 / 20), 6);
+    expect(ramps.at(-1)[3]).toBeCloseTo(2.06, 6);
+    expect(p.masterGainDb).toBeCloseTo(-15, 4);
+    g.env.time = 3;
+    p.unduck(300, 60);
+    const last = g.calls.filter((c) => c[1] === 'ramp').at(-1);
+    expect(last[2]).toBe(1);
+    expect(last[3]).toBeCloseTo(3 + 0.06 + 0.3, 6);
+    expect(p.duckDb).toBe(0);
+    expect(p.masterGainDb).toBeCloseTo(0, 6);
+  });
+
+  it('playCue() plays next to the voice: no events, no queue, not through the master; counted', async () => {
+    const g = graphContext({ worklet: false });
+    const p = new AudioPlayer({ createContext: () => /** @type {any} */ (g.ctx) });
+    const events = [];
+    for (const e of ['start', 'end', 'idle', 'error']) p.on(e, () => events.push(e));
+    const r = p.playCue(new Float32Array(48000 * 0.165).fill(0.1), 48000);
+    expect(p.cues).toBe(1);
+    expect(r.endPerf - r.startPerf).toBeCloseTo(165, 3);
+    expect(p.busy).toBe(false);
+    expect(p.current).toBeNull();
+    expect(p.kind).toBeNull();
+    const src = g.env.nodes.filter((n) => n.kind === 'source').pop();
+    expect(g.targets(src)).toEqual([g.ctx.destination]);
+    await tick(40);
+    expect(events).toEqual([]);
+    // a clip at the same time is unaffected and still reports its kind
+    const done = p.enqueue(clip(0.1, 'reply'));
+    expect(p.kind).toBe('audio');
+    expect(await done).toEqual({ stopped: false });
+    expect(events).toEqual(['start', 'end', 'idle']);
+    expect(p.playCue(new Float32Array(0), 48000)).toBeNull();
+    expect(p.cues).toBe(1);
+  });
+});
+// ---- end "Hey Jade" ----

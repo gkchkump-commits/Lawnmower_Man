@@ -94,7 +94,7 @@ a low band (< 400 Hz, the nasal murmur of m / n), a high band (> 3 kHz), voicing
 (order 14 at ~12 kHz, Levinson-Durbin, roots warm-started; F1 within 2-3 % of a numpy reference
 on the clips). The first 0.8 s are posted at once, the rest when done (~30 ms per 5 s of speech);
 the controller starts it when the speech queue has synthesised a clip, before it plays.
-`src/audio/fusion.js` (0.15-0.25 ms per clip, compiled at idle) then:
+`src/audio/fusion.js` (~0.25 ms per clip, under 1 ms; compiled at idle, with the segments built from it, one idle callback per step) then:
 
 | Step | What it does |
 |---|---|
@@ -114,7 +114,7 @@ flat slit.
 
 ![The relief head's lip opening over "Maybe my mom made muffins" (the Test lip-sync line, Kokoro af_heart), v0.3 vs v0.4, under the clip's loudness and phonemes (m / b / p shaded): the /i/ of "Maybe" between its b and the m of "my" parts the lips (v0.3: 3 px), each m seals where its murmur is and parts where the vowel comes in, and "mom" stays open until its final m](screenshots/lipsync_opening.png)
 
-![The same clip on the relief head, v0.3 (top) vs v0.4 (bottom): m, oo, o, oo, f, e](screenshots/lipsync_shapes.jpg)
+![Mouth shapes on the relief head, v0.3 (top) vs v0.4 (bottom), Kokoro clips at 60 fps: the /i/ of "Maybe" (the Test lip-sync line) parts the lips between its b and the m of "my" (v0.3 kept them sealed); the f of "fine" rests the incisors' crowns on the lower lip; the oo of "who" and the o of "boats" and "float" (am_michael) are small round orifices instead of opening like the ah of "far"](screenshots/lipsync_shapes.jpg)
 
 **Prosody from the voice itself (local voice).** For a clip with audio, `src/audio/prosody.js`
 measures the loudness envelope (all at once, under a millisecond) and the pitch: YIN on a 1 kHz

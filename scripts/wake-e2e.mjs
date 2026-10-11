@@ -20,6 +20,8 @@
 //    7. barge-in: "Hey Jade, …" while she reads a long reply → her voice ducks (≥ 10 dB) → stops
 //       after the check; "stop" interrupts locally (nothing sent to Claude)
 //    8. hidden: the window hidden in the tray → "Hey Jade." → the window is shown again
+//   13. a call over continuous TV-like speech: right stamps, a short end-anchored wake segment,
+//       the command sent although Whisper heard the TV's words before the call
 //    9. PC locked: the microphone track ends within 1 s (also while she listens for a command);
 //       locked → asleep → woken at the lock screen stays locked; unlocked → waiting again
 //   10. the utility crashes → it restarts, the renderer takes the new port, a wake works again
@@ -181,6 +183,14 @@ async function step(label, fn) {
 
 const RATE = 48000;
 const KWS_RATE = 16000;
+/**
+ * LAT-1 (ux.md) for one sample, ms from the end of "Jade" to the attention cue: its p95 bound
+ * (600 ms) for both models. On Windows the all-apps echo canceller adds ~170 ms that this run does
+ * not have, so a run near the bound means the user's PC misses it; model B alone (a new install
+ * until the extra model is downloaded) is slower and gets 800 ms (docs/WAKE.md: it misses LAT-1).
+ */
+const LAT1_AB_MS = 600;
+const LAT1_B_MS = 800;
 /** @type {Map<string, { id: string, cls: string, text: string, jadeEndSec: number }>} */
 const manifest = new Map();
 for (const line of fs.readFileSync(path.join(FIXTURES, 'manifest.tsv'), 'utf8').split(/\r?\n/).slice(1)) {
@@ -450,6 +460,16 @@ try {
   await step('silence', async () => {
     const m = await scenario([45], ['(nothing should be transcribed)']);
     await sleep(3000);
+    // (changed on purpose) after 1.5 s of quiet the utility builds the strict-mode thresholds once,
+    // ahead of need (a few seconds of CPU, so a later switch never blocks a call): measured on its
+    // own, then the steady state in silence
+    const built = await until(async () => {
+      const st = await e2e('stats');
+      return st && st.prebuildMs > 0 ? st : null;
+    }, 20000);
+    measure('strict thresholds built ahead while quiet (ms of CPU, once)', built ? built.prebuildMs : null);
+    check('2 · the strict-mode thresholds are built ahead while it is quiet', !!built, await e2e('stats'));
+    await sleep(500);
     const a = /** @type {any[]} */ ((await e2e('metrics')) || []).find((r) => r.pid === utilityPid);
     const ta = Date.now();
     await sleep(20000);
@@ -490,7 +510,8 @@ try {
     check('3 · data-wake: waiting → attention → listening → busy → followup → waiting', k === order.length, seq);
     check('3 · one chime (when she starts listening), none at the follow-up', (await cues()) - m.cues === 1, (await cues()) - m.cues);
     const calls = newStt(m);
-    check('3 · /stt heard the wake segment (≤ 2.65 s) and then the command, nothing else', calls.length === 2 && calls[0].durationSec <= 2.65 && calls[0].text === 'Hey Jade.' && calls[1].text === 'what time is it?', calls);
+    // (changed on purpose: the wake segment is ≤ 1.2 s before the end of "Jade" + ≤ 0.6 s after it)
+    check('3 · /stt heard the wake segment (≤ 1.85 s) and then the command, nothing else', calls.length === 2 && calls[0].durationSec <= 1.85 && calls[0].text === 'Hey Jade.' && calls[1].text === 'what time is it?', calls);
     if (fup && back) {
       followUpOpenPos = m.pos(fup[2]);
       const lasted = back[1] - fup[1];
@@ -507,7 +528,12 @@ try {
       const jadeEndIdx = m.startIdx + Math.round((1.0 + (fx?.jadeEndSec ?? 0)) * KWS_RATE);
       measure('stage-1 hit after the end of "Jade" (ms; emit time in the utility)', Math.round(((hit.emitAt ?? hit.endAt) - jadeEndIdx) / 16));
       measure('keyword end vs the acoustic end of "Jade" (ms)', Math.round((hit.endAt - jadeEndIdx) / 16));
-      if (att) measure('end of "Jade" → attention shown (ms; via the tap clock)', Math.round((att[2] - jadeEndIdx) / 16));
+      if (att) {
+        const lat = Math.round((att[2] - jadeEndIdx) / 16);
+        measure('end of "Jade" → attention shown (ms; via the tap clock)', lat);
+        const budget = hasZhen ? LAT1_AB_MS : LAT1_B_MS;
+        check(`3 · LAT-1: the attention cue ≤ ${budget} ms after the end of "Jade" (${hasZhen ? 'A+B' : 'B only'}; load ${os.loadavg()[0].toFixed(1)})`, lat <= budget, lat);
+      }
       measure('stage-1 model', hit.model);
     }
     followUpCloseAfter = back ? m.pos(back[2]) : 0;
@@ -544,6 +570,59 @@ try {
       }
       check('12 · the utility has no TCP or UDP socket', inet.length === 0, inet);
     }
+  });
+
+  await step('tv', async () => {
+    // a call over continuous TV-like speech 10 dB under her (no pause for the VAD: one long stream,
+    // renewed every 8 s): the hit's stamps must be right, and the wake segment must be short and
+    // end-anchored, so Whisper's TV words before the call do not make it "not a call"
+    check('tv: the app is quiet before the scenario', await waitSettled());
+    const bedIds = ['neg_commits', 'neg_meeting', 'neg_ship', 'neg_siri', 'neg_necklace'];
+    const trim = (/** @type {Float32Array} */ x) => {
+      let a = 0;
+      let b = x.length;
+      while (a < b && Math.abs(x[a]) < 0.01) a++;
+      while (b > a && Math.abs(x[b - 1]) < 0.01) b--;
+      return x.subarray(Math.max(0, a - 2400), Math.min(x.length, b + 2400));
+    };
+    const total = Math.round(16 * RATE);
+    const bed = new Float32Array(total);
+    for (let o = Math.round(1.0 * RATE), k = 0; o < total; k++) {
+      const c = trim(clip(bedIds[k % bedIds.length]));
+      bed.set(c.subarray(0, Math.min(c.length, total - o)), o);
+      o += c.length;
+    }
+    let e2 = 0;
+    let n = 0;
+    for (let i = RATE; i < total; i++) {
+      e2 += bed[i] * bed[i];
+      n++;
+    }
+    const g = 10 ** (-32 / 20) / Math.sqrt(e2 / n);
+    const call = clip('pos_cmd_bf_lily');
+    const callAt = Math.round(11.0 * RATE);
+    // the fake microphone loops its file: 45 s of room noise after the bed, so the TV and the call
+    // do not come round again while the reply and its follow-up window run
+    const mixed = noise(total / RATE + 45);
+    for (let i = 0; i < total; i++) mixed[i] += bed[i] * g;
+    for (let i = 0; i < call.length && callAt + i < mixed.length; i++) mixed[callAt + i] += call[i];
+    scenarioNo++;
+    fs.writeFileSync(micFile, new Uint8Array(encodeWav(mixed, RATE)));
+    // the fake /stt answers like Whisper on such a segment: the TV's last words, then the call
+    fs.writeFileSync(queueFile, `${JSON.stringify(['town Aborigine. Hey Jade!', 'what time is it?'])}${' '.repeat(scenarioNo)}\n`);
+    const m0 = { users: (await userTexts()).length, stt: sttCalls().length, hitId: maxHitId(await hits()), wakes: await wakeCount() };
+    const startIdx = await page.evaluate(async () => {
+      await window.__app.mic.reopen();
+      return window.__app.mic.samplesSeen;
+    });
+    const sent = await until(async () => ((await userTexts()).length > m0.users ? await userTexts() : null), 30000);
+    check('13 · a call over TV-like speech 10 dB under her is sent ("what time is it?")', !!sent && sent.slice(m0.users).join('|') === 'what time is it?', { sent: sent?.slice(m0.users), log: (await wakeLog()).slice(-4), seq: (await wakesSince(m0.wakes)).map((w) => w[0]) });
+    const hit = (await hits()).filter((h) => h.id > m0.hitId).find((h) => h.keyword === 'HEY_JADE');
+    const jadeEnd = startIdx + Math.round((11.0 + (manifest.get('pos_cmd_bf_lily')?.jadeEndSec ?? 0)) * KWS_RATE);
+    check('13 · …its keyword stamp is within 0.4 s of the real end of "Jade" (no drifted timestamps)', !!hit && Math.abs(hit.endAt - jadeEnd) < 0.4 * KWS_RATE, hit && { endAtVsJade: Math.round((hit.endAt - jadeEnd) / 16), streamAgeSec: +((hit.endAt - hit.streamAt) / KWS_RATE).toFixed(1) });
+    const calls = newStt(m0);
+    check('13 · …and the wake segment that went to /stt is short (≤ 1.85 s)', calls.length >= 1 && calls[0].durationSec <= 1.85, calls);
+    await waitSettled(45000);
   });
 
   await step('followup', async () => {
@@ -736,7 +815,15 @@ try {
     check('10 · the utility restarts after a crash, with a new port for the renderer', !!ready, { before: st0, after: await engineStatus() });
     utilityPid = Number(await e2e('utilityPid')) || 0;
     check('10 · …as a new process', utilityPid > 0 && utilityPid !== pid0, { pid0, utilityPid });
-    await until(async () => (await wakeState()) === 'waiting', 20000);
+    // (changed on purpose) the window must be on the new port before the call: until the new
+    // utility answers on it, no engine hears her and the microphone is closed (a call right then is
+    // lost); the old "waiting" can still be showing when main already reports the new engine
+    const onNew = await until(async () => page.evaluate((g) => {
+      const p = window.__app.wake?.port;
+      return !!p && p.gen >= g && p.ready && document.body.dataset.wake === 'waiting';
+    }, ready?.portGen ?? 0), 20000);
+    check('10 · …and the window listens on the new port', !!onNew, await page.evaluate(() => ({ gen: window.__app.wake?.port?.gen, ready: window.__app.wake?.port?.ready, wake: document.body.dataset.wake })));
+    await waitSettled(20000);
     const m = await scenario([1.0, 'pos_cmd_bf_lily', 25], ['Hey Jade.', 'what time is it?']);
     const sent = await until(async () => ((await userTexts()).length > m.users ? await userTexts() : null), 25000);
     check('10 · after the restart a wake works again', !!sent && sent.slice(m.users).join('|') === 'what time is it?', sent);

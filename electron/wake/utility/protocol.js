@@ -21,6 +21,8 @@ export function checkPcm(m, expected) {
   const pcm = m?.pcm;
   if (!(pcm instanceof Float32Array)) return { ok: false, error: 'pcm must be a Float32Array' };
   if (pcm.length < 1 || pcm.length > MAX_FRAME) return { ok: false, error: `pcm must hold 1-${MAX_FRAME} samples` };
+  // a view into a larger buffer would make every message copy all of it (structured clone)
+  if (pcm.byteOffset !== 0 || pcm.buffer.byteLength !== pcm.byteLength) return { ok: false, error: 'pcm must be a whole Float32Array, not a view of a larger buffer' };
   if (!Number.isSafeInteger(m.at) || m.at < 0) return { ok: false, error: 'at must be a non-negative integer' };
   if (expected !== null && m.at < expected) return { ok: false, error: `at ${m.at} goes back (expected ≥ ${expected})` };
   for (let i = 0; i < pcm.length; i++) {

@@ -9,6 +9,7 @@
 //   u → main  { t:'ready', models, loadMs }   { t:'error', fatal, message }   { t:'stats', …, hits }   { t:'pong', n }
 // The renderer port: utility/protocol.js.
 
+import './lockdown.js'; // first: no network or process modules from here on (§2.3)
 import { loadAddon } from './sherpa.js';
 import { WakeEngine } from './engine.js';
 import { PortSession } from './protocol.js';

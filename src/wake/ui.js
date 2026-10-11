@@ -36,6 +36,7 @@ export const WAKE_TEXT = Object.freeze({
  * @property {boolean} [echoTesting]
  * @property {boolean} [canSpeak]   her replies are spoken (Test my echo needs her voice)
  * @property {string} [engine]      main's engine state ('error': it kept stopping or could not start)
+ * @property {boolean} [windows]     on Windows (a privacy block can look like "in use")
  * @property {number} [nowPerf]  performance.now() of this model (to show log times)
  * @property {number} [nowWall]  Date.now() of this model
  */
@@ -157,9 +158,12 @@ export function infoModel(m) {
     case 'blocked':
       line = m.reason || c.text;
       tone = 'err';
-      action = m.code === 'os-blocked' || m.code === 'denied'
+      // on Windows "in use" may be the privacy switch (not always reported): its settings, and
+      // the quiet retries go on by themselves
+      action = m.code === 'os-blocked' || m.code === 'denied' || (m.code === 'in-use' && m.windows)
         ? { id: 'wakeMicSettings', label: 'Open Windows microphone settings' }
         : { id: 'wakeRetry', label: 'Retry' };
+      if (m.code === 'in-use' && m.windows) notes.push('She tries the microphone again by herself (after 5 s, 15 s, then every minute).');
       break;
     case 'muted':
       tone = 'warn';
@@ -183,6 +187,8 @@ export function infoModel(m) {
       notes.push(zhen === 'failed' ? 'Using the basic wake-word model; the extra one could not be downloaded' : 'Using the basic wake-word model');
       if (!action) action = { id: 'wakeDownload', label: 'Download the extra wake-word model' };
     }
+    // model B alone reacts about 0.25 s later (review: 593 vs 268 ms to the attention cue)
+    if (zhen === 'downloading' || zhen === 'failed' || zhen === 'missing') notes.push('She hears her name faster and more reliably once the extra wake-word model is there.');
   }
   // a test clip being recorded can be stopped without saving anything
   if (m.recordingSec != null) action = { id: 'wakeRecordCancel', label: 'Cancel recording' };

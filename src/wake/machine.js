@@ -18,7 +18,7 @@
 // Inputs: settings · availability · power · visibility · micOk · micError · micMute · hit ·
 // verified · captured · utterance · captureNoSpeech · captureCancelled · speechStart ·
 // conversation · turnDone · presence · manual · audio · tick.
-// Actions: openMic · releaseMic · capture · cancelCapture · show · verify · resetDetector ·
+// Actions: openMic · releaseMic · capture · cancelCapture · show · verify · rejected · resetDetector ·
 // earcon · duck · unduck · stopSpeaking · quiet · showWindow · gaze · fastWake · setStrict ·
 // dim · decision · disable · say · hint · announce · log · report · noteActivity.
 // The IDs in brackets in the comments are the rules of ux.md.
@@ -199,6 +199,8 @@ export class WakeMachine {
     this._reported = '';
     this._base = /** @type {{ state: WakeUiState, reason: string, code: string, fallback: boolean }} */ ({ state: 'off', reason: '', code: '', fallback: false });
     this._strictOn = false;
+    /** main said "engine off" while the mic was open for her name (the setting change follows) */
+    this._offByMain = false;
     /** the last time the mic was open for her name (waiting or muted) */
     this._runAt = -Infinity;
   }
@@ -277,7 +279,15 @@ export class WakeMachine {
     const now = this._now();
     switch (input?.type) {
       case 'settings': this._settings(input, out, now); break;
-      case 'availability': this.avail = { ...this.avail, ...pick(input, ['stt', 'sttReason', 'engine', 'engineDetail', 'device']) }; break;
+      case 'availability': {
+        const next = { ...this.avail, ...pick(input, ['stt', 'sttReason', 'engine', 'engineDetail', 'device']) };
+        // main stops the engine as soon as the setting goes off, so its "off" can come first (by
+        // seconds on a busy PC): a mic open for her name then still gets its "off" sound
+        if (next.engine === 'off' && this.avail.engine !== 'off') this._offByMain = this.s.enabled && (this.mic === 'open' || this.mic === 'opening');
+        else if (next.engine !== 'off') this._offByMain = false;
+        this.avail = next;
+        break;
+      }
       case 'power': this._power(input); break;
       case 'visibility': this.hidden = input.visible === false; break;
       case 'micOk': this._micOk(input, out); break;
@@ -320,7 +330,7 @@ export class WakeMachine {
     const prevOn = this.s.enabled;
     // main stops the engine as the setting changes, and its status can arrive first: a mic that
     // was listening a moment ago still gets its "off" sound
-    const wasRunning = this._base.state === 'waiting' || this._base.state === 'muted' || now - this._runAt < WAKE.offGraceMs;
+    const wasRunning = this._base.state === 'waiting' || this._base.state === 'muted' || this._offByMain || now - this._runAt < WAKE.offGraceMs;
     const w = input.wake || {};
     this.s = {
       ...this.s,
@@ -332,6 +342,7 @@ export class WakeMachine {
       if (this.s.sounds !== 'off') out.push({ type: 'earcon', name: 'micOff' });
       out.push({ type: 'announce', text: 'Microphone off' });
     }
+    if (!this.s.enabled) this._offByMain = false;
   }
 
   /**
@@ -488,7 +499,12 @@ export class WakeMachine {
     this.lastVoiceAt = now;
     this._log(now, 'woke', 'woke', input.latencyMs);
     if (wasBarge) out.push({ type: 'stopSpeaking' }, { type: 'unduck', afterMs: WAKE.stopFadeMs, rampMs: 30 });
-    else if (this.conv.turnRunning || this.conv.state === 'thinking') out.push({ type: 'quiet' }); // a reply that starts now stays silent
+    else if (this.conv.turnRunning || this.conv.state === 'thinking') {
+      // a reply that starts now is ducked while the command is captured (not muted: with no
+      // command after all, it speaks as usual; a sent command pre-empts it) (T12, BRG-5)
+      out.push({ type: 'duck' });
+      a.ducked = true;
+    }
     if (!a.show) out.push({ type: 'show' });
     a.show = true;
     out.push({ type: 'noteActivity' }, { type: 'showWindow' });
@@ -511,6 +527,7 @@ export class WakeMachine {
     if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason } });
     this._log(now, 'ignored', reason);
+    out.push({ type: 'rejected', id: a.id });
     // only a confident "someone else was called" counts (TV-3): a retry after a check that heard
     // nothing, failed or timed out must not make her harder to wake
     if (BURST_REASONS.has(reason)) this._burst(now);
@@ -573,6 +590,7 @@ export class WakeMachine {
     }
     this.active = null;
     this.lastVoiceAt = now;
+    if (a.ducked) out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     switch (d.action) {
       case 'send':
         this._log(now, 'sent', 'sent');
@@ -633,7 +651,7 @@ export class WakeMachine {
     const now = this._now();
     // (an unverified wake that heard nothing more: its verdict no longer matters)
     if (a.kind === 'listening') this._log(now, 'no command', 'no-command');
-    if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
+    if (a.kind === 'barge' || a.ducked) out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     if ((a.kind === 'listening' || a.kind === 'followup') && this.s.sounds === 'start-end') out.push({ type: 'earcon', name: 'done' });
     if (a.kind === 'listening' || a.kind === 'followup') out.push({ type: 'announce', text: 'Stopped listening' });
   }
@@ -644,7 +662,7 @@ export class WakeMachine {
     if (!a || a.id !== String(meta.wakeId)) return;
     // push-to-talk, typing or Esc took over (T14), also while it was being transcribed: silently
     this.active = null;
-    if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
+    if (a.kind === 'barge' || a.ducked) out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason: 'cancelled' } });
   }
 
@@ -695,7 +713,7 @@ export class WakeMachine {
     if (a) {
       if (a.kind === 'listening' && a.phase === 'capture') return; // already listening
       if (a.phase === 'capture') out.push({ type: 'cancelCapture', meta: { wakeId: a.id } });
-      if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: 0 });
+      if (a.kind === 'barge' || a.ducked) out.push({ type: 'unduck', rampMs: 0 });
       if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason: 'manual' } });
     }
     const id = `m${++this._ids}`;
@@ -841,7 +859,7 @@ export class WakeMachine {
     if (!a) return;
     this.active = null;
     if (a.phase === 'capture') out.push({ type: 'cancelCapture', meta: { wakeId: a.id } });
-    if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
+    if (a.kind === 'barge' || a.ducked) out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason: 'aborted' } });
   }
 

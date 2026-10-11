@@ -106,8 +106,18 @@ body[data-wake="look"] .wake-mic .wake-ear { animation: wake-breathe 1.1s ease-i
   body[data-wake] .wake-mic .wake-ear { animation: none; }
 }
 
-/* the empty chat's hint while she waits for her name (the default one is in src/styles/app.css) */
-body[data-wake="waiting"] .transcript:empty::before { content: "Say \201CHey Jade\201D, type below, or hold Space to talk."; }
+/* the empty chat's hint while the wake word works (the default one is in src/styles/app.css); the
+   same through a whole exchange, so it does not flip at every wake */
+body[data-wake="waiting"] .transcript:empty::before,
+body[data-wake="attention"] .transcript:empty::before,
+body[data-wake="listening"] .transcript:empty::before,
+body[data-wake="followup"] .transcript:empty::before,
+body[data-wake="look"] .transcript:empty::before,
+body[data-wake="busy"] .transcript:empty::before,
+body[data-wake="barge"] .transcript:empty::before { content: "Say \201CHey Jade\201D, type below, or hold Space to talk."; }
+
+/* the drawer's segmented options never wrap ("10 s" in two lines at the default width) */
+.drawer .segmented button { white-space: nowrap; }
 
 /* the drawer: Settings › Voice › Hey Jade */
 .field-info .wake-line { color: var(--text); }

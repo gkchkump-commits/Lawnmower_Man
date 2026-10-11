@@ -490,6 +490,31 @@ describe('WakeFeature: the controller hears when wake mode stops running', () =>
   });
 });
 
+describe('WakeFeature: a rejected hit does not keep her awake', () => {
+  it('asleep, the TV says "Hey Jake": she looks up, the check rejects it, she dozes off again', async () => {
+    const s = await started({ transcripts: ['Hey Jake, come here.'] });
+    s.controller.sleeping = true;
+    s.controller.sleep = vi.fn(() => { s.controller.sleeping = true; return true; });
+    s.mic.feed(3000, s.clock);
+    s.hit({ endAt: s.mic.samplesSeen - 4000 });
+    s.controller.sleeping = false; // the attention cue woke her (fast wake)
+    await s.flush();
+    await s.flush();
+    expect(s.f.log.at(-1).text).toBe('ignored · another name');
+    expect(s.controller.sleep).toHaveBeenCalledTimes(1);
+    // a real call keeps her awake
+    s.controller.sleep.mockClear();
+    s.stt.transcribe.mockImplementationOnce(async () => ({ text: 'Hey Jade.' }));
+    s.controller.sleeping = true;
+    s.mic.feed(3000, s.clock);
+    s.hit({ id: 'h2', endAt: s.mic.samplesSeen - 4000 });
+    await s.flush();
+    await s.flush();
+    expect(s.f.state).toBe('listening');
+    expect(s.controller.sleep).not.toHaveBeenCalled();
+  });
+});
+
 describe('WakeFeature: the engine stops answering', () => {
   it('the port is lost (a frozen utility): "starting", not "listening"; a new port: listening again, strict re-sent', async () => {
     const s = await started();

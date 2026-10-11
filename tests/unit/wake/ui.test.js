@@ -78,6 +78,15 @@ describe('infoModel: the drawer line, its action, the notes', () => {
     });
     expect(infoModel({ state: 'blocked', code: 'denied' }).action.id).toBe('wakeMicSettings');
     expect(infoModel({ state: 'blocked', code: 'in-use' }).action).toEqual({ id: 'wakeRetry', label: 'Retry' });
+    // on Windows "in use" may be the privacy switch: its settings, and the retries go on by themselves
+    const w = infoModel({ state: 'blocked', code: 'in-use', windows: true, reason: 'The microphone could not be started: it may be in use by another app, or blocked in Windows privacy settings' });
+    expect(w.action).toEqual({ id: 'wakeMicSettings', label: 'Open Windows microphone settings' });
+    expect(w.notes.join(' ')).toMatch(/again by herself/);
+  });
+
+  it('model B alone: she says the extra model makes her faster', () => {
+    for (const zhen of ['missing', 'failed', 'downloading']) expect(infoModel({ state: 'waiting', models: { zhen } }).notes.join(' '), zhen).toMatch(/faster and more reliably once the extra wake-word model/);
+    expect(infoModel({ state: 'waiting', models: { zhen: 'ok' } }).notes.join(' ')).not.toMatch(/faster/);
   });
 
   it('the echo canceller, the extra model, the echo test', () => {

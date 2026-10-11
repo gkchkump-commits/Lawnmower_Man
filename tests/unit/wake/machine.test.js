@@ -101,12 +101,19 @@ describe('T1 enable: the state follows what is available (§2.4)', () => {
     const b = h.step({ type: 'settings', wake: { enabled: false } });
     expect(one(b, 'earcon').name).toBe('micOff');
     expect(h.m.state).toBe('off');
-    // but not when it had not been listening for a while
+    // (changed on purpose: main's "off" is only ever the setting going off, so it still counts
+    // seconds later on a busy PC; the 1.5 s grace made spec 12 flaky under load)
     const k = harness();
     k.ready();
     k.step({ type: 'availability', engine: 'off' });
     k.advance(5000);
-    expect(of(k.step({ type: 'settings', wake: { enabled: false } }), 'earcon')).toEqual([]);
+    expect(one(k.step({ type: 'settings', wake: { enabled: false } }), 'earcon').name).toBe('micOff');
+    // but not when the mic had not been open for her name at all
+    const n = harness();
+    n.step({ type: 'availability', stt: 'ready', engine: 'starting' });
+    n.step({ type: 'availability', engine: 'off' });
+    n.advance(5000);
+    expect(of(n.step({ type: 'settings', wake: { enabled: false } }), 'earcon')).toEqual([]);
   });
 });
 
@@ -598,14 +605,29 @@ describe('T12 barge-in while she speaks', () => {
     expect(h.m.log.at(-1).reason).toBe('barge-off');
   });
 
-  it('while thinking: the T2 flow without a duck; a reply that starts now stays silent (BRG-5)', () => {
+  it('while thinking: the T2 flow; once verified a reply that starts is ducked while she listens, not muted (BRG-5, T12)', () => {
+    // (changed on purpose: "quiet" muted the whole coming reply even when no command followed)
     const h = harness();
     h.ready();
     h.step({ type: 'conversation', state: 'thinking', turnRunning: true });
     const a = h.hit();
     expect(types(a)).not.toContain('duck');
     expect(h.m.state).toBe('attention');
-    expect(types(h.step({ type: 'verified', id: 'w1', ok: true }))).toContain('quiet');
+    const b = h.step({ type: 'verified', id: 'w1', ok: true });
+    expect(types(b)).toContain('duck');
+    expect(types(b)).not.toContain('quiet');
+    // no command after all: the reply comes back to full volume and goes on
+    const c = h.step({ type: 'captureNoSpeech', meta: { wakeId: 'w1' } });
+    expect(types(c)).toContain('unduck');
+    // with a command: unducked too (the new message pre-empts the old reply)
+    const k = harness();
+    k.ready();
+    k.step({ type: 'conversation', state: 'thinking', turnRunning: true });
+    k.hit();
+    k.step({ type: 'verified', id: 'w1', ok: true });
+    const d = k.step({ type: 'utterance', meta: { wakeId: 'w1', kind: 'command' }, text: 'and in French?', speechMs: 900 });
+    expect(one(d, 'decision').decision).toEqual({ action: 'send', text: 'and in French?' });
+    expect(types(d)).toContain('unduck');
   });
 
   it('while transcribing or during push-to-talk: ignored', () => {

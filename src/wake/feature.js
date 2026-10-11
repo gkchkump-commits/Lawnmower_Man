@@ -50,6 +50,7 @@ const RATE = 16000;
  * @property {any} [win]
  * @property {any} [mediaDevices]
  * @property {() => boolean} [reducedMotion]
+ * @property {string} [platform]   process.platform (tests; default: the browser's)
  */
 
 export class WakeFeature extends Emitter {
@@ -85,6 +86,8 @@ export class WakeFeature extends Emitter {
     /** @type {Map<string, number>} when each hit's keyword ended (performance.now) */
     this._hitEnd = new Map();
     this._sleepingAtHit = false;
+    /** the hit that woke her from a doze (asleep again if it is rejected) */
+    this._dozedAtHit = /** @type {any} */ (null);
     this._zeroRun = 0;
     this._reportTimer = 0;
     this._lastReport = '';
@@ -295,6 +298,8 @@ export class WakeFeature extends Emitter {
     if (endPerf != null) this._hitEnd.set(h.id, endPerf);
     if (this._hitEnd.size > 50) this._hitEnd.delete(this._hitEnd.keys().next().value);
     this._sleepingAtHit = !!this.ctl.sleeping;
+    // a stage-1 hit that the check then rejects must not keep her awake (the TV's "Hey Jake")
+    if (!m && this._sleepingAtHit && !this.machine.active) this._dozedAtHit = h.id;
     if (m) this._recOutcome(h.id, `ignored: ${m.reason}`);
     this._step({ type: 'hit', ...h, masked: m ? m.reason : null, conv: this._conv() });
   }
@@ -396,7 +401,16 @@ export class WakeFeature extends Emitter {
       case 'hint': return this.view.hint?.(a.text);
       case 'announce': return this.view.announce?.(a.text);
       case 'report': return this._report(a);
-      case 'noteActivity': return this.ctl.noteActivity();
+      case 'noteActivity':
+        this._dozedAtHit = null; // a real wake: she stays awake
+        return this.ctl.noteActivity();
+      case 'rejected':
+        // the hit woke her from a doze, but it was not a call: back to sleep once idle again
+        if (this._dozedAtHit != null && String(this._dozedAtHit) === String(a.id)) {
+          this._dozedAtHit = null;
+          queueMicrotask(() => this.ctl.sleep?.());
+        }
+        return undefined;
       default: return undefined;
     }
   }
@@ -484,7 +498,8 @@ export class WakeFeature extends Emitter {
       } catch { /* unknown */ }
       if (access === 'denied' || access === 'restricted') return { reason: 'os-blocked', message: 'Windows is blocking the microphone for desktop apps' };
       if (name === 'NotAllowedError' || name === 'SecurityError') return { reason: 'denied', message: 'Microphone access was denied' };
-      return { reason: 'in-use', message: 'The microphone could not be started (it may be in use by another app)' };
+      // whether Windows reports its privacy switch to an unpackaged app is not certain: say both
+      return { reason: 'in-use', message: this._windows() ? 'The microphone could not be started: it may be in use by another app, or blocked in Windows privacy settings' : 'The microphone could not be started (it may be in use by another app)' };
     }
     return { reason: 'other', message: String(err?.message || 'The microphone could not be started') };
   }
@@ -718,6 +733,12 @@ export class WakeFeature extends Emitter {
     return true;
   }
 
+  /** @returns {boolean} the app runs on Windows */
+  _windows() {
+    if (typeof this.d.platform === 'string') return this.d.platform === 'win32';
+    return /win/i.test(String(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || ''));
+  }
+
   /** Her replies are spoken (the echo test needs her voice). */
   _canSpeak() {
     const tts = this.d.services.tts;
@@ -832,6 +853,7 @@ export class WakeFeature extends Emitter {
       echoTesting: !!this._echoTest,
       canSpeak: this._canSpeak(),
       engine: String(this.engine.engine || ''),
+      windows: this._windows(),
       nowPerf: this._now(),
       nowWall: Date.now(),
     });

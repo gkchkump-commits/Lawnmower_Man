@@ -619,7 +619,9 @@ function handleInput(msg) {
     if (sub === 'initialize') {
       if (process.env.FAKE_CLAUDE_NO_INIT) return;
       // the app's MCP servers connect before the CLI reports itself ready
-      connectMcp(msg.request).finally(() => {
+      // (FAKE_CLAUDE_INIT_DELAY_MS: a slow start, e.g. to restart it again while it starts)
+      const delay = Number(process.env.FAKE_CLAUDE_INIT_DELAY_MS) || 0;
+      Promise.all([connectMcp(msg.request), delay ? sleep(delay) : null]).finally(() => {
         out({ type: 'control_response', response: { subtype: 'success', request_id: msg.request_id, response: { commands: [], models: [], pid: process.pid, claude_code_version: '9.9.9' } } });
       });
     } else if (sub === 'interrupt') {

@@ -375,6 +375,8 @@ export class ClaudeSession extends EventEmitter {
     this._ready = false;
     /** @type {Promise<void>|null} */
     this._starting = null;
+    /** counts settings restarts: an older one that is overtaken gives up quietly */
+    this._restartGen = 0;
     /** @type {NodeJS.Timeout|null} */
     this._restartTimer = null;
     this._failures = 0;
@@ -1045,16 +1047,23 @@ export class ClaudeSession extends EventEmitter {
 
   /** Restart (resuming the same conversation) so new settings take effect. Never throws. */
   async _restartForSettings() {
+    const gen = ++this._restartGen;
     try {
       const info = this._procInfo;
       this._pendingRestart = false;
       this._detach(info);
       this._setStatus('restarting', 'Applying new settings…');
       if (info) await this._killInfo(info, { graceful: true });
-      if (this._stopped) return;
-      await this._ensureRunning();
+      if (this._stopped || gen !== this._restartGen) return;
+      // Two changes in a row (the wake word on, then off): the first restart's CLI may have been
+      // stopped while it was still starting. That start fails; it must not be the one this restart
+      // waits for, or nothing starts the CLI again.
+      if (this._starting) await this._starting.catch(() => {});
+      if (this._stopped || gen !== this._restartGen) return;
+      await this._ensureRunning(); // (_onReady restarts again if the settings moved on meanwhile)
     } catch (err) {
-      this._log('warn', `[claude] restart failed: ${/** @type {Error} */ (err).message}`);
+      // (a newer restart took over: its outcome is the one that counts)
+      if (gen === this._restartGen && !this._stopped) this._log('warn', `[claude] restart failed: ${/** @type {Error} */ (err).message}`);
     }
   }
 

@@ -441,6 +441,32 @@ describe('ClaudeSession with the fake CLI', () => {
     expect(h.argvLog()).toHaveLength(2);
   });
 
+  it('two settings changes in a row, the second while the first restart\'s CLI is still starting: ready with the latest settings', async () => {
+    // (the wake word on and off again: each changes the persona; before, both restarts failed and
+    // the session stayed "restarting" until the next message)
+    const h = harness({ env: { FAKE_CLAUDE_INIT_DELAY_MS: '400' } });
+    await h.session.start();
+    expect(h.session.status().status).toBe('ready');
+    h.settings.model = 'sonnet';
+    h.session.applySettings();
+    for (let i = 0; i < 400 && h.argvLog().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(h.argvLog()).toHaveLength(2); // the restarted CLI runs, not ready for 400 ms
+    expect(h.session.status().status).not.toBe('ready');
+    // the order seen on CI: the kill is done (the process's 'exit') before the start it ends has
+    // failed (its streams' 'close'); the kill here resolves at once to make that order certain
+    const kill = h.session._killInfo.bind(h.session);
+    h.session._killInfo = (info, opt) => { kill(info, opt); return Promise.resolve(); };
+    h.settings.model = 'opus';
+    h.session.applySettings();
+    h.session._killInfo = kill;
+    for (let i = 0; i < 500 && h.session.status().status !== 'ready'; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(h.session.status().status).toBe('ready');
+    expect(h.argvLog().at(-1).argv).toEqual(expect.arrayContaining(['--model', 'opus']));
+    expect(h.logs.filter((l) => /restart failed/.test(l))).toEqual([]);
+    const t = (await h.session.send('hello')).turnId;
+    expect((await h.turnEnd(t)).isError).toBe(false);
+  });
+
   it('handles thinking, non-streamed, sub-agent, error and huge outputs', async () => {
     const h = harness({ env: { FAKE_CLAUDE_CHUNKY: '1', FAKE_CLAUDE_CRLF: '1', FAKE_CLAUDE_BOM: '1' } });
     const think = (await h.session.send('think hard')).turnId;

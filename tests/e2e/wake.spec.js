@@ -341,6 +341,30 @@ test.describe('Hey Jade (scripted microphone)', () => {
     expect(blocked).toEqual([]);
   });
 
+  test('12c · minimal chat mode: the microphone badge stays visible while she listens for her name; a click turns "Hey Jade" off', async ({ page }, testInfo) => {
+    const blocked = await bootWake(page, { settings: { ...WAKE_ON, window: { showChat: false } } });
+    await wakeIs(page, 'waiting');
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
+    await expect.poll(() => page.evaluate(() => document.body.dataset.panel), { timeout: 10_000 }).toBe('hidden');
+    const badge = page.locator('#wake-mic');
+    await expect(badge).toBeVisible();
+    // it is outside the folded panel: really on screen, not at opacity 0
+    expect(await badge.evaluate((el) => {
+      let o = 1;
+      for (let e = el; e; e = e.parentElement) o *= Number(window.getComputedStyle(e).opacity);
+      return o;
+    })).toBeGreaterThan(0.9);
+    await expect(badge).toHaveAttribute('title', /microphone is on/);
+    await shot(page, testInfo, 'wake-badge-minimal');
+    await page.evaluate(() => { window.__track = window.__app.mic._stream.getAudioTracks()[0]; });
+    await badge.click();
+    await wakeIs(page, 'off');
+    await page.waitForFunction(() => window.__track.readyState === 'ended', null, { timeout: 1000 });
+    await expect(badge).toBeHidden();
+    expect(await page.evaluate(() => window.__app.settings().wake.enabled)).toBe(false);
+    expect(blocked).toEqual([]);
+  });
+
   test('13 · without the local voice: unavailable with the setup hint, and the mic is never opened', async ({ page }) => {
     const blocked = await bootWake(page, { params: { voice: 'off' } });
     await wakeIs(page, 'unavailable');

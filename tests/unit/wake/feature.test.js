@@ -135,7 +135,8 @@ function setup(o = {}) {
     wakeWordQuiet: vi.fn(),
     stopSpeaking: vi.fn(),
     noteActivity: vi.fn(),
-    say: vi.fn((text) => { said.push(text); return true; }),
+    // like the controller: a line that is spoken keeps the speech queue busy until 'idle'
+    say: vi.fn((text) => { said.push(text); if (o.speaks !== false) speech.busy = true; return true; }),
   };
   const posted = [];
   const fakePort = { postMessage: (m) => posted.push(m), close() {}, start() {}, onmessage: null };
@@ -146,7 +147,7 @@ function setup(o = {}) {
   };
   const reports = [];
   const saved = [];
-  const settings = { wake: { enabled: true, explained: true, sounds: 'start', ...(o.wake || {}) }, camera: {} };
+  const settings = { wake: { enabled: true, explained: true, sounds: 'start', ...(o.wake || {}) }, camera: {}, voice: { speakReplies: true, ...(o.voice || {}) } };
   const bridge = {
     wake: {
       status: async () => ({ engine: 'ready', detail: '', models: { giga: 'ok', zhen: 'ok', vad: 'ok' } }),
@@ -340,10 +341,41 @@ describe('WakeFeature: Test my echo, Record a test clip', () => {
     await s.flush();
     expect(s.stt.transcribe).not.toHaveBeenCalled();
     expect(s.captures).toEqual([]);
+    s.speech.busy = false;
     s.speech.emit('idle');
     await s.advance(1300);
     expect(s.toasts.at(-1)[0]).toMatch(/I heard my own voice 2 times/);
     expect(s.f.echoResult).toMatch(/2 times/);
+  });
+
+  it('"Speak replies" off: the echo test does not start (no line in the chat), says why, and her name keeps working', async () => {
+    const s = await started({ voice: { speakReplies: false }, transcripts: ['Hey Jade.'] });
+    expect(s.f.echoTest()).toBe(false);
+    expect(s.said).toEqual([]);
+    expect(s.toasts.at(-1)[0]).toMatch(/Speak replies/);
+    expect(s.f._echoTest).toBeNull();
+    s.f._render();
+    expect(s.view.render.mock.calls.at(-1)[0]).toMatchObject({ canSpeak: false, echoTesting: false });
+    s.mic.feed(3000, s.clock);
+    s.hit({ endAt: s.mic.samplesSeen - 4000 });
+    await s.flush();
+    expect(s.stt.transcribe).toHaveBeenCalledTimes(1); // the hit is acted on, not swallowed by a test
+  });
+
+  it('the line was not spoken after all (the voice went away): no test, nothing left exempt', async () => {
+    const s = await started({ speaks: false });
+    expect(s.f.echoTest()).toBe(false);
+    expect(s.f._echoTest).toBeNull();
+    expect(s.f.mask.masked(0, 1)).toBeFalsy();
+    expect(s.toasts.at(-1)[0]).toMatch(/Speak replies/);
+  });
+
+  it('the echo test ends after 20 s whatever happens (a voice that never goes idle)', async () => {
+    const s = await started();
+    expect(s.f.echoTest()).toBe(true);
+    await s.advance(20_100);
+    expect(s.f._echoTest).toBeNull();
+    expect(s.toasts.at(-1)[0]).toMatch(/did not finish/);
   });
 
   it('a test clip: the tapped audio and the hits in it, saved through main', async () => {

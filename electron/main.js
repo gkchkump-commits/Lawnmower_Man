@@ -92,12 +92,13 @@ import {
   validateTurnOptions,
   validateTurnText,
 } from './ipc-validate.js';
-import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
+import { buildTrayTemplate, trayTooltip, wakeMicOpen, wakeTrayText } from './tray-menu.js'; // wake: wakeMicOpen, wakeTrayText
 import { HotkeyManager } from './hotkeys.js';
 import { renderIconPng } from './icon.js';
 import { createLogger } from './logger.js';
 import { createTapo } from './tapo/index.js';
 import { createWake } from './wake/index.js';
+import { listeningTrayImage } from './wake/tray-icon.js'; // wake: the tray's listening dot
 import { validateCameraSettingsPatch } from './tapo/validate.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -126,6 +127,8 @@ const state = {
   /** The wake word (electron/wake/index.js createWake). @type {ReturnType<typeof createWake>|null} */ wake: null,
   /** The tray's wake-word state as last shown (see rebuildTrayForWake). */
   wakeTrayKey: '',
+  /** The tray icon shows the listening dot. */
+  wakeTrayOpen: false,
   // ---- end "Hey Jade" ----
   /** @type {VoiceSetupRunner|null} */ setup: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
@@ -629,7 +632,9 @@ function loadRenderer(win) {
 function showWindow(focus) {
   const win = state.win;
   if (!win) return;
-  if (win.isMinimized()) win.restore();
+  // wake: restore() activates the window on Windows (SW_RESTORE); without focus, showInactive()
+  // alone brings a minimized window back (SW_SHOWNOACTIVATE) and leaves the keyboard focus alone
+  if (focus && win.isMinimized()) win.restore(); // wake: only when it may take the focus
   if (focus) win.show();
   else win.showInactive();
   if (focus) win.focus();
@@ -954,11 +959,33 @@ function rebuildTrayForTapo() {
 }
 
 // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
-/** Rebuild the tray when the wake word's tray state (checkbox, tooltip text) changed. */
+/**
+ * The tray as the wake word shows it: the checkbox, the tooltip's text and the listening dot
+ * (not the raw state: every exchange walks waiting → attention → listening → busy → …, which
+ * all read "listening", and a rebuilt menu could close under the user's pointer).
+ * @param {any} w state.wake.trayState()
+ */
+function wakeTrayKey(w) {
+  return w ? JSON.stringify({ enabled: !!w.enabled, text: wakeTrayText(w), open: wakeMicOpen(w) }) : '';
+}
+
+/** Rebuild the tray when what the tray shows of the wake word changed. */
 function rebuildTrayForWake() {
-  const key = state.wake ? JSON.stringify(state.wake.trayState()) : '';
+  const key = state.wake ? wakeTrayKey(state.wake.trayState()) : '';
   if (key === state.wakeTrayKey) return;
   rebuildTray();
+}
+
+/** The tray icon gets a cyan dot while the microphone is open for her name. @param {any} w */
+function setWakeTrayImage(w) {
+  const open = wakeMicOpen(w);
+  if (open === state.wakeTrayOpen || !state.tray) return;
+  state.wakeTrayOpen = open;
+  try {
+    state.tray.setImage?.(open ? listeningTrayImage(nativeImage) : trayImage());
+  } catch (err) {
+    state.log('warn', `[main] tray icon update failed: ${/** @type {Error} */ (err).message}`);
+  }
 }
 // ---- end "Hey Jade" ----
 
@@ -1063,7 +1090,8 @@ function rebuildTray() {
     wake: state.wake ? state.wake.trayState() : undefined, // wake: the "Listen for “Hey Jade”" entry and tooltip
   };
   state.tapoTrayKey = st.tapo ? JSON.stringify(st.tapo) : '';
-  state.wakeTrayKey = st.wake ? JSON.stringify(st.wake) : ''; // wake:
+  state.wakeTrayKey = wakeTrayKey(st.wake); // wake:
+  setWakeTrayImage(st.wake); // wake: the listening dot
   try {
     tray.setContextMenu(Menu.buildFromTemplate(/** @type {any} */ (buildTrayTemplate(/** @type {any} */ (st), /** @type {any} */ (trayActions)))));
     tray.setToolTip(trayTooltip(/** @type {any} */ (st)));

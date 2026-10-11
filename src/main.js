@@ -636,6 +636,7 @@ async function boot() {
       drawer,
       toast: (msg, level) => view.toast(msg, /** @type {any} */ (level)),
       onAction: (a) => runAction(a),
+      badge: /** @type {HTMLButtonElement|null} */ ($('wake-mic')),
     });
     const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)');
     wake = new WakeFeature({
@@ -657,6 +658,7 @@ async function boot() {
       reducedMotion: () => !!reduced?.matches,
     });
     app.wake = wake;
+    $('wake-mic')?.addEventListener('click', () => wake?.turnOff()); // the mic badge: off at once
     view.status.wake.addEventListener('click', () => {
       drawer.open();
       document.querySelector('[data-path="wake.enabled"]')?.scrollIntoView({ block: 'center' });

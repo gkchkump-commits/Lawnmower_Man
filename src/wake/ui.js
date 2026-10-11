@@ -34,6 +34,7 @@ export const WAKE_TEXT = Object.freeze({
  * @property {number|null} [recordingSec]  seconds recorded of the test clip (null: not recording)
  * @property {string} [echoResult]          the last "Test my echo" result
  * @property {boolean} [echoTesting]
+ * @property {boolean} [canSpeak]   her replies are spoken (Test my echo needs her voice)
  * @property {number} [nowPerf]  performance.now() of this model (to show log times)
  * @property {number} [nowWall]  Date.now() of this model
  */
@@ -76,6 +77,26 @@ export function chipModel(m) {
       return { hidden: false, text: m.fallback ? 'Hey Jade (transcript check)' : 'Hey Jade', title: m.strict ? `${title} Stricter for a few minutes after several mistakes in a row.` : title, slashed: false, tone: 'dim' };
     }
   }
+}
+
+/** the states in which the microphone is open for her name (or open but muted, or failing) */
+const BADGE = new Set(['waiting', 'busy', 'muted', 'blocked', ...ACTIVE]);
+
+/**
+ * The always-visible "microphone on" badge in the stage's corner (outside the chat panel, which
+ * folds away in minimal mode): an ear while the mic is open for her name, slashed when muted or
+ * blocked; a click turns "Hey Jade" off.
+ * @param {WakeModel} m
+ * @returns {{ hidden: boolean, slashed: boolean, tone: 'dim'|'on'|'warn'|'error', title: string }}
+ */
+export function badgeModel(m) {
+  const s = m.state;
+  if (!BADGE.has(s)) return { hidden: true, slashed: false, tone: 'dim', title: '' };
+  const off = ' Click to turn “Hey Jade” off.';
+  if (s === 'muted') return { hidden: false, slashed: true, tone: 'warn', title: `Your microphone is muted.${off}` };
+  if (s === 'blocked') return { hidden: false, slashed: true, tone: 'error', title: `The microphone is blocked (${m.reason || 'it could not be opened'}).${off}` };
+  if (ACTIVE.has(s) && s !== 'busy') return { hidden: false, slashed: false, tone: 'on', title: `Jade is listening.${off}` };
+  return { hidden: false, slashed: false, tone: 'dim', title: `The microphone is on for “Hey Jade”; nothing is recorded or sent until you say her name.${off}` };
 }
 
 /** mm:ss @param {number} sec */
@@ -173,10 +194,13 @@ export class WakeUi {
    * @param {any} [o.drawer]       SettingsDrawer
    * @param {(msg: string, level?: string) => void} o.toast
    * @param {(action: string) => void} o.onAction
+   * @param {HTMLButtonElement|null} [o.badge]  #wake-mic (the always-visible microphone badge)
    */
   constructor(o) {
     this.o = o;
     this.body = o.body;
+    this.badge = o.badge || null;
+    this._badgeSlashed = /** @type {boolean|null} */ (null);
     this.live = h('div', { class: 'wake-live', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' });
     this.body.append(this.live);
     this._lastAnnounce = -Infinity;
@@ -192,7 +216,24 @@ export class WakeUi {
   render(m) {
     if (m.state !== 'followup' && this.body.dataset.wakeDim) this.body.dataset.wakeDim = '';
     this.o.view.setWake(chipModel(m), m);
+    this._renderBadge(m);
     this._renderInfo(m);
+  }
+
+  /** @param {WakeModel} m */
+  _renderBadge(m) {
+    const el = this.badge;
+    if (!el) return;
+    const b = badgeModel(m);
+    el.hidden = b.hidden;
+    if (b.hidden) return;
+    if (this._badgeSlashed !== b.slashed) {
+      this._badgeSlashed = b.slashed;
+      el.replaceChildren(earIcon(b.slashed));
+    }
+    el.dataset.tone = b.tone;
+    el.title = b.title;
+    el.setAttribute('aria-label', b.title);
   }
 
   /** @param {WakeModel} m */
@@ -209,7 +250,7 @@ export class WakeUi {
     const fb = d.controls.get('wake.transcriptFallback');
     if (fb) fb.row.hidden = !(enabled && (m.code === 'engine' || m.fallback));
     const working = m.state === 'waiting';
-    d.setAction?.('wakeEchoTest', { hidden: !working && !m.echoTesting, disabled: !!m.echoTesting || m.recordingSec != null });
+    d.setAction?.('wakeEchoTest', { hidden: !working && !m.echoTesting, disabled: !!m.echoTesting || m.recordingSec != null || m.canSpeak === false, title: m.canSpeak === false ? 'Needs Settings › Voice › Speak replies' : '' });
     d.setAction?.('wakeRecord', { hidden: !working && m.recordingSec == null, disabled: m.recordingSec != null || !!m.echoTesting, label: m.recordingSec != null ? `Recording… ${clock(m.recordingSec)}` : 'Record a test clip (30 s)…' });
     const key = JSON.stringify(info);
     if (key === this._infoKey) return;

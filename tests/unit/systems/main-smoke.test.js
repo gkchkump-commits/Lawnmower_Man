@@ -62,7 +62,7 @@ vi.mock('electron', async () => {
     getContentBounds() { return { ...this.bounds }; }
     isVisible() { return this.visible; }
     isDestroyed() { return !!this.destroyed; }
-    isMinimized() { return false; }
+    isMinimized() { return !!this.minimized; }
     setTitle(t) { this.title = t; }
     setMenuBarVisibility() {}
     destroy() { this.destroyed = true; this.events.get('closed')?.(); }
@@ -74,7 +74,7 @@ vi.mock('electron', async () => {
     minimize() {}
   }
   class Tray {
-    constructor(img) { this.img = img; this.setContextMenu = vi.fn((menu) => { this.menu = menu; }); this.setToolTip = vi.fn(); this.destroy = vi.fn(); }
+    constructor(img) { this.img = img; this.setContextMenu = vi.fn((menu) => { this.menu = menu; }); this.setToolTip = vi.fn(); this.destroy = vi.fn(); this.setImage = vi.fn((i) => { this.img = i; }); }
     on() {}
   }
   const app = {
@@ -105,7 +105,7 @@ vi.mock('electron', async () => {
       removeHandler: vi.fn((ch) => m.handlers.delete(ch)),
       removeListener: vi.fn((ch, h) => { if (m.listeners.get(ch) === h) m.listeners.delete(ch); }),
     },
-    nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })) },
+    nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })), createEmpty: vi.fn(() => ({ kind: 'listening', reps: [], addRepresentation(r) { this.reps.push(r); } })) },
     protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn((scheme, h) => { m.protocolHandler = h; }) },
     screen: {
       getPrimaryDisplay: () => m.display,
@@ -989,9 +989,29 @@ describe('electron/main.js wiring', () => {
       m.listeners.get('lm:wake:state')(trusted(), { state: 'waiting' });
       await until(() => tooltip().includes('Jade: listening for "Hey Jade"'));
       expect(wakeItem().checked).toBe(true);
+      // the tray icon gets its listening dot (three scales) while the mic is open for her name
+      expect(t.state.tray.img).toMatchObject({ kind: 'listening' });
+      expect(t.state.tray.img.reps.map((r) => r.scaleFactor)).toEqual([1, 1.5, 2]);
       m.listeners.get('lm:wake:state')(trusted(), { state: 'nonsense' }); // refused (logged)
       await sleep(600);
       expect(tooltip()).toContain('Jade: listening for "Hey Jade"');
+      // a whole exchange (attention → listening → busy → followup → waiting) reads "listening"
+      // throughout: the tray menu is not rebuilt for each step
+      const menus = t.state.tray.setContextMenu.mock.calls.length;
+      for (const st of ['attention', 'listening', 'busy', 'followup']) {
+        m.listeners.get('lm:wake:state')(trusted(), { state: st });
+        await sleep(560);
+      }
+      expect(t.state.tray.setContextMenu.mock.calls.length - menus).toBe(1); // only "listening for" → "listening"
+      m.listeners.get('lm:wake:state')(trusted(), { state: 'waiting' });
+      await sleep(560);
+      // a minimized window comes back without restore() (which activates it on Windows)
+      win.minimized = true;
+      const restore = vi.spyOn(win, 'restore');
+      m.listeners.get('lm:window:show')(trusted());
+      expect(restore).not.toHaveBeenCalled();
+      win.minimized = false;
+      restore.mockRestore();
       // a verified "Hey Jade" while hidden: the window comes back without the focus
       win.hide();
       const focus = vi.spyOn(win, 'focus');
@@ -1009,6 +1029,8 @@ describe('electron/main.js wiring', () => {
       applied.mockRestore();
     }
     // off again: the utility is told to stop (killed after 2 s at the latest), no restart
+    await until(() => t.state.tray.img?.kind === 'file', 3000);
+    expect(t.state.tray.img).toMatchObject({ kind: 'file' }); // the plain tray icon again
     await until(() => m.forks[0].child.kill.mock.calls.length > 0, 4000);
     expect(m.forks[0].child.postMessage).toHaveBeenCalledWith({ t: 'stop' });
     await sleep(50);

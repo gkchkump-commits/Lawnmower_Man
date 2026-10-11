@@ -41,6 +41,11 @@ export function wakeTrayText(w) {
   if (s === 'unavailable') return /voice/i.test(w.reason || '') ? 'needs the local voice' : 'wake word unavailable';
   return 'mic off'; // 'off'
 }
+
+/** The microphone is open for her name (the tray icon gets its listening dot). @param {WakeTrayState} w */
+export function wakeMicOpen(w) {
+  return !!w && !!w.enabled && (w.state === 'waiting' || w.state === 'muted' || WAKE_ACTIVE.has(w.state));
+}
 // ---- end "Hey Jade" ----
 
 /**

@@ -24,6 +24,10 @@ import { WAKE_TEXT } from './ui.js';
 
 /** "Test my echo" says this twice: it is designed to fire stage 1 (contract-wake §8.5). */
 export const ECHO_TEST_LINE = 'Just say hey Jade whenever you need me. Just say hey Jade whenever you need me.';
+/** The echo test ends after this long whatever happens (a voice that never says "idle"). */
+export const ECHO_TEST_MAX_MS = 20000;
+/** What the echo test says when she cannot speak. */
+export const ECHO_TEST_NO_VOICE = 'Turn on Settings › Voice › Speak replies to test the echo (she has to speak for it).';
 
 const RATE = 16000;
 
@@ -88,7 +92,7 @@ export class WakeFeature extends Emitter {
     this._renderTimer = 0;
     this._offered = false;
     this._started = false;
-    /** @type {null | { hits: number, timer: any }} */
+    /** @type {null | { hits: number, timer: any, cap: any, off: () => void, done: boolean }} */
     this._echoTest = null;
     this.echoResult = '';
     /** @type {null | { chunks: Float32Array[], n: number, max: number, startAt: number, next: number, hits: any[], timer: any, done: boolean }} */
@@ -168,6 +172,12 @@ export class WakeFeature extends Emitter {
     clearTimeout(this._renderTimer);
     this.ctl.setWakeWord(null);
     this._recAbort('');
+    if (this._echoTest) {
+      clearTimeout(this._echoTest.timer);
+      clearTimeout(this._echoTest.cap);
+      this._echoTest.off?.();
+      this._echoTest = null;
+    }
     for (const j of this._verifies.values()) j.abort.abort();
     this._verifies.clear();
     for (const r of this._decisions.values()) r({ action: 'drop', reason: 'disposed' });
@@ -217,6 +227,14 @@ export class WakeFeature extends Emitter {
     });
     this._maybeOffer();
     this.ctl.wakeWordChanged();
+  }
+
+  /** The microphone badge was clicked: "Hey Jade" off (the mic is released at once). */
+  turnOff() {
+    if (!this._settings?.wake?.enabled) return false;
+    Promise.resolve(this.d.saveWake({ enabled: false })).catch(() => {});
+    this.view.toast?.('“Hey Jade” is off: the microphone is released. Turn it back on in the tray or in Settings › Voice.', 'info');
+    return true;
   }
 
   /** "Retry" after a blocked microphone. */
@@ -646,31 +664,56 @@ export class WakeFeature extends Emitter {
       this.view.toast?.('“Test my echo” works while she is listening for her name and nothing else is going on.', 'info');
       return false;
     }
+    // the test needs her voice: with "Speak replies" off (or no voice) nothing would ever play
+    if (!this._canSpeak()) {
+      this.view.toast?.(ECHO_TEST_NO_VOICE, 'info');
+      return false;
+    }
     this.mask.exempt(ECHO_TEST_LINE);
-    const t = { hits: 0, timer: /** @type {any} */ (0) };
+    const t = { hits: 0, timer: /** @type {any} */ (0), cap: /** @type {any} */ (0), off: /** @type {() => void} */ (() => {}), done: false };
     this._echoTest = t;
-    if (!this.ctl.say(ECHO_TEST_LINE)) {
-      this._echoTest = null;
+    const end = (/** @type {string} */ result, /** @type {'success'|'warn'|'info'} */ tone) => {
+      if (t.done) return;
+      t.done = true;
+      clearTimeout(t.timer);
+      clearTimeout(t.cap);
+      t.off();
+      if (this._echoTest === t) this._echoTest = null;
       this.mask.unexempt(ECHO_TEST_LINE);
+      if (result) {
+        this.echoResult = result;
+        this.view.toast?.(result, tone);
+      }
+      this._renderSoon();
+    };
+    if (!this.ctl.say(ECHO_TEST_LINE)) {
+      end('', 'info');
       this.view.toast?.('Busy: try “Test my echo” once she is quiet.', 'info');
       return false;
     }
+    if (!this.speech.busy) {
+      // said in the chat but not spoken (the voice went away meanwhile): no test
+      end('', 'info');
+      this.view.toast?.(ECHO_TEST_NO_VOICE, 'info');
+      return false;
+    }
     this._renderSoon();
-    const finish = () => {
+    const report = () => end(t.hits === 0 ? WAKE_TEXT.echoGood : WAKE_TEXT.echoBad(t.hits), t.hits === 0 ? 'success' : 'warn');
+    t.off = this.speech.on('idle', () => {
+      t.off();
       // her voice has ended: the tail for a late hit, then the result
-      t.timer = setTimeout(() => {
-        this._echoTest = null;
-        this.mask.unexempt(ECHO_TEST_LINE);
-        this.echoResult = t.hits === 0 ? WAKE_TEXT.echoGood : WAKE_TEXT.echoBad(t.hits);
-        this.view.toast?.(this.echoResult, t.hits === 0 ? 'success' : 'warn');
-        this._renderSoon();
-      }, 1200);
-    };
-    const off = this.speech.on('idle', () => {
-      off();
-      finish();
+      t.timer = setTimeout(report, 1200);
     });
+    // whatever happens, the test (and the mask's exemption) ends
+    t.cap = setTimeout(() => (t.hits ? report() : end('The echo test did not finish; try it again.', 'info')), ECHO_TEST_MAX_MS);
     return true;
+  }
+
+  /** Her replies are spoken (the echo test needs her voice). */
+  _canSpeak() {
+    const tts = this.d.services.tts;
+    const avail = typeof tts?.available === 'function' ? !!tts.available() : true;
+    return this._settings?.voice?.speakReplies !== false && avail;
   }
 
   /** Record `sec` seconds of the tapped audio and the hits in it, then save them on this PC. */
@@ -778,6 +821,7 @@ export class WakeFeature extends Emitter {
       recordingSec: this._rec ? this._rec.n / RATE : null,
       echoResult: this.echoResult,
       echoTesting: !!this._echoTest,
+      canSpeak: this._canSpeak(),
       nowPerf: this._now(),
       nowWall: Date.now(),
     });

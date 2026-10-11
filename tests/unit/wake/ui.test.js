@@ -3,7 +3,7 @@
 // block with its action, and the wake log lines.
 import { describe, expect, it } from 'vitest';
 import { WAKE_STATES } from '../../../src/wake/machine.js';
-import { WAKE_TEXT, chipModel, infoModel, logLine } from '../../../src/wake/ui.js';
+import { WAKE_TEXT, badgeModel, chipModel, infoModel, logLine } from '../../../src/wake/ui.js';
 
 describe('chipModel: one chip per state', () => {
   it('every state has a chip (off hides it)', () => {
@@ -100,5 +100,24 @@ describe('the texts', () => {
     expect(WAKE_TEXT.offer).toMatch(/nothing is recorded or sent anywhere until you say my name/);
     expect(WAKE_TEXT.echoBad(1)).toMatch(/^I heard my own voice 1 time\./);
     expect(WAKE_TEXT.echoBad(3)).toMatch(/3 times/);
+  });
+});
+
+describe('badgeModel: the always-visible microphone badge (outside the folding chat panel)', () => {
+  it('shown exactly while the microphone is open for her name (slashed when muted or blocked); a click turns it off', () => {
+    const shown = WAKE_STATES.filter((state) => !badgeModel({ state }).hidden);
+    expect(shown.sort()).toEqual(['attention', 'barge', 'blocked', 'busy', 'followup', 'listening', 'look', 'muted', 'waiting']);
+    for (const state of ['off', 'unavailable', 'starting', 'paused', 'locked']) expect(badgeModel({ state }).hidden, state).toBe(true);
+    expect(badgeModel({ state: 'waiting' })).toMatchObject({ slashed: false, tone: 'dim' });
+    expect(badgeModel({ state: 'listening' })).toMatchObject({ slashed: false, tone: 'on' });
+    expect(badgeModel({ state: 'muted' })).toMatchObject({ slashed: true });
+    expect(badgeModel({ state: 'blocked', reason: 'Windows is blocking the microphone' })).toMatchObject({ slashed: true, tone: 'error' });
+    for (const state of shown) expect(badgeModel({ state }).title, state).toMatch(/turn “Hey Jade” off/);
+  });
+
+  it('"Recording test clip" only while the mic is tapped; "Cancel recording" in the drawer meanwhile', () => {
+    expect(chipModel({ state: 'off', recordingSec: 5 }).text).not.toMatch(/Recording/);
+    expect(chipModel({ state: 'waiting', recordingSec: 5 }).text).toBe('Recording test clip 0:05');
+    expect(infoModel({ state: 'waiting', recordingSec: 5 }).action).toEqual({ id: 'wakeRecordCancel', label: 'Cancel recording' });
   });
 });

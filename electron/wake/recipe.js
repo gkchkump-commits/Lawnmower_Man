@@ -124,6 +124,11 @@ export class OnsetRecipe {
     return this._spotters.map((s) => s.name);
   }
 
+  /** Whether a spotter is in use: the current or pending set, or a stream still running on it. @param {SpotterLike} sp */
+  usesSpotter(sp) {
+    return this._spotters.some((x) => x.spotter === sp) || !!this._pending?.some((x) => x.spotter === sp) || this._streams.some((r) => r.spotter === sp);
+  }
+
   /**
    * Swap the spotters (new thresholds or phrase). Takes effect at the next fresh stream, so an
    * utterance in progress is finished with the old ones.

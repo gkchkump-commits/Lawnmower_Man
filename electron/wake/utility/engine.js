@@ -8,8 +8,10 @@
 // handles (the addon has no per-stream keywords; creating one blocks ≈ 1 s). They are built while
 // no stream is active (or after 10 s of continuous speech at the latest), and the recipe swaps at
 // its next fresh stream: an utterance in progress finishes with the old thresholds, and the audio
-// that arrives during the build waits in the port's queue, so nothing is lost. Handles are cached
-// (the current and the previous set), so strict on/off is instant after the first time.
+// that arrives during the build waits in the port's queue, so nothing is lost. The strict ('low')
+// set of the current phrase is built ahead, at the first quiet moment after loading (a build in the
+// middle of a media burst delayed the next hit by 2.6 s, so a call right then was lost), and only
+// the current set and its strict twin stay cached (each set holds ≈ 25 MB of ONNX sessions).
 
 import v8 from 'node:v8';
 import vm from 'node:vm';
@@ -21,9 +23,15 @@ import { createSpotter, createVad } from './sherpa.js';
 
 /** Collect garbage after this many new streams (each holds ≈ 0.3 MB V8 cannot see). */
 const GC_EVERY_STREAMS = 16;
-const MAX_CACHED_SPOTTERS = 6;
+/** the strict twin is built after this much quiet (no stream fed) once loaded or reconfigured */
+const PREBUILD_QUIET_SAMPLES = SAMPLE_RATE * 1.5;
 const REBUILD_LATEST_MS = 10000;
 const RECENT_HITS = 20;
+
+/** @param {{ model: string, threshold: number, keywords: string }} spec */
+function spotterKey(spec) {
+  return `${spec.model}\n${spec.threshold}\n${spec.keywords}`;
+}
 
 /** `gc()` without --expose-gc (the flag is accepted at run time; the function lives in a new context). */
 export function exposeGc() {
@@ -68,12 +76,15 @@ export class WakeEngine {
     this.agc = null;
     this.config = buildConfig({ ...this.params, strict: false, hasZhen: !!this.modelPaths.zhen });
     this._dirtySince = 0;
+    /** the strict twin of the current configuration is cached */
+    this._twinReady = false;
+    this._quietSamples = 0;
     this._nextId = 1;
     this._streamsSinceGc = 0;
     /** @type {EngineHit[]} */
     this.recent = [];
     this.loadMs = 0;
-    this._acct = { activeSec: 0, idleSec: 0, cpuActiveUs: 0, cpuIdleUs: 0, dropped: 0, buildMs: 0, builds: 0 };
+    this._acct = { activeSec: 0, idleSec: 0, cpuActiveUs: 0, cpuIdleUs: 0, dropped: 0, buildMs: 0, builds: 0, prebuildMs: 0 };
   }
 
   /** Load the VAD and the spotters for the current settings (blocks ≈ 1 s per model). */
@@ -115,6 +126,17 @@ export class WakeEngine {
   _reconfigure() {
     this.config = buildConfig({ ...this.params, strict: this.strict, hasZhen: !!this.modelPaths.zhen });
     if (!this._dirtySince) this._dirtySince = this._now() || 1;
+    this._twinReady = this._has(this._twin());
+  }
+
+  /** The configuration strict mode would switch to (or back from). */
+  _twin() {
+    return buildConfig({ ...this.params, strict: !this.strict, hasZhen: !!this.modelPaths.zhen });
+  }
+
+  /** @param {import('../config.js').WakeEngineConfig} cfg */
+  _has(cfg) {
+    return cfg.spotters.every((spec) => this._cache.has(spotterKey(spec)));
   }
 
   /** Drop the streams now (the renderer consumed a hit, or muted). */
@@ -149,7 +171,42 @@ export class WakeEngine {
       this.recent.push(h);
       if (this.recent.length > RECENT_HITS) this.recent.shift();
     }
+    // build the strict twin ahead, while nobody speaks (the audio meanwhile waits in the port)
+    if (!this._twinReady) {
+      this._quietSamples = recipe.active ? 0 : this._quietSamples + pcm.length;
+      if (this._quietSamples >= PREBUILD_QUIET_SAMPLES) this.prebuild();
+    }
     return out;
+  }
+
+  /** Build (cache) the strict twin of the current configuration now. Returns the ms it took. */
+  prebuild() {
+    const t0 = this._now();
+    this._twinReady = true;
+    const twin = this._twin();
+    if (!this._has(twin)) {
+      this._spottersFor(twin, false);
+      const ms = this._now() - t0;
+      this._acct.prebuildMs += ms;
+      this._log('info', `[wake] built the ${this.strict ? 'normal' : 'strict'} thresholds ahead (${twin.spotters.map((sp) => `${sp.name} ${sp.threshold}`).join(', ')}); ${ms} ms`);
+    }
+    this._prune();
+    return this._now() - t0;
+  }
+
+  /** Keep only the current set and its strict twin (and nothing the running recipe uses). */
+  _prune() {
+    const keep = new Set([...this.config.spotters, ...this._twin().spotters].map(spotterKey));
+    for (const key of [...this._cache.keys()]) {
+      if (keep.has(key) || this._inUse(key)) continue;
+      this._cache.delete(key); // the handles go with the next gc()
+    }
+  }
+
+  /** @param {string} key */
+  _inUse(key) {
+    const sp = this._cache.get(key);
+    return !!sp && !!this.recipe && this.recipe.usesSpotter(sp);
   }
 
   /** A frame the protocol refused (counted in the stats). */
@@ -181,6 +238,8 @@ export class WakeEngine {
       strict: this.strict,
       builds: a.builds,
       buildMs: Math.round(a.buildMs),
+      prebuildMs: Math.round(a.prebuildMs),
+      cachedSets: this._cache.size,
     };
   }
 
@@ -193,28 +252,28 @@ export class WakeEngine {
     this._acct.buildMs += ms;
     this._acct.builds++;
     this._log('info', `[wake] thresholds now ${this.config.spotters.map((s) => `${s.name} ${s.threshold}`).join(', ')}${this.strict ? ' (strict)' : ''}; ${ms} ms`);
+    this._twinReady = this._has(this._twin());
+    this._quietSamples = 0;
+    if (this._twinReady) this._prune();
   }
 
-  /** The spotters for a configuration, from the cache when possible. @param {import('../config.js').WakeEngineConfig} cfg */
-  _spottersFor(cfg) {
-    const used = [];
+  /**
+   * The spotters for a configuration, from the cache when possible.
+   * @param {import('../config.js').WakeEngineConfig} cfg @param {boolean} [prune] drop what no longer belongs
+   */
+  _spottersFor(cfg, prune = true) {
     const list = cfg.spotters.map((spec) => {
-      const key = `${spec.model}\n${spec.threshold}\n${spec.keywords}`;
-      used.push(key);
+      const key = spotterKey(spec);
       let sp = this._cache.get(key);
       if (!sp) {
         const model = spec.model === 'zhen' ? this.modelPaths.zhen : this.modelPaths.giga;
         if (!model) throw new Error(`model ${spec.model} is not available`);
         sp = createSpotter(this.addon, { model, keywords: spec.keywords, threshold: spec.threshold });
-      } else this._cache.delete(key);
-      this._cache.set(key, sp); // most recently used last
+        this._cache.set(key, sp);
+      }
       return { name: spec.name, spotter: sp };
     });
-    while (this._cache.size > Math.max(MAX_CACHED_SPOTTERS, used.length)) {
-      const oldest = /** @type {string} */ (this._cache.keys().next().value);
-      if (used.includes(oldest)) break;
-      this._cache.delete(oldest);
-    }
+    if (prune && this.recipe) this._prune();
     return list;
   }
 

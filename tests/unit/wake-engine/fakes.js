@@ -106,3 +106,24 @@ export function fakeClock(start = 1_000_000) {
     pending: () => timers.size,
   };
 }
+
+/** A fake raw sherpa-onnx addon (like sherpa.test.js's): spotters never fire, a VAD on energy. */
+export function fakeSherpaAddon() {
+  const a = {
+    spotters: 0,
+    createKeywordSpotter: (cfg) => { a.spotters++; return { cfg }; },
+    createKeywordStream: (h) => ({ h, fed: 0 }),
+    acceptWaveformOnline: (s, w) => { s.fed += w.samples.length; },
+    isKeywordStreamReady: () => false,
+    decodeKeywordStream: () => {},
+    getKeywordResultAsJson: () => '{}',
+    resetKeywordStream: () => {},
+    createVoiceActivityDetector: () => ({ speech: false, segs: 0 }),
+    voiceActivityDetectorAcceptWaveform: (h, x) => { h.speech = x.some((v) => Math.abs(v) > 0.1); },
+    voiceActivityDetectorIsDetected: (h) => h.speech,
+    voiceActivityDetectorIsEmpty: () => true,
+    voiceActivityDetectorPop: () => {},
+    voiceActivityDetectorReset: (h) => { h.speech = false; },
+  };
+  return a;
+}

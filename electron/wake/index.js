@@ -5,8 +5,11 @@
 // forwards lock/unlock/sleep to the avatar window, answers the lm:wake:* IPC channels and gives
 // main.js the tray entry, the persona context and the e2e hooks. Electron objects are injected.
 //
-// The utility runs only while settings.wake.enabled is on (no cost otherwise). Stage 2 (Whisper on
-// the GPU), the listening state machine, the earcons and the UI are the renderer's (src/wake/).
+// The utility runs only while settings.wake.enabled is on (no cost otherwise), and stops when the
+// local voice has been unusable for VOICE_PARK_MS (not installed, turned off, failing): without the
+// voice she cannot listen, so its ~160-190 MB buy nothing; it starts again when the voice does.
+// Stage 2 (Whisper on the GPU), the listening state machine, the earcons and the UI are the
+// renderer's (src/wake/).
 
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
@@ -31,6 +34,10 @@ const ZHEN_CHECK_WAIT_MS = 5000;
  * page) is bounded: one save per 25 s, 20 per run, the folder opened at most once a minute.
  */
 export const CLIP_LIMITS = Object.freeze({ minGapMs: 25000, perRun: 20, openGapMs: 60000 });
+/** The utility stops after the local voice has been unusable this long (a restart blip is shorter). */
+export const VOICE_PARK_MS = 60000;
+/** VoiceSidecar statuses with which the wake word can work (or soon will). */
+const VOICE_USABLE = new Set(['starting', 'ready']);
 
 /**
  * @typedef {object} WakeEngineStatus  (contract §6.4)
@@ -56,7 +63,9 @@ export const CLIP_LIMITS = Object.freeze({ minGapMs: 25000, perRun: 20, openGapM
  * @property {string} [resourcesPath]
  * @property {boolean} isPackaged
  * @property {Record<string, string|undefined>} [env]
- * @property {{ voiceDir: string, venvDirs: string[], getVoiceSettings: () => { enabled: boolean, pythonPath?: string } }} voice
+ * @property {{ voiceDir: string, venvDirs: string[], getVoiceSettings: () => { enabled: boolean, pythonPath?: string }, status?: () => string, parkMs?: number }} voice
+ *   status: the VoiceSidecar's info().status (main calls voiceChanged() when it changes); without
+ *   it the voice counts as usable
  * @property {(event: any, kinds: Array<'avatar'|'camera'>) => void} isTrustedSender   throws when not allowed
  * @property {() => any} getAvatarWindow
  * @property {(channel: string, payload: unknown) => void} sendToAvatar
@@ -98,6 +107,10 @@ export function createWake(o) {
   /** @type {{ state: string, reason: string }|null} */
   let uiState = null;
   let stopped = false;
+  /** the local voice has been unusable for VOICE_PARK_MS: no utility until it is back */
+  let parked = false;
+  /** @type {NodeJS.Timeout|null} */
+  let parkTimer = null;
   const clips = { saved: 0, lastAt: -Infinity, openedAt: -Infinity };
 
   // --- the PC itself ---------------------------------------------------------------------------
@@ -120,7 +133,7 @@ export function createWake(o) {
 
   // --- the engine ------------------------------------------------------------------------------
   async function startEngine() {
-    if (stopped || !wake().enabled) return;
+    if (stopped || !wake().enabled || parked) return;
     const seq = ++startSeq;
     files = checkFiles(wakeDir, { key });
     if (!files.ok) {
@@ -155,7 +168,7 @@ export function createWake(o) {
 
   /** Model A became available: restart the utility with it. @param {string} dir */
   function useZhen(dir) {
-    if (stopped || !wake().enabled || runningZhen === dir || !checkZhen(dir)) return;
+    if (stopped || !wake().enabled || parked || runningZhen === dir || !checkZhen(dir)) return;
     runningZhen = dir;
     log('info', `[wake] restarting the wake-word engine with the zh-en model (${dir})`);
     host.restart(initFor(dir));
@@ -165,6 +178,35 @@ export function createWake(o) {
     startSeq++;
     runningZhen = null;
     await host.stop();
+  }
+
+  // --- the local voice: the utility stops when it has been gone a while, and comes back with it --
+  const voiceUsable = () => {
+    if (typeof o.voice.status !== 'function') return true;
+    return VOICE_USABLE.has(String(safe(() => o.voice.status?.(), 'ready')));
+  };
+  function voiceChanged() {
+    if (stopped) return;
+    if (voiceUsable()) {
+      if (parkTimer) clearTimeout(parkTimer);
+      parkTimer = null;
+      if (!parked) return;
+      parked = false;
+      log('info', '[wake] the local voice is back; starting the wake-word engine');
+      startEngine().catch((err) => log('error', `[wake] start failed: ${err && err.stack ? err.stack : err}`));
+      emitStatus();
+      return;
+    }
+    if (parked || parkTimer) return;
+    parkTimer = setTimeout(() => {
+      parkTimer = null;
+      if (stopped || voiceUsable()) return;
+      parked = true;
+      log('info', '[wake] no local voice for a minute; the wake-word engine waits for it');
+      stopEngine().catch(() => {});
+      emitStatus();
+    }, o.voice.parkMs ?? VOICE_PARK_MS);
+    parkTimer.unref?.();
   }
 
   zhen.on('ready', (/** @type {string} */ dir) => useZhen(dir));
@@ -196,6 +238,9 @@ export function createWake(o) {
       detail = files.platformSupported
         ? 'The wake-word engine is not installed; reinstall Lawnmower Man.'
         : `The wake-word engine is not available for this computer (${key}).`;
+    } else if (parked) {
+      engine = 'starting';
+      detail = 'Waiting for the local voice; the wake-word engine starts with it.';
     } else if (host.state === 'ready') {
       engine = 'ready';
       detail = z === 'ok' ? 'Listening for "Hey Jade" with both wake-word models.'
@@ -313,7 +358,7 @@ export function createWake(o) {
       },
       // "Retry" (the drawer) after "keeps stopping" or "could not start": a fresh restart budget
       restart: () => {
-        if (stopped || !wake().enabled) return { ok: false };
+        if (stopped || !wake().enabled || parked) return { ok: false };
         log('info', '[wake] the user asked to start the wake-word engine again');
         if (host.child) host.retry(initFor(runningZhen));
         else startEngine().catch((err) => log('error', `[wake] start failed: ${err && err.stack ? err.stack : err}`));
@@ -333,6 +378,7 @@ export function createWake(o) {
 
   // --- start -------------------------------------------------------------------------------------
   if (wake().enabled) startEngine().catch((err) => log('error', `[wake] start failed: ${err && err.stack ? err.stack : err}`));
+  voiceChanged();
 
   Object.assign(svc, {
     /** (Re)start the engine when the wake word is on. */
@@ -340,6 +386,7 @@ export function createWake(o) {
     /** Bounded (≈ 2 s): stop the utility; unregister everything. */
     stop: async () => {
       stopped = true;
+      if (parkTimer) clearTimeout(parkTimer);
       if (statusTimer) clearTimeout(statusTimer);
       if (trayTimer) clearTimeout(trayTimer);
       power.stop();
@@ -361,6 +408,8 @@ export function createWake(o) {
       emitStatus();
     },
     status,
+    /** main.js: the VoiceSidecar's status changed (the utility follows the local voice). */
+    voiceChanged,
     /** The persona's wake section (electron/persona.js): only while the wake word is on. */
     personaContext: () => {
       const w = wake();
@@ -402,7 +451,7 @@ export function createWake(o) {
 
 /**
  * @typedef {EventEmitter & {
- *   start: () => Promise<void>, stop: () => Promise<void>, applySettings: (next: any, prev: any) => void,
+ *   start: () => Promise<void>, stop: () => Promise<void>, applySettings: (next: any, prev: any) => void, voiceChanged: () => void,
  *   status: () => WakeEngineStatus, personaContext: () => object, trayState: () => { enabled: boolean, state: string, reason: string },
  *   trayActions: { setWakeWord: (on: boolean) => void }, e2e: Record<string, Function>|null }} WakeService
  */

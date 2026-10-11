@@ -319,18 +319,20 @@ async function init() {
   voice.on('status', () => {
     sendToRenderer('lm:voice:status', voiceInfo());
     rebuildTray();
+    state.wake?.voiceChanged(); // wake: the utility follows the local voice
   });
   state.voice = voice;
 
   // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
-  // The "Jade wake word" utility process (stage 1), only while settings.wake.enabled is on; the
+  // The "Jade wake word" utility process (stage 1), only while settings.wake.enabled is on (and
+  // stopped after the local voice has been unusable for a minute: it could never listen then); the
   // lm:wake:* IPC channels; lock/unlock to the avatar; the extra zh-en model through the voice
   // package (it needs voiceDir and the venv dirs, hence after the sidecar).
   const wake = createWake({
     electron: { app, ipcMain, utilityProcess, MessageChannelMain, powerMonitor, systemPreferences, shell },
     settings, log, userData, appRoot, resourcesPath: process.resourcesPath, isPackaged: app.isPackaged,
     env: process.env,
-    voice: { voiceDir, venvDirs: voiceVenvDirs({ packaged: app.isPackaged, voiceDir }), getVoiceSettings: () => settings.get().voice },
+    voice: { voiceDir, venvDirs: voiceVenvDirs({ packaged: app.isPackaged, voiceDir }), getVoiceSettings: () => settings.get().voice, status: () => voice.info().status },
     isTrustedSender: (event, kinds) => {
       assertSender(event, kinds);
     },

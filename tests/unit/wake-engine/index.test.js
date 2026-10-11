@@ -52,7 +52,7 @@ class FakeZhen extends EventEmitter {
   stop() {}
 }
 
-function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {} } = {}) {
+function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {}, voice = {} } = {}) {
   const userData = mkdtemp(path.join(os.tmpdir(), 'lm-wakeud-'));
   const settings = new SettingsStore({ dir: userData, platform: 'linux' });
   settings.load();
@@ -74,7 +74,7 @@ function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {} 
       ipcMain, utilityProcess: up, MessageChannelMain: fakeChannel(), powerMonitor: pm, systemPreferences: { getMediaAccessStatus: () => 'granted' }, shell: { openPath: async () => '', openExternal: async () => {} } },
     settings, log: () => {}, userData, appRoot: '/app', isPackaged: false,
     env: { LAWNMOWER_WAKE_DIR: wakeDir({ zhen, broken }), LAWNMOWER_E2E: '1', ...env },
-    voice: { voiceDir: '/app/voice', venvDirs: [], getVoiceSettings: () => settings.get().voice },
+    voice: { voiceDir: '/app/voice', venvDirs: [], getVoiceSettings: () => settings.get().voice, ...voice },
     isTrustedSender: trusted, getAvatarWindow: () => null, sendToAvatar: (ch, p) => sent.push({ ch, p }), showAvatar: () => {},
     platform: 'linux', arch: 'x64', zhen: z,
   });
@@ -193,6 +193,54 @@ describe('createWake (contract §3.2, §7.1)', () => {
     expect(up.forks).toHaveLength(2);
     settings.update({ wake: { enabled: false } });
     expect(await ipc.handlers.get('lm:wake:restart')({ sender: {} })).toEqual({ ok: false });
+    await wake.stop();
+  });
+
+  it('the utility stops when the local voice has been unusable a while, and starts again with it', async () => {
+    let vs = 'ready';
+    const { wake, up, settings, ipc } = make({ zhen: true, voice: { status: () => vs, parkMs: 40 } });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    up.last.onStop = () => up.last.emit('exit', 0);
+    // a restart blip of the voice (error → starting) is shorter than the grace: nothing happens
+    vs = 'error';
+    wake.voiceChanged();
+    vs = 'starting';
+    wake.voiceChanged();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(up.last.posted.some((p) => p.m.t === 'stop')).toBe(false);
+    // gone for good (not installed, turned off): the utility stops
+    vs = 'disabled';
+    wake.voiceChanged();
+    await until(() => up.last.posted.some((p) => p.m.t === 'stop'));
+    expect(up.last.posted.some((p) => p.m.t === 'stop')).toBe(true);
+    await until(() => /local voice/.test(wake.status().detail));
+    expect(wake.status()).toMatchObject({ engine: 'starting', detail: expect.stringMatching(/Waiting for the local voice/) });
+    expect(await ipc.handlers.get('lm:wake:restart')({ sender: {} })).toEqual({ ok: false });
+    // turning the wake word off and on meanwhile starts nothing
+    let prev = settings.get();
+    settings.update({ wake: { enabled: false } });
+    wake.applySettings(settings.get(), prev);
+    prev = settings.get();
+    settings.update({ wake: { enabled: true } });
+    wake.applySettings(settings.get(), prev);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(up.forks).toHaveLength(1);
+    // the voice is back: so is the utility
+    vs = 'starting';
+    wake.voiceChanged();
+    await until(() => up.forks.length === 2);
+    expect(up.forks).toHaveLength(2);
+    await wake.stop();
+  });
+
+  it('a voice that is not there at the start: the utility runs only for the grace period', async () => {
+    const { wake, up } = make({ zhen: true, voice: { status: () => 'disabled', parkMs: 40 } });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    up.last.onStop = () => up.last.emit('exit', 0);
+    await until(() => up.last.posted.some((p) => p.m.t === 'stop'));
+    expect(up.last.posted.some((p) => p.m.t === 'stop')).toBe(true);
     await wake.stop();
   });
 

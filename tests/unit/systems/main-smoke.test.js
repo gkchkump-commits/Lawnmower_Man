@@ -959,6 +959,11 @@ describe('electron/main.js wiring', () => {
     await expect(m.handlers.get('lm:wake:request-port')({ sender: win.webContents, senderFrame: { url: 'https://evil.example/' } })).rejects.toThrow(/untrusted/);
     // the e2e hooks exist only with LAWNMOWER_E2E=1 (not set here)
     expect(/** @type {any} */ (globalThis).__lawnmowerE2E).toBeUndefined();
+    // the utility follows the local voice (it stops after a minute without it): main tells it
+    const voiceChanged = vi.spyOn(t.state.wake, 'voiceChanged');
+    t.state.voice.emit('status', t.state.voice.info());
+    expect(voiceChanged).toHaveBeenCalledTimes(1);
+    voiceChanged.mockRestore();
     const applied = vi.spyOn(t.state.claude, 'applySettings');
     try {
       wakeItem().click({ checked: true }); // the tray turns it on

@@ -158,7 +158,7 @@ export function createMockWake(o) {
   const fire = (/** @type {{ keyword: string, streamAt: number, startAt: number, endAt: number }} */ h) => {
     if (!sp.port) return;
     hooks.hits++;
-    sp.port.postMessage({ t: 'hit', id: `mock-${++sp.ids}`, keyword: h.keyword, model: 'giga', streamAt: h.streamAt, startAt: h.startAt, endAt: h.endAt });
+    sp.port.postMessage({ t: 'hit', id: `mock-${++sp.ids}`, keyword: h.keyword, model: 'giga', streamAt: h.streamAt, startAt: h.startAt, endAt: h.endAt, emitAt: Math.max(h.endAt, sp.end) });
   };
 
   /** 20 ms frames: an onset is ≥ 60 ms loud after ≥ 600 ms quiet (the utility's VAD + onset recipe, simplified) */

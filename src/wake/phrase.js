@@ -2,11 +2,13 @@
 //
 // Two transcripts per wake, both from the app's own /stt (faster-whisper on the GPU, no
 // hotwords, no prompt: biasing turned "Hey Jay" into "hey Jade"):
-//   * the wake segment (stream start → end of "Jade" + 0.15 s): veto() decides whether the
-//     stage-1 hit was a real call. It rejects rival names ("Hey Jude", "Hey Jay"), her own lines
-//     ("I'm Jade", "Jade here") and speech that is no call at all; everything else is accepted.
-//     A veto, not a "must start with hey jade" rule: Whisper writes "I enjoyed it" or "Hey Jayden"
-//     for about a quarter of isolated clean "Hey Jade."s.
+//   * the wake segment (≤ 1.2 s before the end of "Jade" → when stage 1 decided, ≤ 0.6 s after
+//     it): veto() decides whether the stage-1 hit was a real call. It rejects rival names ("Hey
+//     Jude", "Hey Jay", "Hey Jodie"), her own lines ("I'm Jade", "Jade here", "say hey Jade") and
+//     speech that is no call at all; everything else is accepted. The segment ends right after the
+//     name, so the call is at its start or, after a lead-in ("Okay, so, hey Jade", TV words before
+//     it), at its end: both are looked at. A veto, not a "must start with hey jade" rule: Whisper
+//     writes "I enjoyed it" or "Hey Jayden" for about a quarter of isolated clean "Hey Jade."s.
 //   * the command (the audio after the keyword's end, cut by stage 1's timing): decideCommand()
 //     turns it into what the app does: send it to Claude, stop her, close the window, or keep
 //     listening. stripCall() removes a residual "Jade," (or a whole "So, hey Jade,") first.
@@ -31,8 +33,18 @@ export function normalize(text) {
 
 /** jade jaid jayde jada gade (not jude, jay, jane, james, jaden, jed; the eval's exact pattern) */
 export const JADE_LIKE = /^[jg](?:a|ai|ay|ei|ey|ae)i?d(?:e|ed|es|a)?$/;
-/** names and words Whisper hears instead of her name (eval.md §7.2; "joey" added after its one AGC-mix leak) */
-export const RIVAL = /^(?:jud\w*|jay|jays|j|jane|james|jams|jim|jimmy|jamie|jake|jen|jenn|jean|jack|joe|joey|jed|jason|jess|jesse|dave|kate|grace|wade|shade|fade|they|day)$/;
+/**
+ * names and words Whisper hears instead of her name (eval.md §7.2; "joey" added after its one
+ * AGC-mix leak; Jodie, Gage, JD/DJ, Dre, join, joy after the review's fresh near-name and noisy-mix
+ * clips woke her through the whole cascade)
+ */
+export const RIVAL = /^(?:jud\w*|juj\w*|jay|jays|j|jane|james|jams|jim|jimmy|jamie|jake|jen|jenn|jean|jack|joe|joey|jed|jason|jess|jesse|dave|kate|grace|wade|shade|fade|they|day|jod(?:y|ie|i|ee)(?:'s)?|jo|jd|dj|dre|join|joy|gage|gauge)$/;
+/** "Jude" as Whisper writes it, also when the segment cuts it short ("Hey, Jujoo!") */
+export const JUDE_LIKE = /^ju[dj]\w*$/;
+/** "Jayden": Whisper's spelling of a real isolated "Hey Jade." too, so it counts as a rival only with words after it */
+const JAYDEN_LIKE = /^ja[iy]?d[eo]n$/;
+/** her telling someone how to call her ("just say hey Jade"): a self line */
+const SAY = /^(?:say|says|said|saying)$/;
 /** what a "hey" becomes in a transcript */
 export const HEY_LIKE = /^(?:hey|hay|hi|heya|hello|helly|hell|how|a|ay|eh|oh|harry|helen|i)$/;
 
@@ -68,6 +80,11 @@ export function selfTalk(words) {
   if (w.length >= 2 && JADE_LIKE.test(w[0]) && SELF_AFTER.test(w[1])) return true;
   const i = w[0] === 'just' ? 1 : 0;
   if (/^(?:okay|ok|say|says)$/.test(w[i] || '') && JADE_LIKE.test(w[i + 1] || '')) return true;
+  // "(just) say hey Jade" anywhere (the line the persona forbids, which every engine wakes on)
+  for (let k = 1; k < words.length; k++) {
+    if (!JADE_LIKE.test(words[k])) continue;
+    if (SAY.test(words[k - 1]) || (k >= 2 && HEY_LIKE.test(words[k - 1]) && SAY.test(words[k - 2]))) return true;
+  }
   return false;
 }
 
@@ -86,10 +103,22 @@ export function veto(text, mode = 'full') {
   const words = normalize(text);
   if (!words.length) return { ok: false, reason: 'empty' };
   const first3 = words.slice(0, 3);
-  if (first3.some((w) => /^jud/.test(w))) return { ok: false, reason: 'jude' };
-  if (mode === 'full' && first3.some((w) => RIVAL.test(w))) return { ok: false, reason: 'rival' };
+  // "Jude" anywhere in the short segment: the song, also after a lead-in ("I, uh, hey Jude")
+  if (words.some((w) => JUDE_LIKE.test(w))) return { ok: false, reason: 'jude' };
   if (selfTalk(words)) return { ok: false, reason: 'self' };
-  if (mode === 'full' && !HEY_LIKE.test(words[0]) && !first3.some((w) => JADE_LIKE.test(w))) return { ok: false, reason: 'no-call' };
+  if (mode !== 'full') return { ok: true };
+  // the call at the start: a hey-like first word or her name in the first three, no rival there
+  const headRival = first3.some((w) => RIVAL.test(w));
+  const head = !headRival && (HEY_LIKE.test(words[0]) || first3.some((w) => JADE_LIKE.test(w)));
+  // the call at the end, after a lead-in: "…, hey Jade" (a hey-like word right before her name)
+  let k = -1;
+  for (let i = words.length - 1; i >= 1 && k < 0; i--) if (JADE_LIKE.test(words[i])) k = i;
+  const win = k >= 1 ? words.slice(Math.max(0, k - 2), k + 1) : null;
+  const tail = !!win && HEY_LIKE.test(words[k - 1]) && !win.some((w) => RIVAL.test(w));
+  if (!head && !tail) return { ok: false, reason: headRival || (win && win.some((w) => RIVAL.test(w))) ? 'rival' : 'no-call' };
+  // "Hey Jayden, come here": a name that is not hers, unless it is all Whisper heard
+  const j = words.findIndex((w) => JAYDEN_LIKE.test(w));
+  if (j >= 0 && !words.some((w) => JADE_LIKE.test(w)) && j < words.length - 1) return { ok: false, reason: 'rival' };
   return { ok: true };
 }
 

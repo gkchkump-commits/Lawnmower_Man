@@ -23,7 +23,8 @@ describe('normalize', () => {
   it('word classes', () => {
     for (const w of ['jade', 'jaid', 'jayde', 'jada', 'gade', 'jades', 'jeid']) expect(JADE_LIKE.test(w), w).toBe(true);
     for (const w of ['jude', 'jay', 'jane', 'james', 'jaden', 'jed', 'jayden', 'jd']) expect(JADE_LIKE.test(w), w).toBe(false);
-    for (const w of ['jude', 'judah', 'judy', 'jay', 'joey', 'jake', 'dave']) expect(RIVAL.test(w), w).toBe(true);
+    for (const w of ['jude', 'judah', 'judy', 'jujoo', 'jay', 'joey', 'jake', 'dave', 'jody', 'jodie', 'gage', 'jd', 'dj', 'dre', 'join', 'joy']) expect(RIVAL.test(w), w).toBe(true);
+    for (const w of ['jade', 'jayden', 'jaden', 'hey', 'joke', 'jobs']) expect(RIVAL.test(w), w).toBe(false);
     for (const w of ['hey', 'hi', 'a', 'i', 'oh', 'hello']) expect(HEY_LIKE.test(w), w).toBe(true);
   });
 });
@@ -61,8 +62,41 @@ describe('veto (the wake segment)', () => {
     ['Jade is listening.', 'self'],
     ['Okay, Jade is on it.', 'self'],
     ['Say Jade and I\'ll listen.', 'self'],
+    // (changed on purpose: "say hey Jade" anywhere is her own line now, not just "no call")
+    ['Just say hey Jade whenever you need me.', 'self'],
+    ['So just say, hey Jade.', 'self'],
+    // a call after a lead-in: the short segment ends right after her name (review: 20/28 lost before)
+    ["Okay, so hey Jade, what's up?", 'ok'],
+    ['Right then, hey Jade.', 'ok'],
+    ['Write then hey jade', 'ok'],
+    ['We should leave soon. Hey, Jade.', 'ok'],
+    ['I was wondering, hey Jade,', 'ok'],
+    // TV words before the call (review: 27 of 40 TV-bed calls were rejected as "no call")
+    ['never happier in my life. Hey Jade.', 'ok'],
+    ['town Aborigine. Hey Jade!', 'ok'],
+    ['Jake said that. Hey Jade.', 'ok'],
+    // "Hey Jude" cut short by the segment, or after a lead-in
+    ['Hey, Jujoo!', 'jude'],
+    ['Hey Juju', 'jude'],
+    ['I, uh, hey Jude', 'jude'],
+    ['Okay, so hey Jude.', 'jude'],
+    // names close to hers (review: Jodie 13/14, Gage 4/7, JD 4/7, noisy Jay/Jane 8/47 woke her)
+    ['Hey Jody.', 'rival'],
+    ['Hey Jodie.', 'rival'],
+    ['Hey Gage.', 'rival'],
+    ['Hey JD', 'rival'],
+    ['Hey, J.D.', 'rival'],
+    ['A hey, DJ.', 'rival'],
+    ['Hey, Dre!', 'rival'],
+    ['Hey, join!', 'rival'],
+    ['hey joy', 'rival'],
+    ['so, hey Jake', 'rival'],
+    // "Hey Jayden": only when nothing follows it may it be her (Whisper's spelling of "Hey Jade.")
+    ['Hey Jayden, come here.', 'rival'],
+    ['Hey, Jaden. Come', 'rival'],
+    ['Hey Jaden', 'ok'],
     // not a call
-    ['Just say hey Jade whenever you need me.', 'no-call'],
+    ['We planted the jade by the window', 'no-call'],
     ['AJ', 'no-call'],
     ['KJ', 'no-call'],
     ['She wore the jade necklace.', 'no-call'],
@@ -79,8 +113,7 @@ describe('veto (the wake segment)', () => {
   it('known limits, asserted so they are not fixed silently', () => {
     // the documented false accept of the eval (AGC mix, held-out): a hey-like first word
     expect(veto('I hope you enjoy it.').ok).toBe(true);
-    // a "Hey Jay" clip Whisper wrote as "Hey JD": not a rival, starts with "hey"
-    expect(veto('Hey JD').ok).toBe(true);
+    // (changed on purpose: "Hey JD" is a rival now, see above)
     // her allowed line with the name inside: stage 2 cannot tell, the text mask does (self-mask.js)
     expect(veto('Sure, Jade can help with that.').ok).toBe(true);
     // stage 1 does not fire on other assistants' names; if it did, stage 2 would let it through
@@ -92,6 +125,8 @@ describe('veto (the wake segment)', () => {
     expect(veto('AJ', 'jude').ok).toBe(true);
     expect(veto('Hey Jane!', 'jude').ok).toBe(true);
     expect(veto('Hey Jude.', 'jude')).toEqual({ ok: false, reason: 'jude' });
+    expect(veto('Hey, Jujoo!', 'jude')).toEqual({ ok: false, reason: 'jude' });
+    expect(veto('Hey Jody.', 'jude').ok).toBe(true);
     expect(veto('Jade here.', 'jude')).toEqual({ ok: false, reason: 'self' });
     expect(veto('Okay Jade', 'jude')).toEqual({ ok: false, reason: 'self' });
     expect(veto('', 'jude')).toEqual({ ok: false, reason: 'empty' });

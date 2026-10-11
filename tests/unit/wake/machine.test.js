@@ -1,7 +1,7 @@
 // The listening state machine (contract-wake §8.3), transition by transition, on a fake clock.
 // IDs in brackets are the rules of ux.md.
 import { describe, expect, it } from 'vitest';
-import { HINTS, SPOKEN, WAKE, WakeMachine } from '../../../src/wake/machine.js';
+import { HINTS, SPOKEN, WAKE, WakeMachine, wakeSegment } from '../../../src/wake/machine.js';
 
 const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watching!?|you\.?|bye\.?|\.+|okay\.?|so\.?|uh\.?|um\.?)$/i;
 const SR = 16000;
@@ -119,17 +119,23 @@ describe('T2-T5 a wake: attention, then listening or back to waiting', () => {
     const cap = one(a, 'capture');
     expect(cap).toMatchObject({ kind: 'command', fromSample: 160000 + 0.15 * SR, noSpeechMs: 8000, show: true });
     expect(cap.meta).toEqual({ wakeId: 'w1', kind: 'command' });
-    expect(one(a, 'verify')).toEqual({ type: 'verify', id: 'w1', from: 160000 - 22000, to: 162400, keyword: 'HEY_JADE' });
+    // (changed on purpose: the segment starts at most 1.2 s before the end of "Jade", not 2.5 s)
+    expect(one(a, 'verify')).toEqual({ type: 'verify', id: 'w1', from: 160000 - 1.2 * SR, to: 162400, keyword: 'HEY_JADE' });
     expect(types(a)).toEqual(expect.arrayContaining(['resetDetector', 'gaze', 'fastWake']));
     // no sound at stage 1 (ACK-1)
     expect(of(a, 'earcon')).toEqual([]);
   });
 
-  it('the wake segment is at most 2.5 s before the end of "Jade"', () => {
+  it('the wake segment: ≤ 1.2 s before the end of "Jade" (not before its stream), to where stage 1 decided (0.15-0.6 s after it)', () => {
     const h = harness();
     h.ready();
-    const a = h.hit({ endAt: 200000, streamAt: 100000 });
-    expect(one(a, 'verify').from).toBe(200000 - 2.5 * SR);
+    const a = h.hit({ endAt: 200000, streamAt: 100000, emitAt: 200000 + 0.45 * SR });
+    expect(one(a, 'verify')).toMatchObject({ from: 200000 - 1.2 * SR, to: 200000 + 0.45 * SR });
+    // the command is still cut 150 ms after the keyword's end
+    expect(one(a, 'capture').fromSample).toBe(200000 + 0.15 * SR);
+    expect(wakeSegment({ streamAt: 195000, endAt: 200000, emitAt: 200100 })).toEqual({ from: 195000, to: 202400, cut: 202400 });
+    expect(wakeSegment({ streamAt: 0, endAt: 200000, emitAt: 260000 }).to).toBe(200000 + 0.6 * SR);
+    expect(wakeSegment({ streamAt: 0, endAt: 200000 }).to).toBe(202400);
   });
 
   it('a hit masked by her own voice changes nothing and is logged (SELF-2)', () => {
@@ -250,6 +256,43 @@ describe('T2-T5 a wake: attention, then listening or back to waiting', () => {
     // strict ends 5 min after it began
     const d = h.advance(5 * 60_000);
     expect(one(d, 'setStrict')).toEqual({ type: 'setStrict', on: false });
+  });
+
+  it('only "someone else was called" counts: three checks that heard nothing, failed, timed out or found no call do not make it strict', () => {
+    for (const reason of ['empty', 'lost', 'stt-failed', 'no-call', 'self', 'echo']) {
+      const h = harness();
+      h.ready();
+      for (let i = 0; i < 3; i++) {
+        h.hit({ id: `r${i}` });
+        h.step({ type: 'verified', id: `r${i}`, ok: false, reason });
+        h.advance(5000);
+      }
+      expect(h.m.strict, reason).toBe(false);
+    }
+    const t = harness();
+    t.ready();
+    for (let i = 0; i < 3; i++) {
+      t.hit({ id: `t${i}` });
+      t.advance(WAKE.verifyTimeoutMs.cuda + 10); // no verdict in time
+    }
+    expect(t.m.strict).toBe(false);
+    const r = harness();
+    r.ready();
+    for (let i = 0; i < 3; i++) {
+      r.hit({ id: `v${i}` });
+      r.step({ type: 'verified', id: `v${i}`, ok: false, reason: i ? 'rival' : 'jude' });
+      r.advance(5000);
+    }
+    expect(r.m.strict).toBe(true);
+  });
+
+  it('her own "Hey Jude" (masked) is neither logged nor counted', () => {
+    const h = harness();
+    h.ready();
+    for (let i = 0; i < 3; i++) h.hit({ keyword: 'HEY_JUDE', masked: 'self', id: `j${i}` });
+    expect(h.m.burst).toEqual([]);
+    expect(h.m.log).toEqual([]);
+    expect(h.m.strict).toBe(false);
   });
 
   it('two rejects spread over more than 60 s do not make it strict', () => {

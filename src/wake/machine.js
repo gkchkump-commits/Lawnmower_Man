@@ -26,8 +26,14 @@
 import { decideCommand, confirmCall, stripCall } from './phrase.js';
 
 export const WAKE = Object.freeze({
-  // wake segment and command cut (stage 1's last token is ≈ 90 ms before the word's end)
-  ringMs: 3000, segMaxBeforeEndMs: 2500, cutAfterKeywordMs: 150,
+  // wake segment and command cut (stage 1's last token is ≈ 90 ms before the word's end). The
+  // segment is short and ends where stage 1 decided (≤ segMaxAfterEndMs after the keyword, audio
+  // the ring already holds): words before the call (TV, a lead-in) stay out of it, "Hey Jude" is
+  // not cut to "Hey, Ju-" (review: 2.5 s → 1.2 s took TV-bed calls from 11/40 to 32/40 accepted,
+  // mid-utterance calls from 8/28 to 14/28, clean 48/50 either way)
+  ringMs: 3000, segMaxBeforeEndMs: 1200, segMaxAfterEndMs: 600, cutAfterKeywordMs: 150,
+  /** less of the call than this still in the ring: nothing to check */
+  segMinMs: 400,
   verifyTimeoutMs: Object.freeze({ cuda: 2500, cpu: 8000 }),
   commandWindowMs: 8000, followUpTailMs: 350, followUpAbsentMs: 3000,
   lookDwellMs: 600, lookGraceMs: 1500,
@@ -62,6 +68,7 @@ export const LOG_TEXT = Object.freeze({
   echo: 'ignored · my own voice',
   'no-call': 'ignored · not a call',
   empty: 'ignored · nothing understood',
+  lost: 'ignored · the audio was no longer buffered',
   timeout: 'ignored · the check took too long',
   'stt-failed': 'ignored · speech recognition failed',
   'no-command': 'no command after 8 s',
@@ -89,6 +96,26 @@ export const SPOKEN = Object.freeze({
 });
 
 const ONE_PER_RUN = new Set(['silence', 'headset']);
+
+/**
+ * The wake segment for a hit, in 16 kHz sample indices: from ≤ 1.2 s before the end of the keyword
+ * (not before its stream) to where stage 1 decided (at least 150 ms, at most 600 ms after the end),
+ * and the command cut (150 ms after the end).
+ * @param {{ streamAt?: number, endAt?: number, emitAt?: number }} hit
+ * @returns {{ from: number, to: number, cut: number }}
+ */
+export function wakeSegment(hit) {
+  const ms = (/** @type {number} */ v) => Math.round((v / 1000) * 16000);
+  const endAt = Number(hit.endAt) || 0;
+  const cut = endAt + ms(WAKE.cutAfterKeywordMs);
+  const emitAt = Number(hit.emitAt);
+  const to = Number.isFinite(emitAt) ? Math.min(endAt + ms(WAKE.segMaxAfterEndMs), Math.max(cut, emitAt)) : cut;
+  const from = Math.max(Number(hit.streamAt) || 0, endAt - ms(WAKE.segMaxBeforeEndMs));
+  return { from, to, cut };
+}
+
+/** Rejections that count toward the media-burst rule: a song or a show naming someone else, never a failed or unclear check. */
+const BURST_REASONS = new Set(['jude', 'rival']);
 
 /**
  * @typedef {object} WakeSettings
@@ -384,6 +411,8 @@ export class WakeMachine {
     if (this._base.state !== 'waiting' || this._base.fallback) return;
     const kw = hit.keyword;
     if (kw === 'HEY_JUDE') {
+      // her own "Hey Jude" (she talks about the Beatles) is neither logged nor counted
+      if (hit.masked) return;
       this._log(now, 'ignored', 'jude');
       this._burst(now);
       return;
@@ -400,9 +429,7 @@ export class WakeMachine {
     }
     if (this.active) return; // one wake at a time; a call inside a capture is stripped from its text
     const conv = { ...this.conv, ...(hit.conv || {}) };
-    const endAt = Number(hit.endAt) || 0;
-    const to = endAt + Math.round((WAKE.cutAfterKeywordMs / 1000) * 16000);
-    const from = Math.max(Number(hit.streamAt) || 0, endAt - Math.round((WAKE.segMaxBeforeEndMs / 1000) * 16000));
+    const { from, to, cut } = wakeSegment(hit);
     const id = String(hit.id ?? `h${++this._ids}`);
     const speaking = conv.state === 'speaking' || conv.speaking;
     let kind = 'attention';
@@ -430,7 +457,7 @@ export class WakeMachine {
     const meta = { wakeId: id, kind: 'command' };
     out.push({ type: 'resetDetector' });
     if (kind === 'barge') out.push({ type: 'duck' });
-    out.push({ type: 'capture', kind: 'command', fromSample: to, noSpeechMs: WAKE.commandWindowMs, show, meta });
+    out.push({ type: 'capture', kind: 'command', fromSample: cut, noSpeechMs: WAKE.commandWindowMs, show, meta });
     out.push({ type: 'verify', id, from, to, keyword: kw });
     if (show) {
       // the attention cue: she looks up, fast out of a doze (ACK-1, ACK-5)
@@ -476,7 +503,9 @@ export class WakeMachine {
     if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
     if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason } });
     this._log(now, 'ignored', reason);
-    this._burst(now);
+    // only a confident "someone else was called" counts (TV-3): a retry after a check that heard
+    // nothing, failed or timed out must not make her harder to wake
+    if (BURST_REASONS.has(reason)) this._burst(now);
   }
 
   _burst(now) {

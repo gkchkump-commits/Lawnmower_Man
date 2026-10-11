@@ -32,9 +32,11 @@ class FakeMic extends Emitter {
   get echoCancellation() { return 'all'; }
   get muted() { return false; }
   ignoreSpeechStartUntil(t) { this.ignoreUntil = t; }
+  /** like the real Mic: the last 3 s */
+  get ringStart() { return Math.max(0, this.samplesSeen - 3 * RATE); }
   ring(a, b) {
     this.ringCalls.push([a, b]);
-    return b > a && b <= this.samplesSeen ? new Float32Array(b - a).fill(0.1) : null;
+    return b > a && b <= this.samplesSeen && a >= this.ringStart ? new Float32Array(b - a).fill(0.1) : null;
   }
   /** deliver `ms` of tapped audio, in real time on the fake clock (clock.tick(ms) moves it) */
   feed(ms, clock) {
@@ -242,6 +244,40 @@ describe('WakeFeature: the mic, the port, the ring', () => {
     s.mic.feed(200, s.clock);
     await s.flush();
     expect(s.stt.transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hit that arrives late is checked on what the ring still holds of its segment (not rejected as "nothing understood")', async () => {
+    const s = await started({ transcripts: ['Hey Jade.'] });
+    s.mic.feed(10_000, s.clock);
+    const endAt = s.mic.samplesSeen - Math.round(2.5 * RATE); // a busy PC: the hit is 2.5 s late
+    s.hit({ endAt, streamAt: endAt - 6 * RATE });
+    await s.flush();
+    expect(s.stt.transcribe).toHaveBeenCalledTimes(1);
+    expect(s.mic.ringCalls[0]).toEqual([s.mic.ringStart, endAt + Math.round(0.15 * RATE)]);
+    expect(s.f.state).toBe('listening');
+  });
+
+  it('a hit whose call is no longer in the ring: "no longer buffered" in the log, not "nothing understood", and not counted', async () => {
+    const s = await started();
+    s.mic.feed(10_000, s.clock);
+    s.hit({ endAt: s.mic.samplesSeen - Math.round(3.2 * RATE) });
+    await s.flush();
+    expect(s.stt.transcribe).not.toHaveBeenCalled();
+    expect(s.f.state).toBe('waiting');
+    expect(s.f.log.at(-1).text).toBe('ignored · the audio was no longer buffered');
+    expect(s.f.machine.burst).toEqual([]);
+  });
+
+  it('the segment ends where stage 1 decided (emitAt), so "Hey Jude" is not cut short', async () => {
+    const s = await started({ transcripts: ['Hey Jude!'] });
+    s.mic.feed(3000, s.clock);
+    const endAt = s.mic.samplesSeen - 8000;
+    s.hit({ endAt, emitAt: endAt + 7000 });
+    await s.flush();
+    expect(s.mic.ringCalls[0]).toEqual([endAt - Math.round(1.2 * RATE), endAt + 7000]);
+    expect(s.captures[0].fromSample).toBe(endAt + Math.round(0.15 * RATE));
+    await s.flush();
+    expect(s.f.log.at(-1).text).toBe('ignored · sounded like “Hey Jude”');
   });
 
   it('"Hey Jude": rejected silently, back to waiting, the capture cancelled', async () => {

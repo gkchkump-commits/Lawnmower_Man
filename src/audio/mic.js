@@ -202,6 +202,11 @@ export class Mic extends Emitter {
     return !!this._tap;
   }
 
+  /** The oldest sample index the ring still holds (ring() refuses anything before it). */
+  get ringStart() {
+    return this._ringStart;
+  }
+
   /**
    * The 16 kHz samples [fromIdx, toIdx) from the ring; null when part of the range is no
    * longer (or not yet) there.

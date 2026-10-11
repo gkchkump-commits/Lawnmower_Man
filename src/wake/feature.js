@@ -8,8 +8,9 @@
 //   controller → adapter: state, idle (follow-up), decide (the command), noSpeech, cancelled
 //
 // Nothing is transcribed before stage 1 fires: the tap only feeds the engine and a 3 s ring in
-// the Mic. The wake segment (≤ 2.5 s before the end of "Jade" + 0.15 s) is the only audio that
-// goes to /stt for the check; the command is captured from where the keyword ended.
+// the Mic. The wake segment (≤ 1.2 s before the end of "Jade" to where stage 1 decided, machine.js
+// wakeSegment) is the only audio that goes to /stt for the check; the command is captured from
+// 150 ms after the keyword's end.
 
 import { HALLUCINATION } from '../app/controller.js';
 import { Emitter } from '../app/emitter.js';
@@ -494,9 +495,11 @@ export class WakeFeature extends Emitter {
   _tryVerify(job) {
     if (job.started || this.mic.samplesSeen < job.to) return;
     job.started = true;
-    const pcm = this.mic.ring(job.from, job.to);
+    // a hit that arrived late (a busy PC): check what the ring still holds of the segment
+    const from = Math.max(job.from, Number(this.mic.ringStart) || 0);
+    const pcm = job.to - from >= Math.round((WAKE.segMinMs / 1000) * RATE) ? this.mic.ring(from, job.to) : null;
     if (!pcm) {
-      this._step({ type: 'verified', id: job.id, ok: false, reason: 'empty' });
+      this._step({ type: 'verified', id: job.id, ok: false, reason: 'lost' });
       return;
     }
     const wav = encodeWav(pcm, RATE);

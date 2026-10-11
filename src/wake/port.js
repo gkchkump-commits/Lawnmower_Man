@@ -8,7 +8,7 @@
 //
 // Out: { t:'pcm', at, pcm } (16 kHz, ≤ 4096 samples, `at` = Mic.samplesSeen index of pcm[0]),
 //      { t:'reset' }, { t:'strict', on }, { t:'ping', n } every 10 s.
-// In:  { t:'ready', models, gen }, { t:'hit', id, keyword, model, streamAt, startAt, endAt },
+// In:  { t:'ready', models, gen }, { t:'hit', id, keyword, model, streamAt, startAt, endAt, emitAt? },
 //      { t:'vad', speaking, at }, { t:'stats', … }, { t:'error', message }, { t:'pong', n }.
 // Never with a transfer list: an ArrayBuffer transferred to a MessagePortMain arrives as null
 // (verified, §1.2); plain structured-clone copies arrive intact. Every message from the utility is
@@ -41,7 +41,9 @@ export function parseUtilityMessage(m) {
       if (m.startAt > m.endAt || m.streamAt > m.endAt || m.endAt < 0) return null;
       const id = typeof m.id === 'string' || finite(m.id) ? String(m.id).slice(0, 64) : '';
       if (!id) return null;
-      return { t: 'hit', id, keyword: m.keyword, model: MODELS.has(m.model) ? m.model : 'giga', streamAt: m.streamAt, startAt: m.startAt, endAt: m.endAt };
+      // emitAt (where stage 1 decided) is optional: the wake segment ends there
+      const emitAt = finite(m.emitAt) && m.emitAt >= m.endAt ? { emitAt: m.emitAt } : {};
+      return { t: 'hit', id, keyword: m.keyword, model: MODELS.has(m.model) ? m.model : 'giga', streamAt: m.streamAt, startAt: m.startAt, endAt: m.endAt, ...emitAt };
     }
     case 'vad':
       return typeof m.speaking === 'boolean' && finite(m.at) ? { t: 'vad', speaking: m.speaking, at: m.at } : null;

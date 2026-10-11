@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_VERSION, SettingsStore, applyPatch, defaultSettings } from '../../../electron/settings.js';
 import { DEFAULT_SETTINGS as RENDERER_DEFAULTS } from '../../../src/app/settings-defaults.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const base = defaultSettings('win32');
 const patch = (p) => applyPatch(base, p);
@@ -75,7 +75,7 @@ describe('settings: tapo and security groups', () => {
   });
 
   it('a settings file without the groups loads with their defaults', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-set-'));
+    const dir = tmpDir('lm-set-');
     fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ version: 3, camera: { enabled: true } }));
     const s = new SettingsStore({ dir, platform: 'linux' }).load();
     expect(s.tapo).toEqual(DEFAULT_SETTINGS.tapo);

@@ -1,6 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
 import { TapoService } from '../../../electron/tapo/tapo-service.js';
@@ -8,6 +7,7 @@ import { go2rtcBinaryPath } from '../../../electron/tapo/go2rtc.js';
 import { startFakeOnvif } from './helpers/fake-onvif.js';
 import { startMiniRtsp } from './helpers/mini-rtsp.js';
 import { FakeMessageChannelMain, FakeRelay, FakeSidecar, fakeCameraWindow, memorySafeStorage, tempSettings, until } from './helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const PERSON = { motion: { active: true, score: 0.05, global: false }, persons: [{ score: 0.9, box: [0.4, 0.3, 0.15, 0.4] }] };
 const NOBODY = { motion: { active: false, score: 0, global: false }, persons: [] };
@@ -22,7 +22,7 @@ afterEach(async () => {
 async function setup(o = {}) {
   const cam = await startFakeOnvif(o.onvif);
   cleanup.push(() => cam.close());
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-clips-'));
+  const clips = tmpDir('lm-clips-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', onvifPort: o.onvifPort ?? cam.port, rtspPort: o.rtspPort ?? 554, username: 'camacct', name: 'camera' },
     security: { armDelaySec: 0, preRollSec: 1, postRollSec: 2, cooldownSec: 10, clipsDir: clips, ...(o.security || {}) },

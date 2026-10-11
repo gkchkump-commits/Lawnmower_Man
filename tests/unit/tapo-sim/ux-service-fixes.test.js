@@ -3,13 +3,12 @@
 // user once, Retry reconnects (never a refused sign-in), waking the PC reconnects, privacy mode
 // clears by itself, and the diagnostic report is redacted.
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
 import { TapoService, BLIND_ALERT_MS } from '../../../electron/tapo/tapo-service.js';
 import { FakeMessageChannelMain, FakeRelay, FakeSidecar, memorySafeStorage, tempSettings, until } from '../tapo/helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** @type {Array<() => Promise<void>>} */
@@ -22,7 +21,7 @@ afterEach(async () => {
 async function setup(o = {}) {
   const sim = await startSim({ quirks: o.quirks });
   cleanup.push(() => sim.close());
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-ux-clips-'));
+  const clips = tmpDir('lm-ux-clips-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', onvifPort: sim.onvifPort, rtspPort: sim.rtspPort, username: 'camacct', name: 'front door camera' },
     security: { armDelaySec: 0, clipsDir: clips, ...(o.security || {}) },

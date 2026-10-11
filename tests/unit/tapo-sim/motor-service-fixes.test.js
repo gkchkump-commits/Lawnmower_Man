@@ -4,8 +4,6 @@
 // state does not survive a disarm or a reboot, and short outages do not leave subscriptions
 // behind on the camera.
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
@@ -13,6 +11,7 @@ import { TapoService } from '../../../electron/tapo/tapo-service.js';
 import { OnvifClient } from '../../../electron/tapo/onvif-client.js';
 import { PullPointMonitor } from '../../../electron/tapo/events.js';
 import { FakeMessageChannelMain, FakeRelay, FakeSidecar, memorySafeStorage, tempSettings, until } from '../tapo/helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** @type {Array<() => Promise<void>>} */
@@ -25,7 +24,7 @@ afterEach(async () => {
 async function setup(o = {}) {
   const sim = await startSim({ quirks: o.quirks });
   cleanup.push(() => sim.close());
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-motor-clips-'));
+  const clips = tmpDir('lm-motor-clips-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', onvifPort: sim.onvifPort, rtspPort: sim.rtspPort, username: 'camacct', name: 'camera', invertPan: true, invertTilt: true, viewUnitsX: 0.8, viewUnitsY: 1.2 },
     security: { armDelaySec: 0, preRollSec: 1, postRollSec: 2, cooldownSec: 1, clipsDir: clips, confirmLocally: false, ...(o.security || {}) },

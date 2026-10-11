@@ -6,10 +6,9 @@
 // binary is present (`npm run fetch:go2rtc`, or LAWNMOWER_GO2RTC).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
 import { ROOT, appModules, sleep, until } from './helpers.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const lane = await appModules(['electron/tapo/go2rtc.js', 'electron/tapo/rtsp-auth-proxy.js', 'electron/tapo/stream-relay.js']);
 const g2r = lane.mods['electron/tapo/go2rtc.js'];
@@ -36,7 +35,7 @@ describe.skipIf(!haveBinary)(`go2rtc + StreamRelay × simulated RTSP${reason}`, 
   const inits = [];
   beforeAll(async () => {
     sim = await startSim();
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-relay-sim-'));
+    dir = tmpDir('lm-relay-sim-');
     sidecar = new g2r.Go2rtcSidecar({ binary, configDir: dir, log: () => {} });
     // go2rtc reaches the camera through main's RTSP auth proxy (it never has the password)
     proxy = new proxyMod.RtspAuthProxy({ log: () => {} });

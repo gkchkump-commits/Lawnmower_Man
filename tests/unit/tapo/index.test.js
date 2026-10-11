@@ -1,11 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createTapo, CLIP_PATTERN, detectorAssets } from '../../../electron/tapo/index.js';
 import { startFakeOnvif } from './helpers/fake-onvif.js';
 import { FakeMessageChannelMain, memorySafeStorage, tempSettings, until } from './helpers/fakes.js';
 import { FakeBrowserWindow, FakeNotification, fakeIpcMain } from './helpers/fake-electron.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** @type {Array<() => Promise<void>>} */
 let cleanup = [];
@@ -18,7 +18,7 @@ const screen = { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, h
 
 function setup(settingsInit, o = {}) {
   const { store } = tempSettings(settingsInit);
-  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-tapo-ud-'));
+  const userData = tmpDir('lm-tapo-ud-');
   const ipcMain = fakeIpcMain();
   const toAvatar = [];
   const logs = [];
@@ -134,7 +134,7 @@ describe('createTapo', () => {
     FakeBrowserWindow.all = [];
     const cam = await startFakeOnvif();
     cleanup.push(() => cam.close());
-    const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-tapo-clips-'));
+    const clips = tmpDir('lm-tapo-clips-');
     const r = setup({ tapo: { enabled: true, host: '127.0.0.1', onvifPort: cam.port, username: 'camacct', name: 'porch camera' }, security: { clipsDir: clips, armDelaySec: 0 } });
     expect(FakeBrowserWindow.all).toHaveLength(0); // not before main.js registered app:// (next tick)
     await r.tapo.ready;

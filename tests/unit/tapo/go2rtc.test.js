@@ -3,7 +3,6 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import {
@@ -12,12 +11,13 @@ import {
 import { StreamRelay } from '../../../electron/tapo/stream-relay.js';
 import { RtspAuthProxy } from '../../../electron/tapo/rtsp-auth-proxy.js';
 import { startMiniRtsp } from './helpers/mini-rtsp.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const ROOT = path.resolve('.');
 const BINARY = go2rtcBinaryPath({ isPackaged: false, appRoot: ROOT, env: {} });
 const HAVE_BINARY = process.platform === 'linux' && fs.existsSync(BINARY);
 const CLIP = path.resolve('tests/unit/tapo/fixtures/clip-160x90.h264');
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lm-g2r-'));
+const tmp = () => tmpDir('lm-g2r-');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 describe('go2rtc configuration', () => {

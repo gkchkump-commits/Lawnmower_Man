@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { RETENTION_RE, planDeletions, runRetention } from '../../../electron/tapo/retention.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const NOW = new Date(2026, 9, 10, 12, 0, 0).getTime();
 const DAY = 86400000;
@@ -49,7 +49,7 @@ describe('planDeletions', () => {
 
 describe('runRetention', () => {
   it('deletes on disk, removes emptied day folders, ignores foreign files and links', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-ret-'));
+    const dir = tmpDir('lm-ret-');
     const put = (rel, size = 100) => {
       fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
       fs.writeFileSync(path.join(dir, rel), Buffer.alloc(size));
@@ -59,7 +59,7 @@ describe('runRetention', () => {
     put('2026-09-02/080000-person-bbbb.mp4');
     put('2026-09-02/my-own-video.mp4');
     put('2026-10-10/080000-person-cccc.mp4', 300);
-    const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lm-outside-')), 'precious.mp4');
+    const outside = path.join(tmpDir('lm-outside-'), 'precious.mp4');
     fs.writeFileSync(outside, 'keep me');
     fs.symlinkSync(outside, path.join(dir, '2026-09-02', '080000-motion-dddd.mp4'));
     const logs = [];

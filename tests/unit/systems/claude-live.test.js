@@ -3,15 +3,16 @@
 // Costs a couple of very short turns on the user's Claude account.
 import { describe, it, expect, afterAll } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { ClaudeSession } from '../../../electron/claude-session.js';
 import { SERVER, cameraServer } from './camera-mcp-double.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const LIVE = !!process.env.LIVE_CLAUDE;
 
 describe.skipIf(!LIVE)('ClaudeSession × real Claude CLI (LIVE_CLAUDE=1)', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-live-'));
+  // (the body is collected even when skipped: no folder then, nothing would remove it)
+  const dir = LIVE ? tmpDir('lm-live-') : '';
   const settings = {
     cliPath: process.env.LIVE_CLAUDE_CLI || '', model: process.env.LIVE_CLAUDE_MODEL || '', effort: '', mode: 'chat',
     workdir: path.join(dir, 'work'), persona: '', resumeLastSession: false, lastSessionId: '',
@@ -112,7 +113,7 @@ describe.skipIf(!LIVE)('ClaudeSession × real Claude CLI (LIVE_CLAUDE=1)', () =>
 // mode; the model called mcp__lawnmower-camera__camera_status in the first turn.
 describe.skipIf(!LIVE)('camera tools × real Claude CLI in chat mode (LIVE_CLAUDE=1)', () => {
   it('the camera tools reach the model (in-process, or over loopback HTTP after one turn)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-live-mcp-'));
+    const dir = tmpDir('lm-live-mcp-');
     const word = `OKAPI-${Math.floor(Math.random() * 900 + 100)}`;
     const cam = cameraServer({ http: true, statusText: `Front door camera: online, disarmed. Status code word: ${word}.` });
     const settings = { cliPath: process.env.LIVE_CLAUDE_CLI || '', model: process.env.LIVE_CLAUDE_MODEL || '', effort: '', mode: 'chat', workdir: path.join(dir, 'work'), persona: '', resumeLastSession: false, lastSessionId: '' };

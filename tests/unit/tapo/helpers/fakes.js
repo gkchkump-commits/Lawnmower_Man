@@ -4,12 +4,12 @@
 
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setImmediate } from 'node:timers';
 
 import { Fmp4Parser, rewriteFragment } from '../../../../electron/tapo/fmp4.js';
 import { SettingsStore } from '../../../../electron/settings.js';
+import { tmpDir } from '../../helpers/tmp.js';
 
 export const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
 
@@ -212,7 +212,7 @@ export function memorySafeStorage() {
 
 /** A real SettingsStore in a temp dir. @param {any} initial */
 export function tempSettings(initial) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-tapo-svc-'));
+  const dir = tmpDir('lm-tapo-svc-');
   fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ version: 3, ...initial }));
   const store = new SettingsStore({ dir, platform: 'linux' });
   store.load();

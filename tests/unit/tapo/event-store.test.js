@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { EventStore, clipUrl, eventBase, newEventId, toSummary } from '../../../electron/tapo/event-store.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 describe('event ids and names', () => {
   it('local time + 4 random characters; base path by kind', () => {
@@ -18,7 +18,7 @@ describe('event ids and names', () => {
 
 describe('EventStore', () => {
   it('writes records next to the clips, lists newest first, filters, acks and removes', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-evs-'));
+    const dir = tmpDir('lm-evs-');
     const s = new EventStore({ getDir: () => dir, now: () => new Date(2026, 9, 10, 18, 0, 0).getTime() });
     const t = (h, m) => new Date(2026, 9, 10, h, m, 0);
     await s.upsert({ id: '20261010-140000-aaaa', kind: 'person', camera: 'front door camera', startedAt: t(14, 0).toISOString(), sources: ['local-person'] });
@@ -53,7 +53,7 @@ describe('EventStore', () => {
   });
 
   it('a snapshot right after the first record of a fresh store is kept (no race with the first scan)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-evs-'));
+    const dir = tmpDir('lm-evs-');
     fs.mkdirSync(path.join(dir, '2026-10-09'));
     fs.writeFileSync(path.join(dir, '2026-10-09', '120000-motion-zzzz.json'), JSON.stringify({ v: 1, id: '20261009-120000-zzzz', kind: 'motion', startedAt: '2026-10-09T10:00:00.000Z', sources: [] }));
     const s = new EventStore({ getDir: () => dir });
@@ -71,7 +71,7 @@ describe('EventStore', () => {
   });
 
   it('a rescan keeps records written or removed while it runs', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-evs-'));
+    const dir = tmpDir('lm-evs-');
     const s = new EventStore({ getDir: () => dir });
     await s.upsert({ id: '20261010-140000-aaaa', kind: 'person', camera: 'c', startedAt: new Date(2026, 9, 10, 14, 0, 0).toISOString(), sources: [] });
     await s.upsert({ id: '20261010-150000-bbbb', kind: 'motion', camera: 'c', startedAt: new Date(2026, 9, 10, 15, 0, 0).toISOString(), sources: [] });
@@ -88,7 +88,7 @@ describe('EventStore', () => {
   });
 
   it('remove() deletes only the event\'s own files, whatever its record names (a crafted .json)', async () => {
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-es-trav-'));
+    const base = tmpDir('lm-es-trav-');
     const clips = path.join(base, 'clips');
     const victim = path.join(base, 'victim.txt');
     fs.writeFileSync(victim, 'keep me');

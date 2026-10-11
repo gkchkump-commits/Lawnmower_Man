@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore, passwordHint, redact, validatePassword } from '../../../electron/tapo/credentials.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** safeStorage stand-in: "encryption" = XOR + a marker, so the file must never hold the plaintext. */
 function fakeSafeStorage(o = {}) {
@@ -27,7 +27,7 @@ function fakeSafeStorage(o = {}) {
 
 let dir;
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-cred-'));
+  dir = tmpDir('lm-cred-');
 });
 
 describe('CredentialStore', () => {
@@ -82,7 +82,7 @@ describe('CredentialStore', () => {
 
   it('keeps the password in memory only without real encryption (none, or Linux basic_text)', async () => {
     for (const ss of [fakeSafeStorage({ available: false }), fakeSafeStorage({ backend: 'basic_text' }), null]) {
-      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-cred-'));
+      const d = tmpDir('lm-cred-');
       const a = new CredentialStore({ dir: d, safeStorage: /** @type {any} */ (ss), platform: 'linux' });
       expect(await a.setPassword('se&cret', { host: '192.168.1.50' })).toEqual({ persisted: false });
       expect(a.persistence).toBe('memory');

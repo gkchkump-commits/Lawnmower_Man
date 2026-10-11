@@ -5,13 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { createAppProtocolHandler, mimeTypeFor, parseRange } from '../../../electron/app-protocol.js';
 import { buildCsp } from '../../../electron/security.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 describe('app:// clip mount with Range', () => {
   const PATTERN = /^\d{4}-\d{2}-\d{2}\/\d{6}-(person|motion|tamper)-[a-z0-9]{4}\.(mp4|jpg)$/;
   function setup() {
-    const dist = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-dist-'));
+    const dist = tmpDir('lm-dist-');
     fs.writeFileSync(path.join(dist, 'index.html'), '<html></html>');
-    const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-clips-'));
+    const clips = tmpDir('lm-clips-');
     fs.mkdirSync(path.join(clips, '2026-10-10'));
     const data = Buffer.from(Array.from({ length: 1000 }, (_, i) => i % 256));
     fs.writeFileSync(path.join(clips, '2026-10-10', '140312-person-a1b2.mp4'), data);
@@ -20,7 +21,7 @@ describe('app:// clip mount with Range', () => {
     fs.writeFileSync(path.join(os.tmpdir(), 'lm-outside.mp4'), 'outside');
     fs.symlinkSync(path.join(os.tmpdir(), 'lm-outside.mp4'), path.join(clips, '2026-10-10', '140313-person-c3d4.mp4'));
     // a day folder that is a link to a folder elsewhere
-    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-elsewhere-'));
+    const elsewhere = tmpDir('lm-elsewhere-');
     fs.writeFileSync(path.join(elsewhere, '120000-person-zz99.mp4'), 'VIA-DIR-LINK');
     fs.symlinkSync(elsewhere, path.join(clips, '2026-10-11'));
     const handler = createAppProtocolHandler({ root: dist, host: 'lawnmower', csp: 'x', mounts: [{ prefix: '/__clips/', getRoot: () => clips, pattern: PATTERN, range: true }] });

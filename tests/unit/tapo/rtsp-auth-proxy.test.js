@@ -5,11 +5,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { RtspAuthProxy, RtspFramer, digestAuthorization } from '../../../electron/tapo/rtsp-auth-proxy.js';
 import { Go2rtcSidecar, buildGo2rtcConfig, go2rtcBinaryPath, go2rtcEnv } from '../../../electron/tapo/go2rtc.js';
 import { startSim } from '../../../tools/tapo-sim/index.mjs';
+import { tmpDir } from '../helpers/tmp.js';
 
 const BINARY = go2rtcBinaryPath({ isPackaged: false, appRoot: path.resolve('.'), env: {} });
 const HAVE_BINARY = process.platform === 'linux' && fs.existsSync(BINARY);
@@ -200,7 +200,7 @@ describe.skipIf(!HAVE_BINARY)('go2rtc 1.9.14 behind the proxy', () => {
     const cam = await basicOnlyCamera();
     const proxy = new RtspAuthProxy();
     cleanup.push(() => proxy.stop());
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-g2r-basic-'));
+    const dir = tmpDir('lm-g2r-basic-');
     const sc = new Go2rtcSidecar({ binary: BINARY, configDir: dir, log: () => {} });
     cleanup.push(() => sc.stop());
     const src = await proxy.start({ ip: '127.0.0.1', port: cam.port, username: 'camacct', password: PW });

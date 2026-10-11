@@ -4,7 +4,6 @@
 // outage gets no clip of old frames.
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { SecurityPipeline } from '../../../src/tapo/worker/pipeline.js';
 import { SecurityEngine } from '../../../electron/tapo/security-engine.js';
@@ -16,6 +15,7 @@ import { Fmp4Parser } from '../../../electron/tapo/fmp4.js';
 import { fakeGraphics, fakeImage, flush, manualClock, room } from '../security/helpers.js';
 import { startFakeOnvif } from './helpers/fake-onvif.js';
 import { FakeMessageChannelMain, FakeRelay, FakeSidecar, fakeCameraWindow, memorySafeStorage, tempSettings, until } from './helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** @type {Array<() => Promise<void>>} */
 let cleanup = [];
@@ -26,7 +26,7 @@ afterEach(async () => {
 
 /** A TapoService that is not connected (the camera's own events play no part). */
 async function offlineService({ now, security = {} }) {
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-det-'));
+  const clips = tmpDir('lm-det-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', username: 'camacct', name: 'camera' },
     security: { armDelaySec: 0, postRollSec: 10, cooldownSec: 60, clipsDir: clips, cameraEvents: false, ...security },
@@ -315,7 +315,7 @@ describe('an event while the video is down', () => {
   it('gets no clip made of the frames from before the outage', async () => {
     const cam = await startFakeOnvif();
     cleanup.push(() => cam.close());
-    const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-ring-clips-'));
+    const clips = tmpDir('lm-ring-clips-');
     const { store, dir } = tempSettings({
       tapo: { enabled: true, host: '127.0.0.1', onvifPort: cam.port, rtspPort: 554, username: 'camacct', name: 'camera' },
       security: { armDelaySec: 0, preRollSec: 1, postRollSec: 2, cooldownSec: 10, clipsDir: clips, confirmLocally: false, cameraEvents: false },

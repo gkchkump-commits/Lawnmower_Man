@@ -3,12 +3,11 @@
 // the last move ended, same clock), and answers that do not show the gate — an older camera
 // window's worker, or a picture from before the move — are never passed on as usable.
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
 import { TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeRelay, FakeSidecar, memorySafeStorage, tempSettings } from './helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** @type {Array<() => Promise<void>>} */
 let cleanup = [];
@@ -18,7 +17,7 @@ afterEach(async () => {
 });
 
 async function service(o = {}) {
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-calproto-'));
+  const clips = tmpDir('lm-calproto-');
   const { store, dir } = tempSettings({ tapo: { enabled: true, host: '127.0.0.1', username: 'camacct', name: 'camera' }, security: { clipsDir: clips } });
   const credentials = new CredentialStore({ dir: path.join(dir, 'tapo'), safeStorage: memorySafeStorage(), platform: 'linux' });
   const logs = [];

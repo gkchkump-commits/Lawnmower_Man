@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ASSETS, LICENSE_FILE, crc32, fetchGo2rtc, parseArgs, readZipEntry, sha256 } from '../../../scripts/fetch-go2rtc.mjs';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** A minimal zip writer (local header + central directory + EOCD) for the reader under test. */
 function makeZip(files, { method = 8 } = {}) {
@@ -78,7 +78,7 @@ describe('fetch-go2rtc', () => {
   });
 
   it('refuses a file whose SHA-256 does not match and writes nothing', async () => {
-    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-g2r-'));
+    const out = tmpDir('lm-g2r-');
     await expect(fetchGo2rtc({ platforms: ['linux-x64'], out, fetchFile: async () => Buffer.from('evil binary') })).rejects.toThrow(/SHA-256 mismatch/);
     expect(fs.existsSync(path.join(out, 'go2rtc', 'linux-x64', 'go2rtc'))).toBe(false);
   });
@@ -86,7 +86,7 @@ describe('fetch-go2rtc', () => {
   it('skips a binary that is already in place (idempotent)', async () => {
     const vendor = path.resolve('vendor/go2rtc/linux-x64/go2rtc');
     if (!fs.existsSync(vendor) || sha256(fs.readFileSync(vendor)) !== ASSETS['linux-x64'].binSha256) return; // not fetched here
-    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-g2r-'));
+    const out = tmpDir('lm-g2r-');
     fs.mkdirSync(path.join(out, 'go2rtc', 'linux-x64'), { recursive: true });
     fs.copyFileSync(vendor, path.join(out, 'go2rtc', 'linux-x64', 'go2rtc'));
     fs.copyFileSync(path.resolve('vendor/go2rtc/LICENSE'), path.join(out, 'go2rtc', 'LICENSE'));

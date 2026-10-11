@@ -1,12 +1,11 @@
 // Regression tests for the security review (fixer round), at the service level: Claude never
 // hears the camera's address, and an armed camera is never turned without a card.
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
 import { TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeMessageChannelMain, FakeRelay, FakeSidecar, memorySafeStorage, tempSettings, until } from './helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** @type {Array<() => Promise<void>>} */
 let cleanup = [];
@@ -16,7 +15,7 @@ afterEach(async () => {
 });
 
 async function service(o = {}) {
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-sec-clips-'));
+  const clips = tmpDir('lm-sec-clips-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', onvifPort: 1, username: 'camacct', name: 'front door camera' },
     security: { clipsDir: clips, armDelaySec: 0, ...(o.security || {}) },

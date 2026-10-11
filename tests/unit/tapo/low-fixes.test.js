@@ -3,12 +3,11 @@
 // new "update" of a live event (the camera window toasted it as "seen just now" again), and a
 // calibration measurement that comes too late makes the wizard ask instead of fail.
 import { describe, it, expect, afterEach } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CredentialStore } from '../../../electron/tapo/credentials.js';
 import { MAX_CHUNKS_BEHIND, SHIFT_REF_TIMEOUT_MS, SHIFT_SLACK_MS, TapoService } from '../../../electron/tapo/tapo-service.js';
 import { FakeRelay, FakeSidecar, memorySafeStorage, tempSettings } from './helpers/fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** @type {Array<() => Promise<void>>} */
 let cleanup = [];
@@ -18,7 +17,7 @@ afterEach(async () => {
 });
 
 async function offlineService(now) {
-  const clips = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-low-'));
+  const clips = tmpDir('lm-low-');
   const { store, dir } = tempSettings({
     tapo: { enabled: true, host: '127.0.0.1', username: 'camacct', name: 'camera' },
     security: { armDelaySec: 0, postRollSec: 10, cooldownSec: 60, clipsDir: clips, cameraEvents: false, confirmLocally: false },

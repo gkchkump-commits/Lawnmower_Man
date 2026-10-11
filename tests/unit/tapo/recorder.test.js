@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Fmp4Parser, readBoxes } from '../../../electron/tapo/fmp4.js';
 import { ClipRecorder } from '../../../electron/tapo/recorder.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const G2R = fs.readFileSync(path.resolve('tests/unit/tapo/fixtures/go2rtc-sample.mp4'));
 
@@ -24,7 +24,7 @@ const make = (o = {}) => new ClipRecorder({ getDir: () => dir, getSettings: () =
 const waitFor = async (fn) => { for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); };
 
 beforeEach(() => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-rec-'));
+  dir = tmpDir('lm-rec-');
   settings = { preRollSec: 1, maxClipSec: 120 };
 });
 

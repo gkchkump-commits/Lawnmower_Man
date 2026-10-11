@@ -122,6 +122,23 @@ describe('package.json build (electron-builder)', () => {
     }
   });
 
+  it('ships the camera\'s face tracker: the model from public/, the wasm runtime copied into dist/', async () => {
+    const { VISION_WASM_DIR, VISION_WASM_FILES, visionWasmSourceDir } = await import('../../../scripts/vite-vision-wasm.mjs');
+    expect(fs.statSync(path.join(root, 'public/assets/vision/face_landmarker.task')).size).toBeGreaterThan(3_000_000);
+    expect(pkg.dependencies['@mediapipe/tasks-vision']).toBe('1.1.0'); // pinned: the wasm and the JS API must match
+    expect(VISION_WASM_DIR).toBe('assets/vision/wasm');
+    const src = visionWasmSourceDir(root);
+    for (const f of VISION_WASM_FILES) expect(fs.existsSync(path.join(src, f)), f).toBe(true);
+    expect(readText('vite.config.js')).toMatch(/plugins: \[visionWasm\(/);
+    // dist/** is packed; nothing excludes the vision assets (only dev pages and previews)
+    expect(build.files.filter((f) => f.startsWith('!dist'))).toEqual(['!dist/dev/**', '!dist/assets/avatars/*/preview/**']);
+    // the packaged smoke test looks for them inside app.asar
+    expect(readText('scripts/electron-e2e.mjs')).toContain('app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.wasm');
+    // the notices name what the shipped wasm links in (a MediaPipe bump must keep them true)
+    const notices = readText('THIRD_PARTY_NOTICES.md');
+    for (const w of ['TensorFlow Lite', 'XNNPACK', 'Protocol Buffers', 'Eigen', 'OpenCV', '## BSD-3-Clause License', 'MPL-2.0']) expect(notices, w).toContain(w);
+  });
+
   it('has the build scripts the docs and the workflow use', () => {
     expect(pkg.scripts['dist:win']).toBe('vite build && electron-builder --win --publish never');
     expect(pkg.scripts['dist:linux-dir']).toMatch(/electron-builder --linux dir --publish never/);

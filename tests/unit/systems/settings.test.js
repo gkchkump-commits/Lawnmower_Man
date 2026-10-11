@@ -14,6 +14,8 @@ import {
   normalizeAccelerator,
   sanitizeSettings,
 } from '../../../electron/settings.js';
+import { DEFAULT_SETTINGS as RENDERER_DEFAULTS } from '../../../src/app/settings-defaults.js';
+import { DEFAULT_CHARACTER, DEFAULT_FX_AMOUNT, VOICE_CHARACTERS } from '../../../src/audio/voicefx.js';
 
 let dir;
 beforeEach(() => {
@@ -29,7 +31,7 @@ describe('defaults', () => {
       cliPath: '', model: '', effort: '', mode: 'chat', workdir: '', persona: '', resumeLastSession: true, lastSessionId: '',
     });
     expect(DEFAULT_SETTINGS.voice).toMatchObject({ enabled: true, sttModel: 'large-v3-turbo', ttsVoice: 'af_heart', ttsSpeed: 1.0, systemVoice: '', device: 'auto', handsFree: false, speakReplies: true });
-    expect(DEFAULT_SETTINGS.avatar).toEqual({ renderer: 'relief', pack: 'reference', quality: 'high', particles: 1.0, bloom: 1.0, followCursor: true });
+    expect(DEFAULT_SETTINGS.avatar).toEqual({ renderer: 'relief', pack: 'reference', quality: 'high', particles: 1.0, bloom: 1.0, followCursor: true, expressiveness: 1.0, liveliness: 1.0, projector: false });
     expect(DEFAULT_SETTINGS.window).toMatchObject({ sizePreset: 'medium', alwaysOnTop: true, clickThrough: true, position: null, showChat: true });
     expect(DEFAULT_SETTINGS.hotkeys).toEqual({
       toggleListen: 'CommandOrControl+Alt+Space', toggleChat: 'CommandOrControl+Alt+C', stopSpeaking: 'CommandOrControl+Alt+X',
@@ -75,12 +77,44 @@ describe('applyPatch validation', () => {
     expect(warnings.join('\n')).toMatch(/unknown setting "window.nope"/);
   });
 
+  it('window.avatarWidth: a free size in px (clamped, even) or null; picking a preset clears it', () => {
+    expect(base.window.avatarWidth).toBe(null);
+    const a = applyPatch(base, { window: { avatarWidth: 451 } });
+    expect(a.warnings).toEqual([]);
+    expect(a.settings.window.avatarWidth).toBe(452);
+    expect(applyPatch(base, { window: { avatarWidth: 5 } }).settings.window.avatarWidth).toBe(200);
+    expect(applyPatch(base, { window: { avatarWidth: 99999 } }).settings.window.avatarWidth).toBe(1200);
+    const bad = applyPatch(a.settings, { window: { avatarWidth: '600' } });
+    expect(bad.settings.window.avatarWidth).toBe(452);
+    expect(bad.warnings.join('\n')).toMatch(/avatarWidth/);
+    // a preset (tray, drawer S/M/L) replaces the free size, also the same preset again
+    expect(applyPatch(a.settings, { window: { sizePreset: 'large' } }).settings.window).toMatchObject({ sizePreset: 'large', avatarWidth: null });
+    expect(applyPatch(a.settings, { window: { sizePreset: 'medium' } }).settings.window.avatarWidth).toBe(null);
+    // …but not an invalid preset, and not a patch that sets both (a whole settings file)
+    expect(applyPatch(a.settings, { window: { sizePreset: 'huge' } }).settings.window.avatarWidth).toBe(452);
+    expect(applyPatch(base, { window: { sizePreset: 'small', avatarWidth: 640 } }).settings.window).toMatchObject({ sizePreset: 'small', avatarWidth: 640 });
+    expect(sanitizeSettings({ window: { sizePreset: 'large', avatarWidth: 700 } }).settings.window.avatarWidth).toBe(700);
+  });
+
   it('clamps numbers into range', () => {
     const { settings } = applyPatch(base, { avatar: { particles: 5, bloom: -1 }, voice: { ttsSpeed: 0.1 } });
     expect(settings.avatar.particles).toBe(2);
     expect(settings.avatar.bloom).toBe(0);
     expect(settings.voice.ttsSpeed).toBe(0.5);
     expect(applyPatch(base, { avatar: { particles: Number.NaN } }).settings.avatar.particles).toBe(1);
+    // avatar.expressiveness: 0..2, a bad value keeps the current one
+    expect(applyPatch(base, { avatar: { expressiveness: 0.4 } }).settings.avatar.expressiveness).toBe(0.4);
+    expect(applyPatch(base, { avatar: { expressiveness: 7 } }).settings.avatar.expressiveness).toBe(2);
+    expect(applyPatch(base, { avatar: { expressiveness: -3 } }).settings.avatar.expressiveness).toBe(0);
+    expect(applyPatch(base, { avatar: { expressiveness: 'lots' } }).settings.avatar.expressiveness).toBe(1);
+    // avatar.liveliness: 0..2 (the spontaneous behaviour), the same rules
+    expect(applyPatch(base, { avatar: { liveliness: 1.6 } }).settings.avatar.liveliness).toBe(1.6);
+    expect(applyPatch(base, { avatar: { liveliness: 9 } }).settings.avatar.liveliness).toBe(2);
+    expect(applyPatch(base, { avatar: { liveliness: -1 } }).settings.avatar.liveliness).toBe(0);
+    expect(applyPatch(base, { avatar: { liveliness: null } }).settings.avatar.liveliness).toBe(1);
+    // avatar.projector: a boolean
+    expect(applyPatch(base, { avatar: { projector: true } }).settings.avatar.projector).toBe(true);
+    expect(applyPatch(base, { avatar: { projector: 'yes' } }).settings.avatar.projector).toBe(false);
   });
 
   it('voice.systemVoice: any one-line voice name or URI; not control characters, newlines or huge strings', () => {
@@ -93,6 +127,46 @@ describe('applyPatch validation', () => {
       expect(r.settings.voice.systemVoice, JSON.stringify(bad)).toBe('');
       expect(r.warnings.length).toBe(1);
     }
+  });
+
+  it('voice.lipSyncOffsetMs: 0 by default, clamped to +-200 ms; the renderer copy agrees', () => {
+    expect(base.voice.lipSyncOffsetMs).toBe(0);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: 45 } }).settings.voice.lipSyncOffsetMs).toBe(45);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: -900 } }).settings.voice.lipSyncOffsetMs).toBe(-200);
+    expect(applyPatch(base, { voice: { lipSyncOffsetMs: 900 } }).settings.voice.lipSyncOffsetMs).toBe(200);
+    for (const bad of ['40', Number.NaN, null, true]) {
+      const r = applyPatch(base, { voice: { lipSyncOffsetMs: bad } });
+      expect(r.settings.voice.lipSyncOffsetMs, String(bad)).toBe(0);
+      expect(r.warnings.length).toBe(1);
+    }
+    expect(sanitizeSettings({ voice: { ttsVoice: 'am_michael' } }).settings.voice.lipSyncOffsetMs).toBe(0);
+    expect(RENDERER_DEFAULTS.voice.lipSyncOffsetMs).toBe(base.voice.lipSyncOffsetMs);
+  });
+
+  it('voice.character: one of the voice characters (default synth); voice.fxAmount clamped to 0..1', () => {
+    expect(base.voice.character).toBe('synth');
+    expect(base.voice.fxAmount).toBeCloseTo(0.6, 5);
+    for (const c of VOICE_CHARACTERS) expect(applyPatch(base, { voice: { character: c } }).settings.voice.character).toBe(c);
+    for (const bad of ['Robot', 'chipmunk', '', 3, null, true]) {
+      const r = applyPatch(base, { voice: { character: bad } });
+      expect(r.settings.voice.character, JSON.stringify(bad)).toBe('synth');
+      expect(r.warnings.length).toBe(1);
+    }
+    expect(applyPatch(base, { voice: { fxAmount: 0.25 } }).settings.voice.fxAmount).toBe(0.25);
+    expect(applyPatch(base, { voice: { fxAmount: 7 } }).settings.voice.fxAmount).toBe(1);
+    expect(applyPatch(base, { voice: { fxAmount: -1 } }).settings.voice.fxAmount).toBe(0);
+    for (const bad of ['0.5', Number.NaN, null]) {
+      const r = applyPatch(base, { voice: { fxAmount: bad } });
+      expect(r.settings.voice.fxAmount, String(bad)).toBeCloseTo(0.6, 5);
+      expect(r.warnings.length).toBe(1);
+    }
+    // a settings file from before the voice characters gets the defaults
+    expect(sanitizeSettings({ voice: { ttsVoice: 'am_michael' } }).settings.voice).toMatchObject({ ttsVoice: 'am_michael', character: 'synth', fxAmount: 0.6 });
+    // main, the renderer copy and the DSP agree
+    expect(RENDERER_DEFAULTS.voice.character).toBe(base.voice.character);
+    expect(RENDERER_DEFAULTS.voice.fxAmount).toBe(base.voice.fxAmount);
+    expect(DEFAULT_CHARACTER).toBe(base.voice.character);
+    expect(DEFAULT_FX_AMOUNT).toBe(base.voice.fxAmount);
   });
 
   it('allows position null and rejects garbage positions', () => {
@@ -228,6 +302,22 @@ describe('Windows hotkey defaults (WIN-5: Ctrl+Alt = AltGr)', () => {
     // After the migration the user deliberately picks Ctrl+Alt+C again: it is kept from now on.
     store.update({ hotkeys: { toggleChat: 'CommandOrControl+Alt+C' } });
     expect(new SettingsStore({ dir, platform: 'win32' }).load().hotkeys.toggleChat).toBe('CommandOrControl+Alt+C');
+  });
+
+  it('v2 → v3: the old camera.greet (off by default) becomes camera.greeting; a greeting that was on keeps asking Claude', () => {
+    const file = path.join(dir, 'settings.json');
+    fs.writeFileSync(file, JSON.stringify({ version: 2, camera: { enabled: true, greet: false } }));
+    const s1 = new SettingsStore({ dir, platform: 'win32' }).load();
+    expect(s1.camera).toMatchObject({ enabled: true, greeting: 'hello' });
+    expect(s1.camera.greet).toBeUndefined();
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(onDisk.version).toBe(SETTINGS_VERSION);
+    expect(onDisk.camera.greet).toBeUndefined();
+    fs.writeFileSync(file, JSON.stringify({ version: 2, camera: { greet: true } }));
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().camera.greeting).toBe('claude');
+    // a v3 file is left alone
+    fs.writeFileSync(file, JSON.stringify({ version: 3, camera: { greeting: 'off' } }));
+    expect(new SettingsStore({ dir, platform: 'win32' }).load().camera.greeting).toBe('off');
   });
 
   it('does not touch hotkeys on other platforms (but stamps the version)', () => {

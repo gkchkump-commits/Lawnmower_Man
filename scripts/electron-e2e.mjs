@@ -2,6 +2,7 @@
 // Launch the REAL Electron app (electron/main.js) with Playwright's Electron driver and verify
 // the whole main-process stack end to end: window flags, app:// + CSP, the preload bridge
 // (window.lawnmower), settings IPC, a Claude turn streamed back to the renderer, voice status,
+// the Home camera window (its own preload, sandbox, settings limits; no camera needed),
 // a complete renderer boot without console errors, and a clean shutdown of child processes.
 //
 //   node scripts/electron-e2e.mjs                 # fake Claude CLI (free, deterministic)
@@ -14,7 +15,8 @@
 //
 // --packaged launches a BUILT app (the installed exe, or electron-builder's linux-unpacked binary)
 // without an app path and additionally checks what an installer must deliver: app.isPackaged,
-// resources/{app.asar, voice/, scripts/setup-voice.*}, the per-user voice folder the sidecar looks
+// resources/{app.asar, voice/, scripts/setup-voice.*, tapo/go2rtc(.exe) (it runs, and is the
+// pinned 1.9.14)}, the camera page and the person detector model in app.asar, the per-user voice folder the sidecar looks
 // in, and — through the real "Set up local voice…" launcher, in -CheckOnly mode — that the bundled
 // setup script reports exactly that folder (--no-setup-check skips it; on Linux without a terminal
 // emulator, --fake-terminal puts a stand-in "xterm" on PATH so the script really runs). The fake CLI and the
@@ -82,6 +84,9 @@ delete env.ELECTRON_RUN_AS_NODE;
 const args = packaged ? [] : [root];
 if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
 if (softwareWebgl) args.unshift('--use-angle=swiftshader', '--enable-unsafe-swiftshader');
+// Chromium's built-in fake camera (a moving test pattern): the camera checks need a device, and
+// the permission policy (not a UI flag) must decide whether the page may use it
+args.unshift('--use-fake-device-for-media-stream');
 
 /** @type {Record<string, any>} */
 const report = { ok: false, live, packaged, checks: {} };
@@ -119,15 +124,16 @@ try {
     const lm = /** @type {any} */ (window).lawnmower;
     const keys = (o) => Object.keys(o).sort();
     return {
-      top: keys(lm), claude: keys(lm.claude), voice: keys(lm.voice), settings: keys(lm.settings), window: keys(lm.window), app: keys(lm.app),
+      top: keys(lm), claude: keys(lm.claude), voice: keys(lm.voice), settings: keys(lm.settings), window: keys(lm.window), app: keys(lm.app), tapo: keys(lm.tapo),
       nodeLeak: typeof (/** @type {any} */ (window).require) !== 'undefined' || typeof (/** @type {any} */ (window).process) !== 'undefined',
       ipcLeak: typeof (/** @type {any} */ (window).ipcRenderer) !== 'undefined',
     };
   });
   report.bridge = shape;
-  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'voice', 'window'])
+  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'tapo', 'voice', 'window'])
     && JSON.stringify(shape.claude) === JSON.stringify(['cancel', 'interrupt', 'onEvent', 'reset', 'respondPermission', 'retry', 'send', 'status'])
-    && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'openSetupLog', 'restart', 'setup']), shape);
+    && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'openSetupLog', 'restart', 'setup'])
+    && JSON.stringify(shape.tapo) === JSON.stringify(['arm', 'events', 'onAlert', 'onLook', 'onStatus', 'openClips', 'openWindow', 'presets', 'ptz', 'status']), shape);
   check('no Node/ipcRenderer in the page', !shape.nodeLeak && !shape.ipcLeak, shape);
 
   // CSP: inline script and remote fetch are blocked, the local voice range is allowed.
@@ -213,9 +219,108 @@ try {
   report.turn = { text: turn.text, types: turn.types, isError: turn.end && turn.end.isError, cli: turn.status.cliPath, cliVersion: turn.status.cliVersion };
   check('Claude turn streamed to renderer', !!turn.end && !turn.end.isError && turn.text.length > 0 && (live || turn.text === 'You said: hello from electron'), turn);
 
+  if (!live) {
+    // A webcam snapshot travels with the turn as an image content block after the text; the fake
+    // CLI checks it like the API would and says what it saw. Malformed images never reach it.
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9, 0]).toString('base64');
+    const img = await page.evaluate(async (data) => {
+      const lm = /** @type {any} */ (window).lawnmower;
+      const events = [];
+      const off = lm.claude.onEvent((e) => events.push(e));
+      const { turnId } = await lm.claude.send('look at me', { images: [{ mediaType: 'image/jpeg', data }] });
+      for (let i = 0; i < 300 && !events.some((e) => e.type === 'turn_end' && e.turnId === turnId); i++) await new Promise((r) => setTimeout(r, 50));
+      off();
+      let rejected = '';
+      try {
+        await lm.claude.send('x', { images: [{ mediaType: 'image/png', data }] });
+      } catch (err) {
+        rejected = String(err && err.message);
+      }
+      return { text: events.filter((e) => e.type === 'text_delta' && e.turnId === turnId).map((e) => e.text).join(''), rejected };
+    }, jpeg);
+    report.image = img;
+    check('fake CLI receives the image block of a turn', img.text === 'You said: look at me [saw 1 image: image/jpeg 640x480, 24 bytes]', img);
+    check('a mislabelled image is refused by main', /not really image\/png/.test(img.rejected), img);
+  }
+
+  // The camera: denied while camera.enabled is off (the permission policy in main), allowed once
+  // it is on; in the app the privacy card comes first, then face tracking loads its wasm runtime
+  // and model from app:// in a worker (CSP, asar) and processes frames.
+  const camOff = await page.evaluate(async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      for (const t of s.getTracks()) t.stop();
+      return 'allowed';
+    } catch (err) {
+      return /** @type {any} */ (err).name;
+    }
+  });
+  check('camera denied while camera.enabled is off', camOff === 'NotAllowedError', camOff);
+  await page.waitForFunction(() => /** @type {any} */ (window).__app?.ready, null, { timeout: 60000 });
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ camera: { enabled: true } }));
+  const consent = await page.waitForSelector('.camera-card .camera-accept', { timeout: 10000 }).then(() => true, () => false);
+  check('privacy card before the camera is used', consent);
+  if (consent) await page.click('.camera-card .camera-accept');
+  const cam = await page.waitForFunction(() => {
+    const st = /** @type {any} */ (window).__app?.camera?.status;
+    return st && st.state === 'on' && st.tracking === 'on' && st.frames >= 3 ? st : (st && (st.state === 'error' || st.tracking === 'failed') ? st : null);
+  }, null, { timeout: 60000 }).then((h) => h.jsonValue(), async () => page.evaluate(() => /** @type {any} */ (window).__app?.camera?.status));
+  report.camera = cam && { state: cam.state, tracking: cam.tracking, mode: cam.mode, delegate: cam.delegate, frames: cam.frames, lastMs: cam.lastMs, error: cam.error?.kind, trackingError: cam.trackingError };
+  check('camera on: face tracking runs in a worker (wasm + model over app://)', cam?.state === 'on' && cam?.tracking === 'on' && cam?.mode === 'worker' && cam?.frames >= 3, report.camera);
+  // Offline means offline: the face-tracker worker runs under the CSP too (a worker takes it from
+  // its script's response, not from the page), so MediaPipe's built-in usage metrics — sent at
+  // once when the landmarker closes — and any other remote request never reach the network.
+  const trackerWorker = page.workers().find((w) => /face-worker/.test(w.url()));
+  const workerFetch = trackerWorker
+    ? await trackerWorker.evaluate(() => new Promise((resolve) => {
+      let violated = '';
+      const onViolation = (/** @type {any} */ e) => { violated = e.violatedDirective; };
+      globalThis.addEventListener('securitypolicyviolation', onViolation);
+      const done = (/** @type {string} */ how) => setTimeout(() => {
+        globalThis.removeEventListener('securitypolicyviolation', onViolation);
+        resolve(violated ? `blocked by CSP (${violated})` : how);
+      }, 100);
+      fetch('https://example.com/').then(() => done('allowed'), () => done('failed without a CSP violation'));
+    })).catch((err) => `error: ${err.message}`)
+    : 'no face-tracker worker';
+  check('the face-tracker worker runs under the CSP (no remote fetch)', /^blocked by CSP \(connect-src/.test(workerFetch), workerFetch);
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ camera: { enabled: false } }));
+  const released = await page.waitForFunction(() => document.body.dataset.camera === 'off' && !(/** @type {any} */ (window).__app.camera.camera.running), null, { timeout: 10000 }).then(() => true, () => false);
+  check('camera off releases the device', released);
+  await new Promise((r) => setTimeout(r, 1500)); // the landmarker's close() flushes its metrics now
+  const leaked = await app.evaluate(() => /** @type {any} */ (globalThis).__lawnmowerE2E.blockedRequests());
+  check('no request left the app (CSP stopped them before the network)', Array.isArray(leaked) && leaked.length === 0, leaked);
+
   const voice = await page.evaluate(() => /** @type {any} */ (window).lawnmower.voice.info());
   report.voice = voice;
   check('voice status reported', ['disabled', 'starting', 'ready', 'error'].includes(voice.status), voice);
+
+  // The local voice's character (default synth) is an AudioWorklet module loaded over app:// under
+  // the CSP; a refused module would only leave a warning and an unprocessed voice. A short clip
+  // through the real player must come out processed by the audio thread.
+  const fx = await page.waitForFunction(() => {
+    const v = /** @type {any} */ (window).__app?.player?.voiceFx;
+    return v && v.state !== 'loading' ? v : null;
+  }, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+  report.voiceFx = fx;
+  check('voice character effect loaded (AudioWorklet over app:// under the CSP)', fx?.state === 'ready' && fx.character === 'synth' && fx.active, fx);
+  const fxRun = await page.evaluate(async () => {
+    const p = /** @type {any} */ (window).__app.player;
+    const rate = 24000;
+    const samples = new Float32Array(rate * 0.6);
+    for (let i = 0; i < samples.length; i++) {
+      const t = i / rate;
+      samples[i] = 0.25 * Math.sin(2 * Math.PI * 160 * t) + 0.12 * Math.sin(2 * Math.PI * 320 * t) + 0.06 * Math.sin(2 * Math.PI * 640 * t);
+    }
+    const before = await p.fxStats();
+    const res = await Promise.race([p.enqueue({ kind: 'audio', samples, sampleRate: rate, text: 'e2e' }), new Promise((r) => setTimeout(() => r({ timeout: true }), 5000))]);
+    const after = await p.fxStats();
+    return { res, blocks: after ? after.blocks - before.blocks : -1, changed: after ? (after.diffSq - before.diffSq) / Math.max(1e-9, after.inSq - before.inSq) : -1, failed: after?.failed };
+  });
+  report.voiceFxRun = fxRun;
+  check('a clip is processed on the audio thread', fxRun.res?.stopped === false && fxRun.blocks > 50 && fxRun.changed > 0.01 && fxRun.failed === false, fxRun);
+
+  await homeCameraChecks(app, page);
 
   if (packaged) await packagedChecks(app);
 
@@ -250,6 +355,96 @@ console.log(JSON.stringify(report, null, 2));
 process.exit(report.ok ? 0 : 1);
 
 /**
+ * The Home camera window (docs/TAPO.md) without a camera: off by default there is no window; turned
+ * on (not set up, so nothing talks to a camera) main opens it hidden — app://lawnmower/tapo/index.html,
+ * sandboxed and isolated, its own preload exposing exactly window.lawnmowerCamera — and its page
+ * boots without errors; it may change only the camera's settings groups; turned off, it is gone.
+ * @param {import('@playwright/test').ElectronApplication} electronApp @param {import('@playwright/test').Page} page
+ */
+async function homeCameraChecks(electronApp, page) {
+  const windowCount = () => electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
+  const st0 = await page.evaluate(async () => {
+    const st = await /** @type {any} */ (window).lawnmower.tapo.status();
+    return { enabled: st.enabled, connection: st.connection, go2rtc: st.go2rtc?.state };
+  });
+  check('home camera off by default: status "off", no camera window', st0.enabled === false && st0.connection === 'off' && (await windowCount()) === 1, st0);
+  const hook = await electronApp.evaluate(() => {
+    const t = /** @type {any} */ (globalThis).__lawnmowerE2E?.tapo;
+    return t ? Object.keys(t).sort() : null;
+  });
+  check('LAWNMOWER_E2E: the home camera hooks', Array.isArray(hook) && ['clipsDir', 'go2rtcPid', 'notifications', 'setPassword', 'status', 'workerStats'].every((k) => hook.includes(k)), hook);
+
+  /** @type {string[]} */
+  const camErrors = [];
+  const opened = electronApp.waitForEvent('window', { timeout: 30000 });
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ tapo: { enabled: true } }));
+  const cam = await opened.catch(() => null);
+  check('turning the home camera on opens its window', !!cam);
+  if (!cam) return;
+  cam.on('console', (m) => { if (m.type() === 'error') camErrors.push(m.text()); });
+  cam.on('pageerror', (e) => camErrors.push(`pageerror: ${e.message}`));
+  await cam.waitForURL(/\/tapo\/index\.html/, { timeout: 30000 }).catch(() => {});
+  const win = await electronApp.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows().find((x) => /\/tapo\/index\.html/.test(x.webContents.getURL()));
+    if (!w) return null;
+    const p = /** @type {any} */ (w.webContents).getLastWebPreferences();
+    return { url: w.webContents.getURL(), title: w.getTitle(), visible: w.isVisible(), sandbox: p.sandbox, contextIsolation: p.contextIsolation, nodeIntegration: p.nodeIntegration, webSecurity: p.webSecurity };
+  });
+  report.cameraWindow = win;
+  // (its preload is checked below by what the page sees: window.lawnmowerCamera, no window.lawnmower)
+  check('camera window: app://lawnmower/tapo/index.html, hidden, sandboxed, isolated', win?.url === 'app://lawnmower/tapo/index.html' && win.visible === false
+    && win.sandbox === true && win.contextIsolation === true && win.nodeIntegration === false && win.webSecurity !== false && /^Home camera\b/.test(win.title), win);
+  const booted = await cam.waitForFunction(() => document.body?.dataset.boot === 'ready', null, { timeout: 30000 }).then(() => true, () => false);
+  check('camera page booted (the setup, since no camera is set up)', booted);
+  const camShape = await cam.evaluate(() => {
+    const c = /** @type {any} */ (window).lawnmowerCamera;
+    const keys = (/** @type {any} */ o) => Object.keys(o || {}).sort();
+    return {
+      top: keys(c), tapo: keys(c?.tapo), events: keys(c?.tapo?.events), settings: keys(c?.settings), app: keys(c?.app),
+      avatarApi: typeof (/** @type {any} */ (window).lawnmower),
+      nodeLeak: typeof (/** @type {any} */ (window).require) !== 'undefined' || typeof (/** @type {any} */ (window).process) !== 'undefined',
+      ipcLeak: typeof (/** @type {any} */ (window).ipcRenderer) !== 'undefined',
+    };
+  });
+  report.cameraBridge = camShape;
+  check('camera preload: exactly window.lawnmowerCamera { app, settings, tapo }, no Claude API, no Node',
+    JSON.stringify(camShape.top) === JSON.stringify(['app', 'settings', 'tapo']) && camShape.avatarApi === 'undefined' && !camShape.nodeLeak && !camShape.ipcLeak
+    && JSON.stringify(camShape.events) === JSON.stringify(['ack', 'list', 'openFolder', 'remove'])
+    && ['arm', 'calibrate', 'clearCredentials', 'discover', 'onCalibration', 'onEvent', 'onOpenEvent', 'onStatus', 'presets', 'ptz', 'removePreset', 'requestPort', 'savePreset', 'setCredentials', 'setViewVisible', 'status', 'test'].every((k) => camShape.tapo.includes(k)), camShape);
+  const limits = await cam.evaluate(async () => {
+    const c = /** @type {any} */ (window).lawnmowerCamera;
+    let refused = '';
+    try {
+      await c.settings.set({ window: { alwaysOnTop: false } });
+    } catch (err) {
+      refused = String(/** @type {any} */ (err)?.message || err);
+    }
+    const after = await c.settings.set({ tapo: { name: 'e2e camera' } });
+    const info = await c.app.info();
+    const st = await c.tapo.status();
+    return { refused, name: after.tapo.name, version: info.version, connection: st.connection };
+  });
+  check('camera window: changes its own settings only; app info and status work', /only change the camera settings/.test(limits.refused) && limits.name === 'e2e camera' && !!limits.version && limits.connection === 'not-configured', limits);
+  const title = await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((w) => w.getTitle()).find((t) => /^Home camera/.test(t)));
+  check('the camera window title follows the name', title === 'Home camera — e2e camera', title);
+  const avatarSaw = await page.evaluate(async () => (await /** @type {any} */ (window).lawnmower.settings.get()).tapo.name);
+  check('the avatar window sees the camera window\'s change', avatarSaw === 'e2e camera', avatarSaw);
+  // nothing the camera page loaded (MediaPipe's runtime and model included) left the app
+  await new Promise((r) => setTimeout(r, 2500));
+  const leaked = await electronApp.evaluate(() => /** @type {any} */ (globalThis).__lawnmowerE2E.blockedRequests());
+  check('no request left the camera window', Array.isArray(leaked) && leaked.length === 0, leaked);
+  report.cameraConsoleErrors = camErrors;
+  check('camera page: no console errors', camErrors.length === 0, camErrors);
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ tapo: { enabled: false, name: 'camera' } }));
+  let left = await windowCount();
+  for (let i = 0; i < 50 && left !== 1; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    left = await windowCount();
+  }
+  check('turning the home camera off closes its window', left === 1, left);
+}
+
+/**
  * What the installer has to deliver, checked inside the running packaged app.
  * @param {import('@playwright/test').ElectronApplication} electronApp
  */
@@ -260,9 +455,23 @@ async function packagedChecks(electronApp) {
     const fsm = process.getBuiltinModule('node:fs');
     const pathm = process.getBuiltinModule('node:path');
     const res = t.resourcesPath();
-    const files = ['app.asar', 'voice/lawnmower_voice/__main__.py', 'voice/pyproject.toml', 'scripts/setup-voice.ps1', 'scripts/setup-voice.sh', 'scripts/setup-voice.cmd', 'THIRD_PARTY_NOTICES.md'];
-    const unwanted = ['voice/tests', 'voice/.venv', 'voice/models', 'app.asar.unpacked/node_modules'];
+    const files = ['app.asar', 'voice/lawnmower_voice/__main__.py', 'voice/pyproject.toml', 'scripts/setup-voice.ps1', 'scripts/setup-voice.sh', 'scripts/setup-voice.cmd', 'THIRD_PARTY_NOTICES.md',
+      // the camera's face tracker (Electron's fs reads inside app.asar)
+      'app.asar/dist/assets/vision/face_landmarker.task', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.js', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.wasm',
+      // the home camera: its page, preload, person detector model, and go2rtc + its license
+      'app.asar/dist/tapo/index.html', 'app.asar/electron/preload-camera.cjs', 'app.asar/electron/tapo/index.js', 'app.asar/dist/assets/security/efficientdet_lite0_int8.tflite',
+      process.platform === 'win32' ? 'tapo/go2rtc.exe' : 'tapo/go2rtc', 'tapo/go2rtc-LICENSE.txt'];
+    const unwanted = ['voice/tests', 'voice/.venv', 'voice/models', 'app.asar.unpacked/node_modules', 'app.asar/dist/dev', 'app.asar/tools', 'app.asar/vendor'];
+    // the bundled go2rtc runs here and is the pinned release (docs/TAPO.md, scripts/fetch-go2rtc.mjs)
+    let go2rtcVersion = '';
+    try {
+      const bin = pathm.join(res, 'tapo', process.platform === 'win32' ? 'go2rtc.exe' : 'go2rtc');
+      go2rtcVersion = String(process.getBuiltinModule('node:child_process').execFileSync(bin, ['-version'], { timeout: 15000, windowsHide: true })).trim();
+    } catch (err) {
+      go2rtcVersion = `failed: ${/** @type {Error} */ (err).message}`;
+    }
     return {
+      go2rtcVersion,
       packaged: t.packaged(),
       resourcesPath: res,
       missing: files.filter((f) => !fsm.existsSync(pathm.join(res, f))),
@@ -278,6 +487,7 @@ async function packagedChecks(electronApp) {
   check('app.isPackaged', info.packaged === true, info.packaged);
   check('resources complete', info.missing.length === 0, info.missing);
   check('no tests / venv / models in resources', info.unwanted.length === 0, info.unwanted);
+  check('the bundled go2rtc runs and is 1.9.14', /^go2rtc version 1\.9\.14\b/.test(info.go2rtcVersion), info.go2rtcVersion);
   const sep = process.platform === 'win32' ? '\\' : '/';
   const expectedHome = process.platform === 'win32'
     ? [info.env.LOCALAPPDATA, 'LawnmowerMan', 'voice'].join(sep)

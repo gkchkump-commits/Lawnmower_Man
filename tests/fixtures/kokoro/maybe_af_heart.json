@@ -1,0 +1,299 @@
+{
+"text": "Maybe we should move the meeting to Friday? I think five people can make it then.",
+"voice": "af_heart",
+"sampleRate": 24000,
+"durationSec": 4.576,
+"visemes": [
+{
+"start": 0.0,
+"end": 0.09,
+"viseme": "sil"
+},
+{
+"start": 0.09,
+"end": 0.14,
+"viseme": "PP"
+},
+{
+"start": 0.14,
+"end": 0.215,
+"viseme": "E"
+},
+{
+"start": 0.215,
+"end": 0.265,
+"viseme": "I"
+},
+{
+"start": 0.265,
+"end": 0.315,
+"viseme": "PP"
+},
+{
+"start": 0.315,
+"end": 0.44,
+"viseme": "I"
+},
+{
+"start": 0.44,
+"end": 0.465,
+"viseme": "U"
+},
+{
+"start": 0.465,
+"end": 0.565,
+"viseme": "I"
+},
+{
+"start": 0.565,
+"end": 0.59,
+"viseme": "CH"
+},
+{
+"start": 0.59,
+"end": 0.665,
+"viseme": "U"
+},
+{
+"start": 0.665,
+"end": 0.765,
+"viseme": "DD"
+},
+{
+"start": 0.765,
+"end": 0.79,
+"viseme": "PP"
+},
+{
+"start": 0.79,
+"end": 0.915,
+"viseme": "U"
+},
+{
+"start": 0.915,
+"end": 0.99,
+"viseme": "FF"
+},
+{
+"start": 0.99,
+"end": 1.015,
+"viseme": "TH"
+},
+{
+"start": 1.015,
+"end": 1.09,
+"viseme": "E"
+},
+{
+"start": 1.09,
+"end": 1.115,
+"viseme": "PP"
+},
+{
+"start": 1.115,
+"end": 1.24,
+"viseme": "I"
+},
+{
+"start": 1.24,
+"end": 1.315,
+"viseme": "DD"
+},
+{
+"start": 1.315,
+"end": 1.365,
+"viseme": "I"
+},
+{
+"start": 1.365,
+"end": 1.465,
+"viseme": "kk"
+},
+{
+"start": 1.465,
+"end": 1.49,
+"viseme": "DD"
+},
+{
+"start": 1.49,
+"end": 1.59,
+"viseme": "E"
+},
+{
+"start": 1.59,
+"end": 1.64,
+"viseme": "FF"
+},
+{
+"start": 1.64,
+"end": 1.665,
+"viseme": "RR"
+},
+{
+"start": 1.665,
+"end": 1.755,
+"viseme": "aa"
+},
+{
+"start": 1.755,
+"end": 1.815,
+"viseme": "I"
+},
+{
+"start": 1.815,
+"end": 1.89,
+"viseme": "DD"
+},
+{
+"start": 1.89,
+"end": 2.145,
+"viseme": "E"
+},
+{
+"start": 2.145,
+"end": 2.315,
+"viseme": "I"
+},
+{
+"start": 2.315,
+"end": 2.515,
+"viseme": "sil"
+},
+{
+"start": 2.515,
+"end": 2.575,
+"viseme": "aa"
+},
+{
+"start": 2.575,
+"end": 2.665,
+"viseme": "I"
+},
+{
+"start": 2.665,
+"end": 2.69,
+"viseme": "TH"
+},
+{
+"start": 2.69,
+"end": 2.74,
+"viseme": "I"
+},
+{
+"start": 2.74,
+"end": 2.915,
+"viseme": "kk"
+},
+{
+"start": 2.915,
+"end": 2.965,
+"viseme": "FF"
+},
+{
+"start": 2.965,
+"end": 3.07,
+"viseme": "aa"
+},
+{
+"start": 3.07,
+"end": 3.14,
+"viseme": "I"
+},
+{
+"start": 3.14,
+"end": 3.24,
+"viseme": "FF"
+},
+{
+"start": 3.24,
+"end": 3.29,
+"viseme": "PP"
+},
+{
+"start": 3.29,
+"end": 3.415,
+"viseme": "I"
+},
+{
+"start": 3.415,
+"end": 3.465,
+"viseme": "PP"
+},
+{
+"start": 3.465,
+"end": 3.515,
+"viseme": "E"
+},
+{
+"start": 3.515,
+"end": 3.615,
+"viseme": "DD"
+},
+{
+"start": 3.615,
+"end": 3.64,
+"viseme": "kk"
+},
+{
+"start": 3.64,
+"end": 3.665,
+"viseme": "aa"
+},
+{
+"start": 3.665,
+"end": 3.74,
+"viseme": "DD"
+},
+{
+"start": 3.74,
+"end": 3.765,
+"viseme": "PP"
+},
+{
+"start": 3.765,
+"end": 3.825,
+"viseme": "E"
+},
+{
+"start": 3.825,
+"end": 3.865,
+"viseme": "I"
+},
+{
+"start": 3.865,
+"end": 3.915,
+"viseme": "kk"
+},
+{
+"start": 3.915,
+"end": 3.965,
+"viseme": "I"
+},
+{
+"start": 3.965,
+"end": 4.04,
+"viseme": "DD"
+},
+{
+"start": 4.04,
+"end": 4.065,
+"viseme": "TH"
+},
+{
+"start": 4.065,
+"end": 4.215,
+"viseme": "E"
+},
+{
+"start": 4.215,
+"end": 4.366,
+"viseme": "DD"
+},
+{
+"start": 4.366,
+"end": 4.576,
+"viseme": "sil"
+}
+],
+"source": "Kokoro v1.0 (kokoro-onnx 0.6.1, CPU), voice af_heart, via lawnmower_voice.tts (timeline aligned with the audio)"
+}

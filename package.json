@@ -7,6 +7,7 @@
     "name": "gkchkump-commits",
     "url": "https://github.com/gkchkump-commits"
   },
+  "license": "MIT",
   "homepage": "https://github.com/gkchkump-commits/Lawnmower_Man",
   "repository": {
     "type": "git",
@@ -30,9 +31,14 @@
     "check:electron": "node scripts/check-electron.mjs",
     "dist:win": "vite build && electron-builder --win --publish never",
     "dist:linux-dir": "vite build && electron-builder --linux dir --publish never",
-    "test:packaged": "node scripts/electron-e2e.mjs --packaged"
+    "test:packaged": "node scripts/electron-e2e.mjs --packaged",
+    "fetch:go2rtc": "node scripts/fetch-go2rtc.mjs",
+    "probe:tapo": "node tools/tapo-probe.mjs",
+    "sim:tapo": "node tools/tapo-sim --onvif-port 12020 --rtsp-port 10554 --control-port 12021",
+    "test:tapo-e2e": "node scripts/tapo-e2e.mjs"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "1.1.0",
     "three": "^0.186.1"
   },
   "devDependencies": {
@@ -96,6 +102,10 @@
       {
         "from": "THIRD_PARTY_NOTICES.md",
         "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
       }
     ],
     "asar": true,
@@ -116,7 +126,17 @@
         }
       ],
       "icon": "electron/assets/icon.ico",
-      "requestedExecutionLevel": "asInvoker"
+      "requestedExecutionLevel": "asInvoker",
+      "extraResources": [
+        {
+          "from": "vendor/go2rtc/win32-x64/go2rtc.exe",
+          "to": "tapo/go2rtc.exe"
+        },
+        {
+          "from": "vendor/go2rtc/LICENSE",
+          "to": "tapo/go2rtc-LICENSE.txt"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -146,7 +166,17 @@
       "category": "Utility",
       "icon": "electron/assets/icon.png",
       "artifactName": "Lawnmower-Man-${version}.${ext}",
-      "synopsis": "Holographic desktop avatar for Claude"
+      "synopsis": "Holographic desktop avatar for Claude",
+      "extraResources": [
+        {
+          "from": "vendor/go2rtc/linux-x64/go2rtc",
+          "to": "tapo/go2rtc"
+        },
+        {
+          "from": "vendor/go2rtc/LICENSE",
+          "to": "tapo/go2rtc-LICENSE.txt"
+        }
+      ]
     }
   }
 }

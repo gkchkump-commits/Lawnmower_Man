@@ -7,11 +7,13 @@
 /* global URLSearchParams, location, innerWidth, innerHeight */
 
 import { ClickThroughGate, probeAvatar } from './app/click-through.js';
+import { WindowDrag, nextAvatarWidth } from './app/window-drag.js';
 import { Controller } from './app/controller.js';
 import { gazeFromPoint } from './app/gaze.js';
 import { getPath, withDefaults } from './app/settings-defaults.js';
 import { voiceSetupDiagnostics } from './app/setup-help.js';
 import { Mic } from './audio/mic.js';
+import { LIPSYNC_TEST_LINE } from './audio/lipsync.js';
 import { AudioPlayer } from './audio/player.js';
 import { getBridge } from './bridge/index.js';
 import { VOICE_SETUP_HINT, createSpeechServices } from './speech/index.js';
@@ -26,6 +28,13 @@ import { computeLayout } from './ui/layout.js';
 import { SettingsDrawer } from './ui/settings-drawer.js';
 import { setupTailView } from './ui/setup-cards.js';
 import { copyText } from './ui/transcript.js';
+import { CameraFeature } from './vision/index.js';
+import { GazeArbiter } from './vision/gaze.js';
+import { CameraUi, cameraInfoLines } from './vision/ui.js';
+import { TapoAvatarLink } from './tapo/avatar-link.js';
+import { ArmedPill, showDescribeConsent } from './tapo/avatar-ui.js';
+import { hasDescribeConsent } from './tapo/consent.js';
+import { drawerStatusLine } from './tapo/status.js';
 
 /** @param {string} id */
 const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id));
@@ -53,7 +62,9 @@ async function boot() {
   // ---------------------------------------------------------------- speech & audio
   const webSpeech = new WebSpeechTTS();
   const voiceClient = new VoiceClient(bridge.__mock?.voiceFetch ? { fetch: bridge.__mock.voiceFetch } : {});
-  const player = new AudioPlayer({ speech: webSpeech });
+  // the local voice's character (settings voice.character / fxAmount; later changes arrive
+  // through controller.applySettings); the effect starts loading now, off the critical path
+  const player = new AudioPlayer({ speech: webSpeech, voiceFx: { character: settings.voice.character, amount: settings.voice.fxAmount } });
   const mic = new Mic();
   /** @type {AppView} */
   let view;
@@ -104,6 +115,22 @@ async function boot() {
   );
 
   const gate = new ClickThroughGate({ apply: (ignore) => bridge.window.setIgnoreMouse(ignore) });
+  // Moving the window by the head and resizing it by a corner grip (wired to pointer events
+  // below; created early because settings changes consult it).
+  const windowDrag = new WindowDrag({
+    win: bridge.window,
+    isLocked: () => !!settings.window.lockPosition,
+    gate,
+    onChange: (on, mode, corner) => {
+      body.dataset.dragging = on && mode === 'drag' ? '1' : '';
+      if (on && mode === 'resize' && corner) body.dataset.resizing = corner;
+      else delete body.dataset.resizing;
+    },
+  });
+  const syncLockAttr = () => {
+    body.dataset.lock = settings.window.lockPosition || !windowDrag.supported ? '1' : '';
+    body.dataset.noresize = windowDrag.resizeSupported ? '' : '1';
+  };
   const clickThroughWanted = () => {
     if (!settings.window.clickThrough) return false;
     if (isMock) return q.get('clickThrough') === '1';
@@ -120,6 +147,8 @@ async function boot() {
       if (open) {
         refreshInfo();
         refreshAppInfo(); // e.g. hotkey conflicts may have changed since boot
+        camera?.refreshDevices();
+        refreshCameraInfo();
       }
     },
   });
@@ -128,6 +157,16 @@ async function boot() {
   }
 
   // ---------------------------------------------------------------- avatar
+  /** when the avatar's frame last ran the controller tick (performance.now ms) */
+  let hookTickAt = -Infinity;
+  /** @param {number} dt */
+  const tickController = (dt) => {
+    try {
+      controller?.tick(dt, performance.now() / 1000);
+    } catch (err) {
+      console.warn('[app] tick failed', err);
+    }
+  };
   const app = /** @type {any} */ ({ bridge, isMock, view, drawer, player, mic, voiceClient, webSpeech, services, avatarReady: false, ready: false });
   window.__app = app;
   const avatarHost = new AvatarHost($('stage'), {
@@ -137,6 +176,12 @@ async function boot() {
     },
     onCreated: (a) => {
       controller?.setAvatar(a);
+      // one frame loop: the lip-sync runs inside the avatar's frame, right before the director
+      a.setFrameHook?.((dt) => {
+        hookTickAt = performance.now();
+        tickController(dt);
+      });
+      gaze.reapply(); // the new avatar starts without a gaze target
       app.avatarReady = true;
       body.dataset.avatar = a.renderer || 'none';
     },
@@ -145,6 +190,14 @@ async function boot() {
   });
   app.avatarHost = avatarHost;
   Object.defineProperty(app, 'avatar', { get: () => avatarHost.avatar });
+  // where the eyes look: the cursor, or (camera) the user's face — see src/vision/gaze.js
+  // (the arbiter has decided what the target is when it applies it: cursor, face or glance)
+  const gaze = new GazeArbiter({ apply: (t) => (t ? avatarHost.avatar.lookAt(t[0], t[1], gaze.source ?? 'cursor') : avatarHost.avatar.lookAt(null)) });
+  app.gaze = gaze;
+  /** @type {CameraFeature|null} the camera (created after the controller) */
+  let camera = null;
+  /** @type {TapoAvatarLink|null} the Home camera's link to the avatar (created after the controller) */
+  let tapoLink = null;
 
   // ---------------------------------------------------------------- controller
   controller = new Controller({
@@ -181,9 +234,13 @@ async function boot() {
     applyLayout();
     drawer.update(settings);
     gate.setEnabled(clickThroughWanted());
+    syncLockAttr();
+    if (settings.window.lockPosition) windowDrag.release();
     if (prev.voice.enabled !== settings.voice.enabled || prev.voice.speakReplies !== settings.voice.speakReplies) updateVoiceStatus();
-    if (!settings.avatar.followCursor) avatarHost.avatar.lookAt(null);
+    if (!settings.avatar.followCursor) gaze.releaseCursor();
+    camera?.applySettings(settings);
     if (prev.voice.ttsVoice !== settings.voice.ttsVoice) drawer.setVoiceOptions(voiceList);
+    if (JSON.stringify(prev.tapo) !== JSON.stringify(settings.tapo)) refreshTapoInfo();
     if (prev.voice.systemVoice !== settings.voice.systemVoice) {
       webSpeech.setPreferred(settings.voice.systemVoice);
       drawer.setSystemVoiceOptions(webSpeech.allVoices());
@@ -206,6 +263,26 @@ async function boot() {
 
   /** @param {object} patch @param {string} path @param {any} value */
   async function saveSettings(patch, path, value) {
+    // ---- Home camera: arming goes through main's arm (the exit delay applies); Claude
+    // describing alerts sends pictures of the home to Anthropic, so it asks first
+    if (path === 'security.armed' && bridge.tapo) {
+      try {
+        await bridge.tapo.arm(!!value);
+        if (value) view.toast('Arming the camera…', 'info');
+      } catch (err) {
+        view.toast(`Could not ${value ? 'arm' : 'disarm'} the camera: ${err?.message || err}`, 'error');
+      }
+      refreshTapoInfo();
+      return;
+    }
+    if (path === 'security.describe' && value === true && !hasDescribeConsent()) {
+      drawer.close();
+      const ok = await showDescribeConsent($('cards'));
+      if (!ok) {
+        drawer.update(settings);
+        return;
+      }
+    }
     try {
       const result = await bridge.settings.set(patch);
       if (!result || typeof result !== 'object') return;
@@ -230,6 +307,19 @@ async function boot() {
       view.toast('Restarting the voice server…', 'info');
     } else if (a === 'setupVoice') {
       setupVoice();
+    } else if (a === 'testLipSync') {
+      // a line full of closures (m b p) and a pause: easy to judge the mouth's timing by
+      if (!controller.say(LIPSYNC_TEST_LINE)) view.toast('Busy: try the lip-sync test once the avatar is quiet.', 'info');
+    } else if (a === 'resetPosition') {
+      if (typeof bridge.window.resetPosition === 'function') bridge.window.resetPosition();
+      else view.toast('Restart Lawnmower Man to reset the position.', 'info');
+    } else if (a === 'openTapo' && bridge.tapo) {
+      bridge.tapo.openWindow().catch((err) => view.toast(`Could not open the camera window: ${err?.message || err}`, 'error'));
+      drawer.close();
+    } else if (a === 'openTapoClips' && bridge.tapo) {
+      bridge.tapo.openClips().then((r) => {
+        if (r && r.ok === false) view.toast(r.error || 'Could not open the clips folder.', 'warn');
+      }, (err) => view.toast(`Could not open the clips folder: ${err?.message || err}`, 'warn'));
     }
   }
 
@@ -407,8 +497,106 @@ async function boot() {
     drawer.setInfo('hotkeyInfo', hk);
   }
 
+  // ---------------------------------------------------------------- camera (docs/CAMERA.md)
+  let cameraInfoTimer = 0;
+  /** The drawer's Camera info block (only while the drawer is open; at most ~4 times a second). */
+  function refreshCameraInfo() {
+    if (!camera || !drawer.isOpen || cameraInfoTimer) return;
+    cameraInfoTimer = /** @type {any} */ (setTimeout(() => {
+      cameraInfoTimer = 0;
+      if (camera && drawer.isOpen) drawer.setInfo('cameraInfo', cameraInfoLines(camera.status));
+    }, 250));
+  }
+  const cameraUi = new CameraUi(
+    { body, cards: $('cards'), button: /** @type {HTMLButtonElement} */ ($('btn-camera')), indicator: /** @type {HTMLButtonElement} */ ($('cam-live')), shot: /** @type {HTMLButtonElement} */ ($('shot')) },
+    {
+      onToggle: () => camera?.toggle(),
+      onShot: () => camera?.toggleShot(),
+      toast: (msg, level) => view.toast(msg, /** @type {any} */ (level)),
+      setDevices: (cams, o) => drawer.setCameraOptions(cams, o),
+      changed: () => refreshCameraInfo(),
+    },
+  );
+  camera = new CameraFeature({
+    getSettings: () => settings,
+    saveSettings: (patch) => {
+      const [group, fields] = Object.entries(patch)[0];
+      const [key, value] = Object.entries(/** @type {any} */ (fields))[0];
+      return saveSettings(patch, `${group}.${key}`, value);
+    },
+    controller,
+    getAvatar: () => avatarHost.avatar,
+    gaze,
+    view: cameraUi,
+    platform,
+    userBusy: () => !!composer.text.trim(),
+  });
+  app.camera = camera;
+  // the camera pauses while the window cannot be seen: main reports it (with backgroundThrottling
+  // off, document.visibilityState always says "visible" in Electron); the browser preview uses
+  // the Page Visibility API
+  if (typeof bridge.window.onVisibility === 'function') {
+    // subscribe first, then ask (the boot-time app.info() may predate the window being shown)
+    let heard = false;
+    bridge.window.onVisibility((v) => {
+      heard = true;
+      camera?.setVisible(v?.visible !== false);
+    });
+    bridge.app.info().then((i) => {
+      if (!heard && i && typeof i.visible === 'boolean') camera?.setVisible(i.visible);
+    }, () => {});
+  } else {
+    document.addEventListener('visibilitychange', () => camera?.setVisible(document.visibilityState === 'visible'));
+  }
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => camera?.refreshDevices());
+
+  // ---------------------------------------------------------------- Home camera (src/tapo/)
+  // alerts (wake, look toward the camera window, say it), the ARMED pill, the drawer section,
+  // and the local commands ("camera left", "arm the camera") that need no Claude turn
+  /** @param {any} [st] */
+  function refreshTapoInfo(st = tapoLink?.status) {
+    if (!bridge.tapo) return;
+    drawer.setInfo('tapoInfo', [h('div', null, drawerStatusLine(st))]);
+    const on = !!settings.tapo.enabled;
+    for (const p of ['security.armed', 'security.announce', 'security.describe']) {
+      const c = drawer.controls.get(p);
+      if (c) c.row.hidden = !on;
+    }
+    drawer.setAction('openTapo', { hidden: !on });
+    drawer.setAction('openTapoClips', { hidden: !on });
+    // the segmented control shows main's state (arming counts as armed)
+    const armed = drawer.controls.get('security.armed');
+    if (armed && st) armed.set(!!(st.security?.armed || st.security?.arming));
+  }
+  if (bridge.tapo) {
+    const pill = new ArmedPill(view.status.root, { onClick: () => bridge.tapo.openWindow().catch(() => {}) });
+    tapoLink = new TapoAvatarLink({
+      bridge,
+      controller,
+      gaze,
+      getAvatar: () => avatarHost.avatar,
+      getSettings: () => settings,
+      getStage: () => $('stage').getBoundingClientRect(),
+      view: {
+        toast: (msg, level) => view.toast(msg, level),
+        setStatus: (st) => {
+          pill.update(st);
+          refreshTapoInfo(st);
+        },
+      },
+    });
+    controller.setCommandInterceptor((text, o) => tapoLink.intercept(text, o));
+    app.tapo = tapoLink;
+  } else {
+    // an older main without the Home camera: no section for it
+    /** @type {HTMLElement|null} */ (document.querySelector('[data-section="tapo"]'))?.setAttribute('hidden', '');
+  }
+
   // ---------------------------------------------------------------- start
   await controller.start();
+  camera.applySettings(settings);
+  tapoLink?.start();
+  refreshTapoInfo();
   webSpeech.setPreferred(settings.voice.systemVoice);
   webSpeech.onVoicesChanged(() => {
     drawer.setSystemVoiceOptions(webSpeech.allVoices());
@@ -497,12 +685,11 @@ async function boot() {
     if (!settings.avatar.followCursor) return;
     const g = gazeFromPoint(x, y, stage.getBoundingClientRect());
     if (!g) return;
-    avatarHost.avatar.lookAt(g[0], g[1]);
     clearTimeout(releaseGaze);
-    releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), releaseMs));
+    gaze.cursor(g, releaseMs); // holds for releaseMs, or 1.5 s while the camera sees the user
   };
   // Desktop app: main reports the cursor anywhere on the screen (~30 Hz, only when it moves),
-  // so the eyes follow it outside the window and over drag regions too. The browser preview
+  // so the eyes follow it outside the window and while it is being dragged too. The browser preview
   // (mock bridge) has no such event and falls back to pointer events over the page.
   const globalCursor = typeof bridge.onCursor === 'function';
   if (globalCursor) {
@@ -510,43 +697,100 @@ async function boot() {
       if (p && typeof p === 'object') lookAtPoint(Number(p.x), Number(p.y));
     });
   }
+  // ---------------------------------------------------------------- moving and resizing the window
+  // Press on the head (its visible silhouette), the chat status bar or the settings header and
+  // drag: main moves the window (see src/app/window-drag.js for why not CSS drag regions). Press
+  // on a corner grip and drag: main resizes the window from that corner.
+  const DRAG_CONTROLS = 'button, input, textarea, select, a, label, [contenteditable], .toolbar, .perm-card, .setup-card, .toast, .transcript, .composer';
+  /** @param {PointerEvent|MouseEvent} e  over the head, away from any control */
+  const overHeadAt = (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (!t?.closest || !t.closest('#stage') || t.closest(DRAG_CONTROLS)) return false;
+    return !!avatarHost.avatar.hitTest(e.clientX, e.clientY);
+  };
+  /** @param {PointerEvent} e */
+  const dragHandleAt = (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (!t?.closest || t.closest(DRAG_CONTROLS)) return false;
+    if (t.closest('.statusbar, .drawer-head')) return true;
+    return overHeadAt(e);
+  };
+  syncLockAttr();
+  /** @param {PointerEvent} e @returns {string|null} the corner of the grip under the pointer */
+  const gripAt = (e) => {
+    const g = /** @type {HTMLElement|null} */ (/** @type {HTMLElement} */ (e.target)?.closest?.('.grip'));
+    return g?.dataset?.corner || null;
+  };
+  window.addEventListener('pointerdown', (e) => {
+    if (!windowDrag.press(e, /** @type {any} */ (gripAt(e)) || dragHandleAt(e))) return;
+    e.preventDefault(); // no text selection or focus change while the window moves
+    try {
+      /** @type {HTMLElement} */ (e.target).setPointerCapture?.(e.pointerId);
+    } catch { /* the release still arrives via window listeners */ }
+  });
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    window.addEventListener(type, (e) => windowDrag.release(/** @type {PointerEvent} */ (e)), true);
+  }
+  window.addEventListener('blur', () => windowDrag.release());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) windowDrag.release(); });
+  // Ctrl + mouse wheel over the head: bigger / smaller in small steps (a free size, like a corner)
+  let lastWheelSize = 0;
+  window.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || !overHeadAt(e)) return;
+    e.preventDefault(); // never zoom the page
+    if (typeof bridge.window.setAvatarWidth !== 'function' || windowDrag.active) return;
+    const now = performance.now();
+    if (now - lastWheelSize < 60) return;
+    const next = nextAvatarWidth(innerWidth, e.deltaY);
+    if (!next) return;
+    lastWheelSize = now;
+    bridge.window.setAvatarWidth(next);
+  }, { passive: false });
+
+  const stageEl = document.getElementById('stage');
   window.addEventListener('pointermove', (e) => {
-    view.notePointer();
+    const t = /** @type {HTMLElement} */ (e.target);
+    // (a folded panel has pointer-events: none, so it is never the target)
+    const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, .grip, button, input, textarea, select, a');
+    // Minimal mode: only the avatar area (or UI that is showing) unfolds the panel. The folded
+    // strip below the face is transparent and click-through: a pointer passing over it on the
+    // way to the desktop must not drop the chat down and catch the click.
+    const bottom = stageEl ? stageEl.getBoundingClientRect().bottom : window.innerWidth * 1.5;
+    if (e.clientY < bottom || body.dataset.panel === 'shown' || overUi) view.notePointer();
     controller.noteActivity();
     const av = avatarHost.avatar;
+    if (!windowDrag.active) body.dataset.overHead = overHeadAt(e) ? '1' : '';
     if (!globalCursor) lookAtPoint(e.clientX, e.clientY);
-    if (gate.enabled) {
-      const t = /** @type {HTMLElement} */ (e.target);
-      const overUi = !!t?.closest?.('.panel, .toolbar, .perm-card, .setup-card, .toast, .drawer, button, input, textarea, select, a');
-      gate.update(overUi || probeAvatar((x, y) => av.hitTest(x, y), e.clientX, e.clientY, gate.interactive));
-    }
+    if (gate.enabled) gate.update(overUi || probeAvatar((x, y) => av.hitTest(x, y), e.clientX, e.clientY, gate.interactive));
   }, { passive: true });
   document.documentElement.addEventListener('pointerleave', () => {
     view.pointerLeft();
     gate.leave();
     if (globalCursor) return; // the global cursor keeps the eyes following outside the window
     clearTimeout(releaseGaze);
-    releaseGaze = /** @type {any} */ (setTimeout(() => avatarHost.avatar.lookAt(null), 1200));
+    releaseGaze = /** @type {any} */ (setTimeout(() => gaze.releaseCursor(), 1200));
   });
   window.addEventListener('pointerdown', () => {
     gate.hold('pointer', true);
     player.unlock(); // browsers start audio suspended until a gesture
   }, true);
-  window.addEventListener('pointerup', () => gate.hold('pointer', false), true);
+  // a cancelled press (a touch that became a scroll) ends the hold too
+  for (const type of ['pointerup', 'pointercancel']) window.addEventListener(type, () => gate.hold('pointer', false), true);
   window.addEventListener('keydown', () => player.unlock(), { once: true, capture: true });
   $('input').addEventListener('focus', () => view.refreshPanel());
   $('input').addEventListener('blur', () => view.refreshPanel());
+  // typing: the avatar leans in and glances down at the chat now and then (src/avatar/behavior.js)
+  $('input').addEventListener('input', () => avatarHost.avatar.setUser?.({ typing: true }));
 
   // ---------------------------------------------------------------- frame loop (lip-sync)
+  // The avatar's frame runs the tick (see setFrameHook above: lip-sync, then the director, then
+  // the render, with one dt). This loop only takes over while the avatar does not render: before
+  // it is loaded, without WebGL, after a lost context.
   let last = performance.now();
   const frame = (t) => {
     const dt = clamp((t - last) / 1000, 0, 0.1);
     last = t;
-    try {
-      controller.tick(dt, t / 1000);
-    } catch (err) {
-      console.warn('[app] tick failed', err);
-    }
+    if (performance.now() - hookTickAt > 100) tickController(dt);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

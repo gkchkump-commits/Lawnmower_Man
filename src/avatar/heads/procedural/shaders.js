@@ -29,19 +29,37 @@ uniform mat3 uJawRot;
 uniform vec3 uJawPivot;
 uniform mat3 uHeadRot;
 uniform vec3 uHeadPivot;
+uniform vec3 uHeadXform;  // posture: shift x, y and scale about the pivot (1 at rest)
 uniform vec3 uCornerL;
 uniform vec3 uCornerR;
 uniform vec4 uLips;     // upperLift, lowerDrop, push, cheek
+uniform vec4 uMouthX;   // press thinning, press roll-in, tuck draw-back (world units), tongue
 uniform vec2 uBrow;
 uniform float uBreathY;
 uniform vec2 uNeckRot;  // rest y: head rotation weight 0 at x, 1 at y (the neck stays put)
+uniform vec2 uFace;     // chin boss lift, nostril wings out (world units; 0 at rest)
+uniform vec4 uChinP;    // chin boss centre x, y and radii x, y (rest)
+uniform vec4 uAlaP;     // nostril wings: |x| from the midline, y, radius, the front z they sit at
 // expression + jaw (head frame); n is carried through the jaw hinge
 vec3 rigFace(vec3 p, inout vec3 n) {
   p += aRig0.w * uCornerL + aRig1.x * uCornerR;
   p.y += aRig0.y * uLips.x - aRig0.z * uLips.y;
   p.z += (aRig0.y + aRig0.z) * uLips.z;
+  // pressed lips thin toward the seam (aExtra.y = seam closeness) and flatten, the seam itself
+  // stays put (moving it back would let the mouth cavity show); a tucked lower lip draws back
+  // under the upper teeth
+  p.y += (aRig0.z - aRig0.y) * uMouthX.x * (1.0 - aExtra.y);
+  p.z -= (aRig0.y + aRig0.z) * uMouthX.y * (1.0 - aExtra.y) + aRig0.z * uMouthX.z;
   p.y += aRig1.y * uBrow.x + aRig1.z * uBrow.y;
   p += aRig1.w * vec3(0.0, uLips.w, uLips.w * 0.35);
+  // the chin boss bunches up under pressed lips (on the jaw, not the lower lip); the nostril
+  // wings widen on a breath in (front of the face only)
+  if (uFace.x + uFace.y > 0.0) {
+    vec2 c = (position.xy - uChinP.xy) / uChinP.zw;
+    p.y += exp(-dot(c, c)) * aRig0.x * (1.0 - aRig0.z) * uFace.x;
+    vec2 al = vec2(abs(position.x) - uAlaP.x, position.y - uAlaP.y) / uAlaP.z;
+    p.x += sign(position.x) * exp(-dot(al, al)) * smoothstep(uAlaP.w - 0.06, uAlaP.w, position.z) * uFace.y;
+  }
   // jaw hinge (weighted rotation = a smooth skin blend between skull and mandible)
   p = mix(p, uJawPivot + uJawRot * (p - uJawPivot), aRig0.x);
   n = mix(n, uJawRot * n, aRig0.x);
@@ -50,7 +68,7 @@ vec3 rigFace(vec3 p, inout vec3 n) {
 // head rotation weight (0 on the lower neck, 1 on the head)
 float headWeight(vec3 rest) { return smoothstep(uNeckRot.x, uNeckRot.y, rest.y); }
 vec3 rigHead(vec3 p, float hw) {
-  p = mix(p, uHeadPivot + uHeadRot * (p - uHeadPivot), hw);
+  p = mix(p, uHeadPivot + uHeadRot * (p - uHeadPivot) * uHeadXform.z + vec3(uHeadXform.xy, 0.0), hw);
   p.y += uBreathY * hw;
   return p;
 }
@@ -165,6 +183,8 @@ uniform vec3 uGridCenter;
 uniform vec4 uGrid;        // meridians around the head, latitude step (rad), line half width, web cell
 uniform vec3 uMouthC;
 uniform vec4 uMouth;       // rest lip seam y(dx) = x + y dx^2 + z dx^4 (dx from the mouth centre), w = half width
+uniform vec4 uMouthX;      // press thinning, press roll-in, tuck draw-back, tongue tip amount
+uniform vec2 uTeethVis;    // how much of the upper / lower teeth the lips reveal (src/avatar/heads/teeth.js)
 uniform vec3 uNoseTip;
 uniform vec3 uNoseBridge;
 uniform vec3 uPulseOrigin;
@@ -428,8 +448,22 @@ void main() {
     // lit from the front, shadowed under the lip and toward the corners
     float shadeU = (0.45 + 0.55 * smoothstep(seamY - 0.0012, seamY - upLen * 0.7, vDef.y)) * (0.55 + 0.45 * lens);
     float inMouth = smoothstep(0.0, 0.04, s);
-    c = mix(c, enamel * shadeU * glow, upT * gap * centre * inMouth);
-    c = mix(c, enamel * 0.28 * lens * glow, loT * gap * centre * inMouth * (1.0 - upT));
+    // (rounded, protruded lips hide the teeth; the lower row shows only as the jaw opens wide)
+    float visU = smoothstep(0.0, 0.25, uTeethVis.x), visL = smoothstep(0.0, 0.6, uTeethVis.y);
+    c = mix(c, enamel * 0.28 * lens * glow, loT * gap * centre * inMouth * (1.0 - upT) * visL);
+    c = mix(c, enamel * shadeU * glow, upT * gap * centre * inMouth * visU);
+    // tongue tip (th, l): at the edge of the upper incisors, in front of the lower row
+    if (uMouthX.w > 0.004) {
+      float top = seamY - upLen;
+      float hh = 0.0045 + 0.25 * max(top - (lowY + loLen), 0.0);
+      vec2 tq = vec2(dx / (0.3 * hwm), (vDef.y - (top - 0.35 * hh)) / hh);
+      float tr = length(tq);
+      float tm = (1.0 - smoothstep(0.7, 1.0, tr)) * smoothstep(0.0, 0.25, uMouthX.w) * inMouth;
+      vec3 tongue = mix(vec3(0.075, 0.03, 0.024), uColLine * 0.2, 0.3) * glow;
+      tongue *= 0.55 + 0.9 * smoothstep(-0.4, 0.9, tq.y) * (1.0 - 0.7 * tr);
+      // only its upper edge tucks behind the incisors
+      c = mix(c, tongue, tm * (1.0 - 0.6 * upT * smoothstep(0.2, 0.8, tq.y)));
+    }
     gl_FragColor = vec4(c, 1.0);
     return;
   }

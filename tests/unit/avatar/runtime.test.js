@@ -2,17 +2,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
 import { limitHeadMotion, normalizeOptions, softLimit } from '../../../src/avatar/index.js';
-import { QualityGovernor, lowerQuality } from '../../../src/avatar/quality.js';
+import { DPR_STEP, QUALITY, QualityGovernor, lowerQuality } from '../../../src/avatar/quality.js';
 import { MAX_DT, collectGLResources, forgetDisposeListeners } from '../../../src/avatar/stage.js';
 import { createAnimState } from '../../../src/avatar/director.js';
 
 describe('QualityGovernor', () => {
-  const feed = (g, from, to, fps, q, step = 1 / 30) => {
+  const feed = (g, from, to, fps, q, step = 1 / 30, o = {}) => {
     let out = null;
-    for (let t = from; t <= to && !out; t += step) out = g.sample(t, fps, q);
+    for (let t = from; t <= to && !out; t += step) out = g.sample(t, fps, q, o);
     return out;
   };
-  it('steps down one tier after ~3 s below 24 fps, never during the warm-up', () => {
+  it('steps down one tier after ~3 s below ~50 fps, never during the warm-up', () => {
     const g = new QualityGovernor();
     expect(feed(g, 0, 2.4, 10, 'high')).toBeNull();          // warm-up (2.5 s)
     expect(feed(g, 2.5, 5.4, 10, 'high')).toBeNull();        // < 3 s below the limit
@@ -20,8 +20,8 @@ describe('QualityGovernor', () => {
   });
   it('restarts its clock after a switch, at good frame rates and after a pause', () => {
     const g = new QualityGovernor({ warmupSec: 0, holdSec: 3 });
-    expect(feed(g, 0, 2.0, 12, 'medium')).toBeNull();
-    expect(feed(g, 2.0, 4.0, 40, 'medium')).toBeNull();      // good frames reset the clock
+    expect(feed(g, 0, 1.0, 12, 'medium')).toBeNull();
+    expect(feed(g, 1.0, 4.0, 59, 'medium')).toBeNull();      // good frames reset the clock
     expect(feed(g, 4.0, 6.5, 12, 'medium')).toBeNull();      // (the 1 s smoothing lags ~0.4 s)
     expect(feed(g, 6.5, 8.5, 12, 'medium')).toBe('low');
     // hidden window: samples stop for 10 s; the low-fps time before the pause does not count
@@ -37,8 +37,31 @@ describe('QualityGovernor', () => {
     expect(out).toBe('medium');                              // ~22.5 fps on average
     const ok = new QualityGovernor();
     out = null;
-    for (let t = 0; t < 20 && !out; t += 1 / 30) out = ok.sample(t, Math.floor(t * 30) % 2 ? 33 : 23, 'high');
-    expect(out).toBeNull();                                  // ~28 fps with dips below 24
+    for (let t = 0; t < 20 && !out; t += 1 / 60) out = ok.sample(t, Math.floor(t * 60) % 2 ? 62 : 47, 'high');
+    expect(out).toBeNull();                                  // ~55 fps with dips below 50
+  });
+
+  it('wants the hologram near 60 fps: 25-45 fps on High is stepped down (resolution first, then the tier)', () => {
+    // a 4K integrated-GPU laptop on High: 40 fps for good
+    const g = new QualityGovernor();
+    expect(feed(g, 0, 6, 40, 'high', 1 / 40, { refreshHz: 60, dprStep: true })).toBe('dpr');
+    expect(feed(g, 6, 9, 40, 'high', 1 / 40, { refreshHz: 60, dprStep: false })).toBeNull();   // a new warm-up
+    expect(feed(g, 9, 12.5, 40, 'high', 1 / 40, { refreshHz: 60, dprStep: false })).toBe('medium');
+    // 55 fps is fine; so is a 48 Hz display showing all of its 48 frames (and a 144 Hz one at 58)
+    expect(feed(new QualityGovernor(), 0, 12, 55, 'high', 1 / 55, { refreshHz: 60 })).toBeNull();
+    expect(feed(new QualityGovernor(), 0, 12, 47.5, 'high', 1 / 48, { refreshHz: 48 })).toBeNull();
+    expect(feed(new QualityGovernor(), 0, 12, 58, 'high', 1 / 58, { refreshHz: 144 })).toBeNull();
+    expect(feed(new QualityGovernor(), 0, 12, 47.5, 'high', 1 / 48, { refreshHz: 60 })).toBe('medium');
+    // (the limit: 50, or 0.85 x the refresh on a slower display, never below 0.85 x 50)
+    expect(new QualityGovernor().limit(60)).toBe(50);
+    expect(new QualityGovernor().limit(144)).toBe(50);
+    expect(new QualityGovernor().limit(30)).toBeCloseTo(42.5, 6);
+    expect(new QualityGovernor().limit(undefined)).toBe(50);
+    // High is at most 2x (a 3x display: 2.25x the pixels for a difference hardly seen), the first
+    // step gives up a quarter of the resolution
+    expect(QUALITY.high.dprCap).toBe(2);
+    expect(DPR_STEP).toBeGreaterThan(0.6);
+    expect(DPR_STEP).toBeLessThan(0.9);
   });
   it('leaves the low tier and unknown frame rates alone', () => {
     const g = new QualityGovernor({ warmupSec: 0 });

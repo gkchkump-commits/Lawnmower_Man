@@ -22,3 +22,10 @@ voice/models/
 tools/bake/.cache/
 *.mp4
 !docs/**/*.mp4
+# home camera: small clips the unit tests parse (lane A) and the simulator's fixtures (lane C)
+!tests/unit/tapo/fixtures/*.mp4
+!tests/fixtures/tapo/**/*.mp4
+# third-party binaries fetched by scripts (npm run fetch:go2rtc → vendor/go2rtc/<platform>/)
+vendor/
+# Claude Code agent worktrees
+.claude/worktrees/

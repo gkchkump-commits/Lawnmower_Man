@@ -3,7 +3,10 @@
 // the mouth cavity (dark interior + upper teeth on the upper jaw, lower teeth on the jaw).
 
 import { packWeights, validateMesh, validatePack, withSlash } from '../../pack.js';
-import { buildRig, rigUniforms } from './rig.js';
+import { RIG_LIMITS, buildRig, incisorBand, rigUniforms } from './rig.js';
+import { mouthRegion, refineMesh } from './refine.js';
+import { irisLayer } from './iris.js';
+import { lowerTeeth, upperTeeth } from '../teeth.js';
 import { CAVITY_FRAG, CAVITY_VERT, FACE_FRAG, FACE_VERT } from './shaders.js';
 
 /** @typedef {import('../../types.js').HeadContext} HeadContext */
@@ -57,7 +60,40 @@ export default class ReliefHead {
       t.anisotropy = mip ? Math.min(8, maxAniso) : 1;
       t.needsUpdate = true;
     }
-    this.rig = buildRig(pack);
+    this.rig = buildRig(pack, mesh);
+    // the irises as painted on the plate (the gaze moves them as discs), and the plate with them
+    // painted over: what a moving iris uncovers
+    const iris = irisLayer(plate.image, pack, { lids: f.masksC ? masksC.image : null, aperture: masksB.image });
+    this.iris = iris.eyes;
+    for (const k of /** @type {const} */ (['L', 'R'])) {
+      const e = iris.eyes[k], H = pack.plate.height;
+      // (the gaze travel is in iris radii: the painted iris')
+      Object.assign(this.rig.eyes[k], { uv: [e.cx / pack.plate.width, 1 - e.cy / H], irisR: e.r / H, discR: e.disc / H });
+    }
+    if (iris.canvas) {
+      const t = new THREE.CanvasTexture(iris.canvas);
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.generateMipmaps = true;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.anisotropy = Math.min(8, maxAniso);
+      t.needsUpdate = true;
+      this.textures.sclera = t;
+    }
+    if (iris.canvas && iris.open) {
+      // (DataTexture rows run bottom-up, the open map's top-down)
+      const W = pack.plate.width, H = pack.plate.height;
+      const rows = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) rows.set(iris.open.subarray(y * W, (y + 1) * W), (H - 1 - y) * W);
+      const t = new THREE.DataTexture(rows, W, H, THREE.RedFormat, THREE.UnsignedByteType);
+      t.minFilter = t.magFilter = THREE.LinearFilter;
+      t.generateMipmaps = false;
+      t.unpackAlignment = 1;
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.needsUpdate = true;
+      this.textures.open = t;
+    }
     this._buildFace(mesh);
     this._buildCavity(mesh);
     this.group = new THREE.Group();
@@ -69,14 +105,27 @@ export default class ReliefHead {
   _commonUniforms() {
     const { THREE } = this.ctx;
     const r = this.rig;
+    const f = r.face;
     return {
       uHeadRot: { value: new THREE.Matrix3() },
       uHeadPivot: { value: new THREE.Vector3(...r.headPivot) },
       uJawDrop: { value: 0 }, uUpperLift: { value: 0 }, uLowerDrop: { value: 0 }, uLipPush: { value: 0 },
-      uBreathY: { value: 0 }, uPlateAspect: { value: r.plateW },
+      uBreathY: { value: 0 }, uPlateAspect: { value: r.plateW }, uHeadXform: { value: new THREE.Vector3(0, 0, 1) },
       uCornerL: { value: new THREE.Vector2() }, uCornerR: { value: new THREE.Vector2() },
       uBrows: { value: new THREE.Vector2() }, uLids: { value: new THREE.Vector4() },
       uNeckBand: { value: new THREE.Vector2(r.neckBand[0], r.neckBand[1]) },
+      uMouth: { value: new THREE.Vector3(r.mouthCenter[0], r.mouthCenter[1], r.mouthHalfW) },
+      uLens: { value: new THREE.Vector4(1, RIG_LIMITS.cornerJawShare, 0.75, 0.55) },
+      uLowerClose: { value: 0 },
+      uOpen: { value: new THREE.Vector4(0, 0, 1, 0.65) },
+      // jaw hinge and the face regions that move with the mouth (rest geometry; amounts per frame)
+      uHinge: { value: new THREE.Vector4(...r.hinge) },
+      uHingeK: { value: new THREE.Vector3(RIG_LIMITS.hingeSide, RIG_LIMITS.hingeStretch, RIG_LIMITS.hingeBack) },
+      uFaceMove: { value: new THREE.Vector4() },
+      uCheekC: { value: new THREE.Vector4(...f.cheekL, ...f.cheekR) },
+      uChinC: { value: new THREE.Vector4(...f.chin, ...f.chinRadius) },
+      uAlaC: { value: new THREE.Vector4(...f.alaL, ...f.alaR) },
+      uFaceR: { value: new THREE.Vector3(...f.cheekRadius, f.alaRadius) },
     };
   }
 
@@ -91,8 +140,12 @@ export default class ReliefHead {
     return out;
   }
 
-  _buildFace(mesh) {
+  _buildFace(mesh0) {
     const { THREE, palette } = this.ctx;
+    // the mouth region is refined to ~6 px triangles (smooth lip contours when the mouth moves;
+    // the rest surface is unchanged: new vertices lie on the baked edges)
+    const mesh = refineFaceMesh(mesh0, this.pack);
+    this.meshStats = { vertices: mesh.vertexCount, baked: mesh0.vertexCount, triangles: mesh.indices.length / 3 };
     const n = mesh.vertexCount;
     const W = this.pack.plate.width, H = this.pack.plate.height;
     const geo = new THREE.BufferGeometry();
@@ -109,8 +162,12 @@ export default class ReliefHead {
     geo.setAttribute('aW1', new THREE.BufferAttribute(w1, 4));
     geo.setAttribute('aW2', new THREE.BufferAttribute(w2, 4));
     geo.setAttribute('aEdge', new THREE.BufferAttribute(Float32Array.from(mesh.edge), 1));
+    // distance below the closed-mouth slit (px): the lip warp of press / tuck
+    geo.setAttribute('aSlitD', new THREE.BufferAttribute(slitDistances(mesh.positions, n, this.pack.rig.slitLine), 1));
     const Index = n > 65535 ? Uint32Array : Uint16Array;
     geo.setIndex(new THREE.BufferAttribute(Index.from(mesh.indices), 1));
+    // the relief's surface normals (it is a height field: every face looks toward the viewer)
+    geo.setAttribute('aNormal', new THREE.BufferAttribute(reliefNormals(geo.getAttribute('position').array, mesh.indices), 3));
     geo.computeBoundingSphere();
     geo.boundingSphere.radius *= 1.5; // rig deformation headroom
 
@@ -120,21 +177,30 @@ export default class ReliefHead {
     this.faceUniforms = {
       ...this._commonUniforms(),
       tPlate: { value: t.plate }, tClosed: { value: t.closed }, tMaskA: { value: t.masksA }, tMaskB: { value: t.masksB },
+      tSclera: { value: t.sclera || t.plate }, tOpen: { value: t.open || t.masksB },
+      uIrisLayer: { value: t.sclera && t.open ? 1 : 0 },
       tMaskC: { value: t.masksC }, uHasLids: { value: this.hasLids ? 1 : 0 },
       uPlateSize: { value: new THREE.Vector2(W, H) },
-      uEyeL: { value: new THREE.Vector4(r.eyes.L.uv[0], r.eyes.L.uv[1], r.eyes.L.irisR, 0) },
-      uEyeR: { value: new THREE.Vector4(r.eyes.R.uv[0], r.eyes.R.uv[1], r.eyes.R.irisR, 0) },
+      // iris discs: centre, radius (iris + glow), 2 px feather (plate heights)
+      uEyeL: { value: new THREE.Vector4(r.eyes.L.uv[0], r.eyes.L.uv[1], r.eyes.L.discR ?? r.eyes.L.irisR, 2 / H) },
+      uEyeR: { value: new THREE.Vector4(r.eyes.R.uv[0], r.eyes.R.uv[1], r.eyes.R.discR ?? r.eyes.R.irisR, 2 / H) },
       uGaze: { value: new THREE.Vector2() }, uBlink: { value: new THREE.Vector2() },
       // pulses radiate from the "third eye" between the brows along the gold circuit lines
       uPulseOrigin: { value: new THREE.Vector2(lm.noseBridge[0] / W, 1 - (lm.noseBridge[1] - 0.06 * this.pack.rig.faceHeight) / H) },
       uTime: { value: 0 }, uEnergy: { value: 0.5 }, uSpeech: { value: 0 }, uListen: { value: 0 },
       uThink: { value: 0 }, uSpeak: { value: 0 }, uError: { value: 0 }, uSleep: { value: 0 }, uFx: { value: this.fx },
       uChinV: { value: 1 - this.pack.framing.chinY / H },
+      uLipWarp: { value: new THREE.Vector4() },
       uColLine: { value: palette.line.clone() }, uColRim: { value: palette.rim.clone() },
       uColEye: { value: palette.eye.clone() }, uColGrid: { value: palette.grid.clone() },
+      // the light and the hologram's life: see FACE_FRAG ("light and life") and RELIEF_LIGHT
+      uLight: { value: new THREE.Vector4(RELIEF_LIGHT.diffuse, RELIEF_LIGHT.glint, RELIEF_LIGHT.rim, RELIEF_LIGHT.sharpen) },
+      uPulseW: { value: new THREE.Vector2() }, uBreath: { value: 0.5 }, uPop: { value: 1 }, uPixelRatio: { value: 1 },
     };
     const mat = new THREE.ShaderMaterial({
       vertexShader: FACE_VERT, fragmentShader: FACE_FRAG, uniforms: this.faceUniforms,
+      // (the Low tier, for integrated GPUs, goes without the light: see FACE_FRAG)
+      defines: liteDefines(this.ctx.quality),
       side: THREE.DoubleSide, depthTest: true, depthWrite: true, transparent: false,
       // premultiplied "over"
       blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
@@ -148,7 +214,7 @@ export default class ReliefHead {
 
   _buildCavity(mesh) {
     const { THREE } = this.ctx;
-    const c = mesh.cavity;
+    const c = refineCavity(mesh.cavity);
     const n = c.vertexCount;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this._toWorld(c.positions, n), 3));
@@ -159,19 +225,18 @@ export default class ReliefHead {
     geo.setAttribute('aW2', new THREE.BufferAttribute(w2, 4));
     geo.setAttribute('aLayer', new THREE.BufferAttribute(Float32Array.from(c.layer), 1));
     // distance below the closed-mouth slit (px) for the shadow under the upper lip
-    const slit = this.pack.rig.slitLine;
-    const sx = [], sy = [];
-    for (let i = 0; i < slit.length; i += 2) { sx.push(slit[i]); sy.push(slit[i + 1]); }
-    const slitDist = new Float32Array(n);
-    for (let i = 0; i < n; i++) slitDist[i] = c.positions[i * 3 + 1] - interp(c.positions[i * 3], sx, sy);
-    geo.setAttribute('aSlit', new THREE.BufferAttribute(slitDist, 1));
-    geo.setIndex(new THREE.BufferAttribute(Uint16Array.from(c.indices), 1));
+    geo.setAttribute('aSlit', new THREE.BufferAttribute(slitDistances(c.positions, n, this.pack.rig.slitLine), 1));
+    geo.setIndex(new THREE.BufferAttribute((n > 65535 ? Uint32Array : Uint16Array).from(c.indices), 1));
     geo.computeBoundingSphere();
     const dark = this.pack.mouth?.darkColor ?? [0.06, 0.035, 0.03];
     this.cavityUniforms = {
       ...this._commonUniforms(),
       tMouth: { value: this.textures.mouth },
-      uTeeth: { value: 0 }, uSleep: { value: 0 },
+      uTeeth: { value: 0 }, uTeethLo: { value: 0 }, uTuck: { value: 0 }, uSleep: { value: 0 },
+      // the upper incisors' crowns in the mouth texture (v of their top and bottom edge)
+      uIncisors: { value: new THREE.Vector2(...incisorRows(this.textures.mouth.image)) }, uTongue: { value: 0 }, uTeethShift: { value: 0 }, uJawPx: { value: 0 },
+      uPxPerUnit: { value: this.pack.plate.height },
+      uColLine: { value: this.ctx.palette.line.clone() },
       uDark: { value: new THREE.Color().setRGB(dark[0], dark[1], dark[2], THREE.SRGBColorSpace) },
     };
     // share the rig uniform objects so one update drives both meshes
@@ -204,6 +269,7 @@ export default class ReliefHead {
     f.uLowerDrop.value = u.lowerDrop;
     f.uLipPush.value = u.lipPush;
     f.uBreathY.value = u.breathY;
+    f.uHeadXform.value.set(u.headXform[0], u.headXform[1], u.headXform[2]);
     f.uCornerL.value.set(u.cornerL[0], u.cornerL[1]);
     f.uCornerR.value.set(u.cornerR[0], u.cornerR[1]);
     f.uBrows.value.set(u.brows[0], u.brows[1]);
@@ -219,9 +285,41 @@ export default class ReliefHead {
     f.uError.value = a.error;
     f.uSleep.value = a.sleep;
     f.uFx.value = this.fx;
+    // (the light itself is physical; its emissive parts scale with the living effects)
+    const fxk = Math.min(1.5, this.fx);
+    f.uLight.value.set(RELIEF_LIGHT.diffuse, RELIEF_LIGHT.glint * fxk, RELIEF_LIGHT.rim * fxk, RELIEF_LIGHT.sharpen);
+    f.uPop.value = fxk;
+    f.uBreath.value = a.breath;
+    f.uPulseW.value.set(...this._pulseWave(time, a.pulse ?? 0));
+    f.uPixelRatio.value = this.ctx.renderer?.getPixelRatio?.() || 1;
+    f.uLipWarp.value.set(u.lipWarp[0], u.lipWarp[1], u.lipWarp[2], u.lipWarp[3]);
+    f.uFaceMove.value.set(u.faceMove[0], u.faceMove[1], u.faceMove[2], u.faceMove[3]);
+    f.uLens.value.set(u.lens[0], u.lens[1], u.lens[2], u.lens[3]);
+    f.uLowerClose.value = u.lowerClose;
+    f.uOpen.value.set(u.open[0], u.open[1], u.open[2], u.open[3]);
     const cu = this.cavityUniforms;
+    const H = this.pack.plate.height;
     cu.uTeeth.value = cavityTeeth(a);
+    cu.uTeethLo.value = cavityLowerTeeth(a);
     cu.uSleep.value = a.sleep;
+    cu.uTongue.value = u.tongue;
+    cu.uTuck.value = u.tuck;
+    cu.uJawPx.value = u.jawDrop * H;
+    // world -> px -> mouth texture v (its upper half, the cavity, spans the mouth rect height)
+    cu.uTeethShift.value = (u.teethShift * H * 0.5) / (this.pack.mouthRect?.[3] || 127);
+  }
+
+  /**
+   * The energy wave of an emphasis (AnimState.pulse): its front starts at the brow when a pulse
+   * rises and runs out over the face. @param {number} time @param {number} pulse
+   * @returns {[number, number]} radius (plate heights), amplitude
+   */
+  _pulseWave(time, pulse) {
+    const w = this._wave || (this._wave = { last: 0, t0: -Infinity, rising: false });
+    if (pulse > w.last + 0.01 && !w.rising) { w.rising = true; w.t0 = time - 0.03; }
+    else if (pulse < w.last) w.rising = false;
+    w.last = pulse;
+    return pulse > 0.002 ? [(time - w.t0) * 0.9, pulse] : [0, 0];
   }
 
   /**
@@ -243,6 +341,15 @@ export default class ReliefHead {
     };
   }
 
+  /**
+   * The glow a covered pixel needs to occlude the desktop (post.js): with a baked occlusion mask
+   * (masks_c) the whole face and cranium are glass that hides a busy desktop behind it.
+   * @returns {[number, number]}
+   */
+  coverageGate() {
+    return this.hasLids ? [0.0, 0.015] : [0.04, 0.24];
+  }
+
   /** @returns {import('../../fx/particles.js').ParticleAnchors} */
   particleAnchors() {
     const p = this.pack;
@@ -260,6 +367,7 @@ export default class ReliefHead {
       depth: (p.rig.depth?.inflateRadius ?? 0.3 * H) / H,
       outline: this._worldOutline(p.visibleOutline ?? p.outline),
       jaw: jawFromLandmarks(p.landmarks, W, H),
+      pivot: /** @type {[number, number, number]} */ ([...this.rig.headPivot]),
     };
   }
 
@@ -274,8 +382,18 @@ export default class ReliefHead {
     return this._worldOutline(this.pack.visibleOutline ?? this.pack.outline);
   }
 
-  /** @param {{ palette?: import('../../types.js').HeadPalette, fx?: number }} o */
+  /** What load() measured: the irises as located on the plate (px) and the refined mesh. */
+  info() {
+    return { iris: this.iris ? structuredClone(this.iris) : null, irisLayer: this.faceUniforms?.uIrisLayer.value === 1, mesh: this.meshStats ?? null };
+  }
+
+  /** @param {{ palette?: import('../../types.js').HeadPalette, fx?: number, quality?: string }} o */
   setOptions(o) {
+    const mat = this.faceMesh?.material;
+    if (o.quality !== undefined && mat) {
+      const d = liteDefines(o.quality);
+      if (('RELIEF_LITE' in d) !== ('RELIEF_LITE' in mat.defines)) { mat.defines = d; mat.needsUpdate = true; }
+    }
     if (o.palette && this.faceUniforms) {
       this.faceUniforms.uColLine.value.copy(o.palette.line);
       this.faceUniforms.uColRim.value.copy(o.palette.rim);
@@ -296,6 +414,91 @@ export default class ReliefHead {
   }
 }
 
+/** Shader defines for a quality tier: the Low tier renders without the light (RELIEF_LITE). @param {string} q */
+export function liteDefines(q) {
+  return q === 'low' ? { RELIEF_LITE: '' } : {};
+}
+
+/** The relief's light (FACE_FRAG "light and life"): the key light's change as the head turns,
+ * the glint, the rim on the edges turning away, the plate's sharpening. */
+export const RELIEF_LIGHT = Object.freeze({ diffuse: 0.7, glint: 0.6, rim: 0.5, sharpen: 0.5 });
+
+/**
+ * Area-weighted vertex normals of a height-field mesh, every face turned toward +z (the viewer).
+ * @param {ArrayLike<number>} pos xyz per vertex @param {ArrayLike<number>} idx triangles
+ * @returns {Float32Array}
+ */
+export function reliefNormals(pos, idx) {
+  const n = new Float32Array(pos.length);
+  for (let i = 0; i < idx.length; i += 3) {
+    const a = idx[i] * 3, b = idx[i + 1] * 3, c = idx[i + 2] * 3;
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    for (const v of [a, b, c]) { n[v] += nx; n[v + 1] += ny; n[v + 2] += nz; }
+  }
+  for (let v = 0; v < n.length; v += 3) {
+    const l = Math.hypot(n[v], n[v + 1], n[v + 2]);
+    if (l > 0) { n[v] /= l; n[v + 1] /= l; n[v + 2] /= l; } else n[v + 2] = 1;
+  }
+  return n;
+}
+
+/**
+ * The face mesh with its mouth region refined (src/avatar/heads/relief/refine.js), in the
+ * mesh.json layout (positions in plate px, weights in 0..weightScale).
+ * @param {any} mesh @param {any} pack
+ */
+export function refineFaceMesh(mesh, pack) {
+  const names = Object.keys(mesh.weights);
+  const attrs = { edge: { data: mesh.edge, size: 1 }, face: { data: mesh.face, size: 1 } };
+  for (const k of names) attrs[`w:${k}`] = { data: mesh.weights[k], size: 1 };
+  const r = refineMesh({ positions: mesh.positions, indices: mesh.indices, attrs }, { inside: mouthRegion(pack), maxLen: 6, levels: 3 });
+  const weights = {};
+  for (const k of names) weights[k] = r.attrs[`w:${k}`];
+  return {
+    ...mesh, vertexCount: r.vertexCount, positions: r.positions, indices: r.indices, edge: r.attrs.edge, face: r.attrs.face, weights,
+  };
+}
+
+/**
+ * The mouth cavity refined the same way (its teeth and interior follow the lips' fine rig).
+ * @param {any} c mesh.cavity
+ */
+export function refineCavity(c) {
+  const names = Object.keys(c.weights || {});
+  const attrs = { uv: { data: c.uvs, size: 2 }, layer: { data: c.layer, size: 1 } };
+  for (const k of names) attrs[`w:${k}`] = { data: c.weights[k], size: 1 };
+  const r = refineMesh({ positions: c.positions, indices: c.indices, attrs }, { inside: () => true, maxLen: 8, levels: 2 });
+  const weights = {};
+  for (const k of names) weights[k] = r.attrs[`w:${k}`];
+  return { ...c, vertexCount: r.vertexCount, positions: r.positions, indices: r.indices, uvs: r.attrs.uv, layer: r.attrs.layer, weights };
+}
+
+/**
+ * The v range (texture v, 1 = top) of the upper incisors' crowns in the mouth texture: measured on
+ * the image when it can be read back, else the reference pack's (rows 37.5-45 of 254).
+ * @param {any} image @returns {[number, number]} [v top, v bottom]
+ */
+export function incisorRows(image) {
+  let band = null;
+  try {
+    if (typeof document !== 'undefined' && image?.width > 0) {
+      const c = document.createElement('canvas');
+      c.width = image.width;
+      c.height = image.height;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      if (g) {
+        g.drawImage(image, 0, 0);
+        band = incisorBand(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
+      }
+    }
+  } catch { /* the default */ }
+  const b = band || { top: 37.5 / 254, bottom: 45 / 254 };
+  return [1 - b.top, 1 - b.bottom];
+}
+
 /**
  * Jaw line as a half ellipse (world units) through both jaw angles and the chin, for the
  * particle collar. @returns {{center:[number,number], radius:[number,number]}|undefined}
@@ -311,12 +514,36 @@ export function jawFromLandmarks(lm, W, H) {
 }
 
 /**
- * How much of the teeth the parted lips reveal (the dark interior always shows through the
- * opening): jaw and wide visemes bare the teeth, a rounded O / U pucker mostly does not.
+ * How much of the UPPER teeth the parted lips reveal (the dark interior always shows through the
+ * opening): jaw and wide visemes bare the teeth, a rounded O / U pucker mostly does not; in an
+ * f / v the incisors rest on the tucked lower lip.
  * @param {AnimState} a
  */
 export function cavityTeeth(a) {
-  return Math.max(a.jawOpen, a.mouthWide * 0.5, a.mouthRound * 0.06);
+  return upperTeeth(a);
+}
+
+/**
+ * How much of the LOWER teeth show. They ride on the jaw behind the lower lip: hidden while the
+ * jaw is nearly closed (behind the upper incisors and the lip), uncovered as it opens wide or as
+ * spread lips draw back from them; a tucked lower lip (f v) and rounded lips cover them.
+ * @param {AnimState} a
+ */
+export function cavityLowerTeeth(a) {
+  return lowerTeeth(a);
+}
+
+/**
+ * Vertical distance (plate px, + = below) of each vertex from the closed-mouth slit polyline.
+ * @param {ArrayLike<number>} positions xyz per vertex (plate px) @param {number} n
+ * @param {ArrayLike<number>} slit [x0, y0, x1, y1, ...] @returns {Float32Array}
+ */
+export function slitDistances(positions, n, slit) {
+  const sx = [], sy = [];
+  for (let i = 0; i + 1 < slit.length; i += 2) { sx.push(slit[i]); sy.push(slit[i + 1]); }
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = positions[i * 3 + 1] - interp(positions[i * 3], sx, sy);
+  return out;
 }
 
 /** 1x1 masks_c stand-in for packs without one: no lid coordinate, full occlusion. */

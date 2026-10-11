@@ -34,7 +34,8 @@ function subscribe(channel, cb) {
 
 const api = {
   claude: {
-    send: (text) => invoke('lm:claude:send', text),
+    // options: { images?: [{ mediaType, data }] } (webcam snapshots, validated in main)
+    send: (text, options) => invoke('lm:claude:send', text, options),
     cancel: (turnId) => invoke('lm:claude:cancel', turnId),
     interrupt: () => invoke('lm:claude:interrupt'),
     reset: () => invoke('lm:claude:reset'),
@@ -62,15 +63,45 @@ const api = {
     setIgnoreMouse: (ignore) => send('lm:window:set-ignore-mouse', !!ignore),
     setSizePreset: (preset) => send('lm:window:set-size-preset', preset),
     setAlwaysOnTop: (on) => send('lm:window:set-always-on-top', !!on),
+    // Moving the avatar: press on the head → main follows the global cursor until the release.
+    dragStart: () => send('lm:window:drag-start'),
+    dragEnd: () => send('lm:window:drag-end'),
+    // Resizing: press on a corner grip ('tl' | 'tr' | 'bl' | 'br') → main resizes from that
+    // corner until the release; setAvatarWidth(px) = a free size (Ctrl + wheel).
+    resizeStart: (corner) => send('lm:window:resize-start', corner),
+    resizeEnd: () => send('lm:window:resize-end'),
+    setAvatarWidth: (width) => send('lm:window:set-avatar-width', width),
+    resetPosition: () => send('lm:window:reset-position'),
     minimize: () => send('lm:window:minimize'),
     hide: () => send('lm:window:hide'),
     quit: () => send('lm:window:quit'),
+    // { visible }: the window was shown / hidden / minimized / restored (the camera pauses)
+    onVisibility: (cb) => subscribe('lm:window:visibility', cb),
   },
   onHotkey: (cb) => subscribe('lm:hotkey', cb),
   // Global cursor position {x, y} in CSS px relative to the window's top-left (may be outside).
   onCursor: (cb) => subscribe('lm:cursor', cb),
   app: {
     info: () => invoke('lm:app:info'),
+  },
+  // The Tapo home camera (docs/TAPO.md): status, arming (always with the exit delay from here),
+  // pan/tilt, presets, the events list, and the camera window. Alerts and "look over there"
+  // points arrive through onAlert / onLook. The camera window itself has its own preload
+  // (preload-camera.cjs, window.lawnmowerCamera).
+  tapo: {
+    status: () => invoke('lm:tapo:status'),
+    arm: (armed) => invoke('lm:tapo:arm', { armed: !!armed }),
+    // { op: 'nudge'|'hold'|'heartbeat'|'release'|'stop'|'center'|'preset'|'preset-name'|'home', … }
+    ptz: (cmd) => invoke('lm:tapo:ptz', cmd),
+    presets: (o) => invoke('lm:tapo:presets', o),
+    events: (q) => invoke('lm:tapo:events-list', q),
+    // { eventId? }: show the camera window (and open that event's clip)
+    openWindow: (o) => invoke('lm:tapo:window', { show: true, ...(o || {}) }),
+    openClips: () => invoke('lm:tapo:open-clips'),
+    onStatus: (cb) => subscribe('lm:tapo:status', cb),
+    onAlert: (cb) => subscribe('lm:tapo:alert', cb),
+    // { x, y, holdMs }: a point in this window's CSS px (the camera window's centre)
+    onLook: (cb) => subscribe('lm:tapo:look', cb),
   },
 };
 

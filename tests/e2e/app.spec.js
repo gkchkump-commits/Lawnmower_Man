@@ -1,3 +1,4 @@
+/* global MutationObserver, PointerEvent, getComputedStyle */
 // End-to-end tests of the renderer app against `vite preview` with the mock bridge
 // (src/bridge/mock.js). Chromium renders WebGL with SwiftShader (software), so the avatar runs
 // at quality=low and viewports stay small. Screenshots go to $LM_SHOTS_DIR.
@@ -23,16 +24,26 @@ test.describe('app (mock bridge)', () => {
   });
 
   test('typing a message streams a reply; state goes thinking → speaking → idle', async ({ page }, testInfo) => {
-    await boot(page, { mockDelay: 45 });
+    // The short states are recorded by the page itself (boot's __states, and the moment the reply
+    // passes 8 words): Playwright polls, and the transcript draws on animation frames, which
+    // software WebGL may draw too few of to catch a short phase. The words come slowly enough
+    // (~4 s for the reply) that a slow page still draws it mid-reply.
+    await page.addInitScript(() => {
+      new MutationObserver((_, observer) => {
+        const md = document.querySelector('.msg-claude .md');
+        if (!md || md.textContent.split(' ').length <= 8) return;
+        window.__midReply = { state: document.body.dataset.state, streaming: md.closest('.msg-claude').classList.contains('streaming') };
+        observer.disconnect();
+      }).observe(document, { childList: true, subtree: true, characterData: true });
+    });
+    await boot(page, { mockDelay: 150 });
     await send(page, 'Hello there!');
     await expect(page.locator('.msg-user .msg-text')).toHaveText('Hello there!');
     await expect(page.locator('#input')).toHaveValue('');
-    await expect(page.locator('body')).toHaveAttribute('data-state', 'thinking');
-    // mid-reply
-    await page.waitForFunction(() => document.querySelector('.msg-claude .md')?.textContent.split(' ').length > 8);
-    await expect(page.locator('body')).toHaveAttribute('data-state', 'speaking');
-    await expect(page.locator('.msg-claude')).toHaveClass(/streaming/);
-    await shot(page, testInfo, 'app-mid-reply');
+    await expect.poll(() => page.evaluate(() => window.__states.slice(0, 2))).toEqual(['idle', 'thinking']);
+    await page.waitForFunction(() => window.__midReply);
+    expect(await page.evaluate(() => window.__midReply)).toEqual({ state: 'speaking', streaming: true });
+    if (await page.locator('.msg-claude.streaming').count()) await shot(page, testInfo, 'app-mid-reply');
     await waitIdle(page);
     await expect(page.locator('.msg-claude .md')).toHaveText(MOCK_REPLIES.greeting);
     await expect(page.locator('.msg-claude')).not.toHaveClass(/streaming/);
@@ -139,16 +150,46 @@ test.describe('app (mock bridge)', () => {
     await page.waitForFunction(() => window.__app.avatar.renderer === 'relief', null, { timeout: 45_000 });
   });
 
-  test('minimal mode: hiding the chat strip floats the panel over the avatar', async ({ page }) => {
+  test('minimal mode: the panel drops down below the face when needed, never over it', async ({ page }) => {
     await boot(page);
+    const stage = await page.locator('#stage').boundingBox();
     await page.locator('#btn-chat').click();
     await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
     expect(await page.evaluate(() => window.__app.settings().window.showChat)).toBe(false);
+    // the avatar area keeps its size and place (no resize, no jump)
+    expect(await page.locator('#stage').boundingBox()).toEqual(stage);
     await send(page, 'hi');
     await expect(page.locator('body')).toHaveAttribute('data-panel', 'shown');
+    await expect.poll(() => page.locator('#panel').evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    const panel = await page.locator('#panel').boundingBox();
+    expect(panel.y).toBeGreaterThanOrEqual(stage.y + stage.height - 1); // below the avatar area
     await waitIdle(page);
     await page.locator('#btn-chat').click();
     await expect(page.locator('body')).toHaveAttribute('data-chat', 'full');
+  });
+
+  test('minimal mode: the folded strip below the face stays click-through (no unfolding, no click trap)', async ({ page }) => {
+    await page.setViewportSize({ width: 400, height: 840 });
+    await boot(page, { clickThrough: 1, layout: 'electron' }, { window: { showChat: false } });
+    await expect(page.locator('body')).toHaveAttribute('data-chat', 'minimal');
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden', { timeout: 10_000 });
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    // empty space beside the head first: click-through
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5);
+    await page.mouse.move(box.x + 8, box.y + box.height * 0.5);
+    await expect.poll(async () => (await ignores()).at(-1)).toBe(true);
+    // (the pointer near the face unfolded the panel: it folds again after its grace period)
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden', { timeout: 10_000 });
+    const n = (await ignores()).length;
+    // 60 px below the chin, over what looks like empty desktop
+    for (let i = 0; i < 4; i++) await page.mouse.move(200 + i * 4, box.y + box.height + 60);
+    await page.waitForTimeout(400);
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'hidden');
+    expect((await ignores()).slice(n)).not.toContain(false);
+    // over the face the panel drops down as before
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4);
+    await expect(page.locator('body')).toHaveAttribute('data-panel', 'shown');
   });
 
   test('hotkeys from main: toggleChat and stopSpeaking', async ({ page }) => {
@@ -176,21 +217,131 @@ test.describe('app (mock bridge)', () => {
     await page.waitForTimeout(300);
     expect(await calls()).toEqual([false, true, false]);
   });
+
+  test('moving the window: press on the head or the status bar drags; controls, empty space and a lock do not', async ({ page }) => {
+    await boot(page, { clickThrough: 1 });
+    const drags = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'dragStart' || c[0] === 'dragEnd').map((c) => c[0]));
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    const face = { x: box.x + box.width / 2, y: box.y + box.height * 0.4 };
+
+    await page.mouse.move(face.x, face.y);
+    await expect(page.locator('body')).toHaveAttribute('data-over-head', '1');
+    await page.mouse.down();
+    await expect(page.locator('body')).toHaveAttribute('data-dragging', '1');
+    // the pointer leaves the page mid-drag (the window moves under it): never click-through
+    await page.mouse.move(box.x + 4, box.y + 4, { steps: 4 });
+    await page.waitForTimeout(250);
+    expect((await ignores()).at(-1)).toBe(false);
+    await page.mouse.up();
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd']);
+    await expect(page.locator('body')).toHaveAttribute('data-dragging', '');
+
+    // the status bar is a handle too
+    const bar = await page.locator('#status').boundingBox();
+    await page.mouse.move(bar.x + bar.width - 6, bar.y + bar.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+
+    // toolbar buttons and transparent space never start a drag
+    await page.locator('#btn-settings').click();
+    await page.locator('.drawer-close').click();
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.up();
+    expect(await drags()).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+
+    // locked: pressing on the head does nothing, and the cursor no longer offers to grab
+    await page.evaluate(() => window.__app.bridge.settings.set({ window: { lockPosition: true } }));
+    await expect(page.locator('body')).toHaveAttribute('data-lock', '1');
+    await page.mouse.move(face.x, face.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    expect(await drags()).toEqual(['dragStart', 'dragEnd', 'dragStart', 'dragEnd']);
+  });
+
+  test('a cancelled press (a touch scroll) does not keep the window from turning click-through', async ({ page }) => {
+    await boot(page, { clickThrough: 1 });
+    const ignores = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setIgnoreMouse').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4); // over the head: interactive
+    await page.evaluate(() => {
+      window.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, pointerType: 'touch', isPrimary: true, button: 0 }));
+      window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 7, pointerType: 'touch', isPrimary: true }));
+    });
+    await page.mouse.move(box.x + 6, box.y + box.height * 0.5, { steps: 3 }); // transparent space
+    await expect.poll(async () => (await ignores()).at(-1)).toBe(true);
+  });
+
+  test('Ctrl + mouse wheel over the head resizes in small steps', async ({ page }) => {
+    await boot(page);
+    const widths = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'setAvatarWidth').map((c) => c[1]));
+    const box = await page.locator('#stage').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.4);
+    const w0 = await page.evaluate(() => window.innerWidth);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -120);
+    await page.keyboard.up('Control');
+    await expect.poll(widths).toEqual([Math.round(Math.min(1200, w0 * 1.08) / 2) * 2]);
+    await page.mouse.wheel(0, -120); // without Ctrl: nothing
+    await page.waitForTimeout(300);
+    expect(await widths()).toHaveLength(1);
+  });
+
+  test('corner grips resize the window; hidden while the position is locked', async ({ page }) => {
+    await boot(page);
+    const calls = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => /^resize/.test(c[0])).map((c) => c.join(':')));
+    const grip = page.locator('.grip.br');
+    await page.mouse.move(10, 10); // hover the window: the grips show, like the toolbar
+    await expect(grip).toBeVisible();
+    await expect.poll(() => grip.evaluate((el) => Number(getComputedStyle(el).opacity))).toBeGreaterThan(0.5);
+    const b = await grip.boundingBox();
+    // the bottom-right grip is the window's corner (full chat mode)
+    const vp = page.viewportSize();
+    expect(Math.round(b.x + b.width)).toBe(vp.width);
+    expect(Math.round(b.y + b.height)).toBe(vp.height);
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+    await page.mouse.down();
+    await expect(page.locator('body')).toHaveAttribute('data-resizing', 'br');
+    await page.mouse.move(b.x - 40, b.y - 40, { steps: 3 });
+    await page.mouse.up();
+    await expect.poll(calls).toEqual(['resizeStart:br', 'resizeEnd']);
+    await expect(page.locator('body')).not.toHaveAttribute('data-resizing', /./);
+    // the top-left one
+    const tl = await page.locator('.grip.tl').boundingBox();
+    expect([Math.round(tl.x), Math.round(tl.y)]).toEqual([0, 0]);
+    // the drawer's Width slider shows the size (the preset's while no free size is set)
+    await page.locator('#btn-settings').click();
+    await expect(page.locator('[data-path="window.avatarWidth"] output')).toHaveText('400 px');
+    await page.keyboard.press('Escape');
+    // locked: no grips
+    await page.evaluate(() => window.__app.bridge.settings.set({ window: { lockPosition: true } }));
+    await expect(grip).toBeHidden();
+  });
 });
 
 test.describe('voice (fake voice server)', () => {
   test('replies are spoken with lip-sync; Esc stops speaking', async ({ page }) => {
+    // the jaw of every rendered frame while speaking: software WebGL draws only a few frames a
+    // second, and almost half of them fall on consonants and closures, so count frames, not time
+    await page.addInitScript(() => {
+      window.__jaw = [];
+      const tick = () => {
+        const a = window.__app?.avatar?.animState?.();
+        if (a && document.body.dataset.state === 'speaking') window.__jaw.push(a.jawOpen);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     await boot(page, { voice: 'fake', mockDelay: 30 });
     await expect(page.locator('.status-voice')).toHaveText('Voice · GPU');
     await expect(page.locator('#mic')).toHaveAttribute('aria-disabled', 'false');
     await send(page, 'tell me about holograms');
     await page.waitForFunction(() => document.body.dataset.state === 'speaking' && window.__app.player.current?.kind === 'audio', null, { timeout: 30_000 });
-    let maxJaw = 0;
-    for (let i = 0; i < 25; i++) {
-      maxJaw = Math.max(maxJaw, await page.evaluate(() => window.__app.avatar.animState().jawOpen));
-      await page.waitForTimeout(40);
-    }
-    expect(maxJaw).toBeGreaterThan(0.12);
+    await page.waitForFunction(() => window.__jaw.length >= 12, null, { timeout: 30_000 });
+    expect(Math.max(...await page.evaluate(() => window.__jaw))).toBeGreaterThan(0.12);
+    expect(await page.evaluate(() => window.__app.player.busy)).toBe(true); // still talking, so Esc interrupts
     await page.keyboard.press('Escape');
     await expect.poll(() => page.evaluate(() => window.__app.player.busy)).toBe(false);
     await waitIdle(page);
@@ -199,3 +350,24 @@ test.describe('voice (fake voice server)', () => {
   });
 });
 
+
+test.describe('touch (mock bridge)', () => {
+  test.use({ hasTouch: true });
+
+  test('a finger on the head drags the window until it lifts; the handles take no pan gesture', async ({ page }) => {
+    await boot(page);
+    const drags = () => page.evaluate(() => window.__app.bridge.__mock.calls.filter((c) => c[0] === 'dragStart' || c[0] === 'dragEnd').map((c) => c[0]));
+    expect(await page.evaluate(() => ['#avatar', '#status'].map((q) => getComputedStyle(document.querySelector(q)).touchAction))).toEqual(['none', 'none']);
+    expect(await page.evaluate(() => getComputedStyle(document.querySelector('#transcript')).touchAction)).toBe('auto');
+    const box = await page.locator('#stage').boundingBox();
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height * 0.4;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let i = 1; i <= 10; i++) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + i * 6, y: y + i * 4 }] });
+    await page.waitForTimeout(150);
+    expect(await drags()).toEqual(['dragStart']); // not cut short by a pointercancel
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(drags).toEqual(['dragStart', 'dragEnd']);
+  });
+});

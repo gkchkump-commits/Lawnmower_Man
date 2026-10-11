@@ -6,6 +6,9 @@ import { EventEmitter } from 'node:events';
 import nodeFs from 'node:fs';
 import path from 'node:path';
 
+import { normalizeAvatarWidth } from './window-manager.js';
+import { validateHostSetting } from './tapo/host.js';
+
 /** @typedef {typeof DEFAULT_SETTINGS} Settings */
 
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -30,6 +33,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
     device: 'auto', // 'auto' | 'cuda' | 'cpu'
     handsFree: false,
     speakReplies: true,
+    // the local voice's character (src/audio/voicefx.js; the system voice cannot be processed):
+    // 'synth' (default) | 'vocoder' | 'robot' | 'natural' (unprocessed); fxAmount 0..1
+    character: 'synth',
+    fxAmount: 0.6,
+    // the mouth's timing against the voice, on top of the built-in compensation (ms; + = the mouth
+    // later): for output paths whose delay the system does not report (Bluetooth headphones)
+    lipSyncOffsetMs: 0,
   },
   avatar: {
     renderer: 'relief', // 'relief' | 'procedural' | 'placeholder'
@@ -38,14 +48,22 @@ export const DEFAULT_SETTINGS = Object.freeze({
     particles: 1.0, // 0..2
     bloom: 1.0, // 0..2
     followCursor: true,
+    expressiveness: 1.0, // 0..2: how much speech moves the head, brows and face (1 = natural)
+    liveliness: 1.0, // 0..2: spontaneous behaviour (look-arounds, posture shifts, small gestures; 0 = none)
+    projector: false, // a projector's cone of light under the bust
   },
   window: {
     sizePreset: 'medium', // 'small' | 'medium' | 'large'
+    // a free size set by resizing (a corner grip, Ctrl + wheel, the Size slider): the avatar
+    // area's width in px (200..1200, the height follows at 2:3); null = the preset's size
+    avatarWidth: /** @type {number|null} */ (null),
     alwaysOnTop: true,
     clickThrough: true,
     position: /** @type {{x:number,y:number}|null} */ (null),
     showChat: true,
     skipTaskbar: false, // extension to §4: hide the taskbar button (tray icon stays)
+    lockPosition: false, // true: pressing on the head does not move the window
+    snapToEdges: true, // a dragged window locks flush against screen edges and corners
   },
   hotkeys: {
     // Linux/macOS defaults; Windows uses WIN32_HOTKEYS (see defaultSettings()).
@@ -53,6 +71,76 @@ export const DEFAULT_SETTINGS = Object.freeze({
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },
+  // The avatar can see you through the PC camera (docs/CAMERA.md). Off by default; face tracking
+  // runs locally, and Claude only gets a picture when shareWithClaude is on or for one message.
+  camera: {
+    enabled: false,
+    deviceId: '', // '' = the system's default camera
+    followFace: true, // eye contact
+    presence: true, // doze off when you are away, wake up when you are back
+    mirrorExpressions: true, // smile back
+    shareWithClaude: false, // a snapshot with every message you send
+    // greet you when it first sees you and when you are back: 'hello' = a quick spoken hello
+    // (instant, no Claude turn), 'claude' = a short hidden prompt so Claude says hello, 'off'
+    greeting: 'hello',
+    lookToTalk: false, // hands-free mode: only listen while you look at the screen
+  },
+  // ---- Home camera (Tapo pan/tilt camera + home security; docs/TAPO.md) -------------------------
+  // The camera password is NOT a setting: electron/tapo/credentials.js keeps it encrypted.
+  tapo: {
+    enabled: false, // the whole feature (camera window, video component, ONVIF)
+    name: 'camera', // spoken/display name: "front door camera"
+    host: '', // '' or a home-network address (IP or .local/.lan/single-label name); never a URL
+    onvifPort: 2020,
+    rtspPort: 554,
+    username: '', // the Tapo Camera Account user (not secret)
+    stream: 'stream1', // 'stream1' | 'stream2'
+    ptz: 'auto', // 'auto' | 'relative' | 'continuous' | 'off'
+    invertPan: false,
+    invertTilt: false,
+    stepSmall: 0.15, // nudge sizes, as fractions of the view
+    stepMedium: 0.35,
+    stepLarge: 0.75,
+    viewUnitsX: 0.5, // ONVIF units that turn the view by one full width (calibration measures it)
+    viewUnitsY: 1.4, // … by one full height
+    minStep: 0.05, // the smallest translation the firmware acts on
+    holdSpeed: 0.5, // ContinuousMove velocity for press-and-hold
+    msPerUnit: 6000, // travel time estimate (the watchdog Stop)
+    homePreset: '', // a preset token; '' = AbsoluteMove(0,0) when supported
+    localPresets: /** @type {Array<{ name: string, x: number, y: number }>} */ ([]),
+    calibratedAt: '', // ISO time of the last calibration
+    windowBounds: /** @type {{ x: number, y: number, width: number, height: number }|null} */ (null),
+    windowOnTop: false,
+    showDetections: false, // person boxes in the live view while disarmed
+  },
+  security: {
+    armed: false, // persisted: an armed app re-arms right after a restart
+    armDelaySec: 30, // exit delay after arming in the app
+    people: true,
+    motion: true,
+    notify: 'person', // 'person' | 'motion' | 'off'
+    record: 'person', // 'person' | 'motion' | 'off'
+    preRollSec: 5,
+    postRollSec: 10,
+    maxClipSec: 120,
+    retentionDays: 7,
+    maxStorageGB: 5,
+    clipsDir: '', // '' = <Videos>/Lawnmower Man/Security
+    sensitivity: 'medium', // 'low' | 'medium' | 'high'
+    cameraEvents: true, // subscribe to the camera's own motion/person events
+    confirmLocally: true, // an alert needs the local person detector to agree (when it runs)
+    cooldownSec: 60,
+    quietHours: '', // '' | 'HH:MM-HH:MM' (may wrap midnight)
+    announce: true, // the avatar says it
+    showOnAlert: true, // bring the avatar back (without focus)
+    describe: false, // send the alert snapshot to Claude for a one-sentence description
+    claudeSee: 'ask', // 'ask' | 'always' | 'never'  (camera_snapshot)
+    claudeMove: 'ask', // 'ask' | 'always' | 'never'  (camera_look)
+    voiceCommands: true, // simple camera commands run locally, without a Claude turn
+    startAtLogin: false, // start Lawnmower Man with Windows (hidden), so an armed alarm comes back after a restart
+    startAtLoginOffered: false, // the camera window offered it once, on the first arm
+  },
+  // ---- end of the Home camera block ----------------------------------------------------------
 });
 
 /**
@@ -67,7 +155,7 @@ export const WIN32_HOTKEYS = Object.freeze({
 });
 
 /** Version written into settings.json (top-level "version"); bump when a migration is added. */
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 
 /** @param {string} [platform] */
 export function defaultHotkeys(platform = process.platform) {
@@ -89,6 +177,9 @@ export function defaultSettings(platform = process.platform) {
  * Upgrade a parsed settings file written by an older version (mutates `raw`).
  * v1 → v2 (Windows only): hotkeys that still hold the old Ctrl+Alt defaults move to the new
  * Windows defaults; shortcuts the user chose are kept.
+ * v2 → v3: camera.greet (a boolean, off by default, so it never greeted anyone) becomes
+ * camera.greeting: a greeting that was switched on keeps asking Claude ('claude'); otherwise the
+ * new default, the quick spoken hello.
  * @param {Record<string, any>} raw @param {number} fromVersion @param {string} platform
  * @returns {string[]} what changed (for the log)
  */
@@ -101,6 +192,12 @@ export function migrateSettings(raw, fromVersion, platform) {
         notes.push(`hotkeys.${name}: ${legacy} → ${raw.hotkeys[name]} (Ctrl+Alt shortcuts swallow AltGr characters on Windows)`);
       }
     }
+  }
+  if (fromVersion < 3 && isPlainObject(raw.camera) && 'greet' in raw.camera) {
+    const on = raw.camera.greet === true;
+    delete raw.camera.greet;
+    if (raw.camera.greeting === undefined) raw.camera.greeting = on ? 'claude' : 'hello';
+    notes.push(`camera.greet: ${on} → camera.greeting: ${raw.camera.greeting}`);
   }
   return notes;
 }
@@ -193,10 +290,62 @@ const position = () => (/** @type {any} */ v) => {
   const c = (/** @type {number} */ n) => Math.round(Math.min(1e6, Math.max(-1e6, n)));
   return { ok: true, value: { x: c(x), y: c(y) } };
 };
+/** A free avatar width in px (clamped, even) or null (= the size preset). */
+const avatarWidth = () => (/** @type {unknown} */ v) => {
+  if (v === null) return { ok: true, value: null };
+  const w = normalizeAvatarWidth(v);
+  return w === null ? { ok: false, reason: 'expected a width in pixels or null' } : { ok: true, value: w };
+};
 const accelerator = () => (/** @type {unknown} */ v) => {
   const n = normalizeAccelerator(v);
   return n === null ? { ok: false, reason: 'is not a valid shortcut (e.g. "CommandOrControl+Alt+Space")' } : { ok: true, value: n };
 };
+
+// ---- Home camera validators (tapo / security groups) -------------------------------------------
+/** Integers are rounded and clamped into range; non-numbers rejected. */
+const int = (/** @type {number} */ min, /** @type {number} */ max) => (/** @type {unknown} */ v) => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return { ok: false, reason: 'expected a number' };
+  return { ok: true, value: Math.min(max, Math.max(min, Math.round(v))) };
+};
+/** tapo.host: '' or a home-network address (syntax only; electron/tapo/host.js). */
+const lanHostSetting = () => (/** @type {unknown} */ v) => validateHostSetting(v);
+/** A window's {x, y, width, height} (integers) or null. */
+const bounds = () => (/** @type {any} */ v) => {
+  if (v === null) return { ok: true, value: null };
+  if (!isPlainObject(v)) return { ok: false, reason: 'expected {x, y, width, height} or null' };
+  const keys = ['x', 'y', 'width', 'height'];
+  if (!keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k]))) return { ok: false, reason: 'expected numeric x, y, width and height' };
+  const c = (/** @type {number} */ n, /** @type {number} */ lo, /** @type {number} */ hi) => Math.round(Math.min(hi, Math.max(lo, n)));
+  return { ok: true, value: { x: c(v.x, -1e6, 1e6), y: c(v.y, -1e6, 1e6), width: c(v.width, 100, 20000), height: c(v.height, 100, 20000) } };
+};
+/** '' or "HH:MM-HH:MM" (may wrap midnight). */
+const quietHours = () => (/** @type {unknown} */ v) => {
+  if (typeof v !== 'string') return { ok: false, reason: 'expected a string' };
+  const s = v.trim();
+  if (s === '') return { ok: true, value: '' };
+  return /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/.test(s) ? { ok: true, value: s } : { ok: false, reason: 'must look like 22:00-07:00' };
+};
+/** At most 16 saved positions {name, x, y} (x, y in [-1, 1]). */
+const localPresets = () => (/** @type {unknown} */ v) => {
+  if (!Array.isArray(v) || v.length > 16) return { ok: false, reason: 'expected a list of at most 16 positions' };
+  const out = [];
+  for (const p of v) {
+    if (!isPlainObject(p) || typeof p.name !== 'string' || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+      return { ok: false, reason: 'each position needs a name, x and y' };
+    }
+    const name = p.name.trim();
+    if (!name || name.length > 40 || CONTROL_CHARS.test(name) || /[\r\n]/.test(name)) return { ok: false, reason: 'a position name must be 1 to 40 characters on one line' };
+    out.push({ name, x: Math.min(1, Math.max(-1, p.x)), y: Math.min(1, Math.max(-1, p.y)) });
+  }
+  return { ok: true, value: out };
+};
+/** '' or an absolute folder (the clips folder). */
+const absPath = () => (/** @type {unknown} */ v) => {
+  const r = str({ max: 1024 })(v);
+  if (!r.ok || r.value === '') return r;
+  return path.win32.isAbsolute(r.value) || path.posix.isAbsolute(r.value) ? r : { ok: false, reason: 'must be a full folder path' };
+};
+// ---- end of the Home camera validators ---------------------------------------------------------
 
 const SCHEMA = {
   claude: {
@@ -223,6 +372,9 @@ const SCHEMA = {
     device: oneOf(['auto', 'cuda', 'cpu']),
     handsFree: bool(),
     speakReplies: bool(),
+    character: oneOf(['natural', 'synth', 'vocoder', 'robot']),
+    fxAmount: num(0, 1),
+    lipSyncOffsetMs: num(-200, 200),
   },
   avatar: {
     renderer: oneOf(['relief', 'procedural', 'placeholder']),
@@ -231,20 +383,93 @@ const SCHEMA = {
     particles: num(0, 2),
     bloom: num(0, 2),
     followCursor: bool(),
+    expressiveness: num(0, 2),
+    liveliness: num(0, 2),
+    projector: bool(),
   },
   window: {
     sizePreset: oneOf(['small', 'medium', 'large']),
+    avatarWidth: avatarWidth(),
     alwaysOnTop: bool(),
     clickThrough: bool(),
     position: position(),
     showChat: bool(),
     skipTaskbar: bool(),
+    lockPosition: bool(),
+    snapToEdges: bool(),
   },
   hotkeys: {
     toggleListen: accelerator(),
     toggleChat: accelerator(),
     stopSpeaking: accelerator(),
   },
+  camera: {
+    enabled: bool(),
+    // MediaDeviceInfo.deviceId: an opaque token (Chromium: a hex hash); never reaches a command line
+    deviceId: str({ max: 256, pattern: /^[A-Za-z0-9._:=+/-]*$/ }),
+    followFace: bool(),
+    presence: bool(),
+    mirrorExpressions: bool(),
+    shareWithClaude: bool(),
+    greeting: oneOf(['off', 'hello', 'claude']),
+    lookToTalk: bool(),
+  },
+  // ---- Home camera ----------------------------------------------------------------------------
+  tapo: {
+    enabled: bool(),
+    name: str({ max: 40 }),
+    host: lanHostSetting(),
+    onvifPort: int(1, 65535),
+    rtspPort: int(1, 65535),
+    // printable, no whitespace; it only ever reaches a SOAP header (escaped) and go2rtc's env (percent-encoded)
+    username: str({ max: 64, pattern: /^\S*$/ }),
+    stream: oneOf(['stream1', 'stream2']),
+    ptz: oneOf(['auto', 'relative', 'continuous', 'off']),
+    invertPan: bool(),
+    invertTilt: bool(),
+    stepSmall: num(0.02, 1),
+    stepMedium: num(0.02, 1),
+    stepLarge: num(0.02, 2),
+    viewUnitsX: num(0.05, 4),
+    viewUnitsY: num(0.05, 4),
+    minStep: num(0, 0.5),
+    holdSpeed: num(0.1, 1),
+    msPerUnit: int(500, 20000),
+    homePreset: str({ max: 64, pattern: /^[A-Za-z0-9_.:-]*$/ }),
+    localPresets: localPresets(),
+    calibratedAt: str({ max: 40 }),
+    windowBounds: bounds(),
+    windowOnTop: bool(),
+    showDetections: bool(),
+  },
+  security: {
+    armed: bool(),
+    armDelaySec: int(0, 300),
+    people: bool(),
+    motion: bool(),
+    notify: oneOf(['person', 'motion', 'off']),
+    record: oneOf(['person', 'motion', 'off']),
+    preRollSec: int(0, 15),
+    postRollSec: int(2, 60),
+    maxClipSec: int(10, 600),
+    retentionDays: int(1, 90),
+    maxStorageGB: num(0.5, 500),
+    clipsDir: absPath(),
+    sensitivity: oneOf(['low', 'medium', 'high']),
+    cameraEvents: bool(),
+    confirmLocally: bool(),
+    cooldownSec: int(10, 3600),
+    quietHours: quietHours(),
+    announce: bool(),
+    showOnAlert: bool(),
+    describe: bool(),
+    claudeSee: oneOf(['ask', 'always', 'never']),
+    claudeMove: oneOf(['ask', 'always', 'never']),
+    voiceCommands: bool(),
+    startAtLogin: bool(),
+    startAtLoginOffered: bool(),
+  },
+  // ---- end of the Home camera groups ------------------------------------------------------------
 };
 
 /** @param {unknown} v @returns {v is Record<string, any>} */
@@ -312,6 +537,12 @@ export function applyPatch(base, patch) {
       const r = validate(value);
       if (r.ok) /** @type {any} */ (settings)[group][key] = r.value;
       else warnings.push(`"${group}.${key}" ${r.reason}; kept ${JSON.stringify(/** @type {any} */ (base)[group][key])}`);
+    }
+    // Picking a size preset (tray, drawer, IPC) replaces a free size from resizing, unless the
+    // same patch sets one too (a whole settings file has both).
+    if (group === 'window' && groupPatch.sizePreset !== undefined && !('avatarWidth' in groupPatch)
+      && settings.window.sizePreset === groupPatch.sizePreset) {
+      settings.window.avatarWidth = null;
     }
   }
   return { settings, warnings };

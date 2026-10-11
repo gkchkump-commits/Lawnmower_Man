@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { defaultHotkeys } from '../../../electron/settings.js';
+import { windowLayout } from '../../../electron/window-manager.js';
 
 const m = vi.hoisted(() => {
   const handlers = new Map();
@@ -16,10 +17,11 @@ const m = vi.hoisted(() => {
   const display = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 }, scaleFactor: 1 };
   const userData = { dir: '' };
   const cursor = { x: 0, y: 0 };
-  return { handlers, listeners, appEvents, windows, display, userData, cursor, protocolHandler: null, sessionHandlers: {} };
+  return { handlers, listeners, appEvents, windows, display, extraDisplays: [], userData, cursor, protocolHandler: null, sessionHandlers: {} };
 });
 
-vi.mock('electron', () => {
+vi.mock('electron', async () => {
+  const { pickDisplay } = await import('../../../electron/window-manager.js');
   const fn = () => vi.fn();
   class FakeWebContents {
     constructor() {
@@ -27,6 +29,7 @@ vi.mock('electron', () => {
       this.events = new Map();
       this.send = vi.fn((ch, payload) => this.sent.push([ch, payload]));
       this.isDestroyed = () => false;
+      this.isCrashed = () => false;
       this.setWindowOpenHandler = vi.fn((h) => { this.openHandler = h; });
       this.toggleDevTools = fn();
       this.reload = fn();
@@ -53,8 +56,11 @@ vi.mock('electron', () => {
     getBounds() { return { ...this.bounds }; }
     getContentBounds() { return { ...this.bounds }; }
     isVisible() { return this.visible; }
-    isDestroyed() { return false; }
+    isDestroyed() { return !!this.destroyed; }
     isMinimized() { return false; }
+    setTitle(t) { this.title = t; }
+    setMenuBarVisibility() {}
+    destroy() { this.destroyed = true; this.events.get('closed')?.(); }
     show() { this.visible = true; this.events.get('show')?.(); }
     showInactive() { this.visible = true; this.events.get('show')?.(); }
     hide() { this.visible = false; this.events.get('hide')?.(); }
@@ -85,7 +91,7 @@ vi.mock('electron', () => {
     BrowserWindow,
     Tray,
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn((t) => ({ template: t })) },
-    dialog: { showErrorBox: vi.fn() },
+    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn(async () => ({ response: 1 })) },
     globalShortcut: { register: vi.fn(() => true), unregister: vi.fn(), unregisterAll: vi.fn() },
     ipcMain: {
       handle: vi.fn((ch, h) => m.handlers.set(ch, h)),
@@ -93,16 +99,32 @@ vi.mock('electron', () => {
     },
     nativeImage: { createFromPath: vi.fn(() => ({ kind: 'file' })), createFromBuffer: vi.fn(() => ({ kind: 'buffer' })) },
     protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn((scheme, h) => { m.protocolHandler = h; }) },
-    screen: { getPrimaryDisplay: () => m.display, getAllDisplays: () => [m.display], getDisplayMatching: () => m.display, getCursorScreenPoint: () => ({ ...m.cursor }), on: vi.fn() },
+    screen: {
+      getPrimaryDisplay: () => m.display,
+      getAllDisplays: () => [m.display, ...m.extraDisplays],
+      getDisplayMatching: (r) => pickDisplay(r, [m.display, ...m.extraDisplays]) || m.display,
+      getCursorScreenPoint: () => ({ ...m.cursor }),
+      on: vi.fn(),
+    },
     session: {
       defaultSession: {
-        webRequest: { onHeadersReceived: vi.fn((h) => { m.sessionHandlers.headers = h; }) },
+        webRequest: {
+          onHeadersReceived: vi.fn((h) => { m.sessionHandlers.headers = h; }),
+          onBeforeRequest: vi.fn((filter, h) => { m.sessionHandlers.beforeRequest = { filter, h }; }),
+        },
         setPermissionRequestHandler: vi.fn((h) => { m.sessionHandlers.request = h; }),
         setPermissionCheckHandler: vi.fn((h) => { m.sessionHandlers.check = h; }),
         setDevicePermissionHandler: vi.fn(),
       },
     },
     shell: { openExternal: vi.fn(async () => {}), openPath: vi.fn(async () => '') },
+    // the home camera (electron/tapo, off by default): main.js hands these to createTapo()
+    safeStorage: { isAsyncEncryptionAvailable: vi.fn(async () => false), getSelectedStorageBackend: vi.fn(() => 'basic_text') },
+    Notification: class { static isSupported() { return false; } show() {} on() {} },
+    MessageChannelMain: class {},
+    // an armed camera keeps the PC from sleeping and reconnects when it wakes
+    powerSaveBlocker: { start: vi.fn(() => 1), stop: vi.fn() },
+    powerMonitor: { on: vi.fn(), removeListener: vi.fn() },
   };
 });
 
@@ -187,16 +209,25 @@ describe('electron/main.js wiring', () => {
     expect(boot.appMenu).toEqual([[null]]);
   });
 
-  it('exposes exactly the IPC channels the preload uses', () => {
-    const preload = fs.readFileSync(path.resolve('electron/preload.cjs'), 'utf8');
-    const used = new Set([...preload.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
-    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor'];
+  it('exposes exactly the IPC channels the preloads use', () => {
+    // the avatar window's preload and the Home camera window's (electron/tapo registers lm:tapo:*)
+    const preloads = ['electron/preload.cjs', 'electron/preload-camera.cjs'].map((f) => fs.readFileSync(path.resolve(f), 'utf8')).join('\n');
+    const used = new Set([...preloads.matchAll(/'(lm:[a-z:-]+)'/g)].map((x) => x[1]));
+    const toRenderer = ['lm:claude:event', 'lm:voice:status', 'lm:settings:changed', 'lm:hotkey', 'lm:cursor', 'lm:window:visibility',
+      'lm:tapo:alert', 'lm:tapo:look', 'lm:tapo:event', 'lm:tapo:open-event', 'lm:tapo:calibration', 'lm:tapo:port'];
     const registered = new Set([...m.handlers.keys(), ...m.listeners.keys(), ...toRenderer]);
     expect([...used].sort()).toEqual([...registered].sort());
-    expect([...m.handlers.keys()].sort()).toEqual([
+    expect([...m.handlers.keys()].filter((ch) => !ch.startsWith('lm:tapo:')).sort()).toEqual([
       'lm:app:info', 'lm:claude:cancel', 'lm:claude:interrupt', 'lm:claude:reset', 'lm:claude:respond-permission', 'lm:claude:retry', 'lm:claude:send', 'lm:claude:status',
       'lm:settings:get', 'lm:settings:set', 'lm:voice:info', 'lm:voice:open-setup-log', 'lm:voice:restart', 'lm:voice:setup',
     ]);
+    expect([...m.handlers.keys()].filter((ch) => ch.startsWith('lm:tapo:')).sort()).toEqual([
+      'lm:tapo:arm', 'lm:tapo:calibrate', 'lm:tapo:clear-credentials', 'lm:tapo:discover', 'lm:tapo:event-ack', 'lm:tapo:event-remove', 'lm:tapo:events-list',
+      'lm:tapo:open-clips', 'lm:tapo:preset-remove', 'lm:tapo:preset-save', 'lm:tapo:presets', 'lm:tapo:ptz', 'lm:tapo:request-port', 'lm:tapo:set-credentials',
+      'lm:tapo:status', 'lm:tapo:test', 'lm:tapo:window',
+      // added by the UX fixes (camera window only): Retry, Copy diagnostic report
+      'lm:tapo:diagnostics', 'lm:tapo:retry',
+    ].sort());
   });
 
   it('round-trips a Claude turn through IPC and forwards events to the renderer', async () => {
@@ -271,12 +302,236 @@ describe('electron/main.js wiring', () => {
     expect(cursorSent().length).toBe(n);
     win.hide();
     expect(tracker.running).toBe(false);
+    expect(win.webContents.sent.filter(([ch]) => ch === 'lm:window:visibility').at(-1)[1]).toEqual({ visible: false }); // the camera pauses
+    expect((await invoke('lm:app:info')).visible).toBe(false);
     win.show();
     expect(tracker.running).toBe(true);
+    expect(win.webContents.sent.filter(([ch]) => ch === 'lm:window:visibility').at(-1)[1]).toEqual({ visible: true });
     await invoke('lm:settings:set', { avatar: { followCursor: false } });
     expect(tracker.running).toBe(false);
     await invoke('lm:settings:set', { avatar: { followCursor: true } });
     expect(tracker.running).toBe(true);
+  });
+
+  it('moves the window by the head: follows the global cursor, settles on the display, saves', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeout = 2000) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > timeout) throw new Error('timeout');
+        await sleep(10);
+      }
+    };
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    const wa = m.display.workArea;
+    await invoke('lm:settings:set', { window: { sizePreset: 'medium' } }); // 400×840 with chat
+    win.setBounds({ x: 900, y: 300, width: 400, height: 840 });
+    const start = win.getBounds();
+    Object.assign(m.cursor, { x: 1000, y: 400 });
+
+    // a press that does not move is a click: the window stays put
+    drag('drag-start');
+    m.cursor.x += 2;
+    await sleep(60);
+    expect(win.bounds).toEqual(start);
+
+    // past the threshold every movement counts; the size never changes
+    Object.assign(m.cursor, { x: 940, y: 370 });
+    await until(() => win.bounds.x === start.x - 60);
+    expect(win.bounds).toEqual({ ...start, x: start.x - 60, y: start.y - 30 });
+    // the renderer cannot make the window click-through mid-drag (the release must arrive)
+    m.listeners.get('lm:window:set-ignore-mouse')(trusted(), true);
+    expect(win.setIgnoreMouseEvents).not.toHaveBeenCalledWith(true, expect.anything());
+    expect(main.__test.state.ignoreMouse).toBe(false);
+    // near the left edge it locks flush against it (like a normal window) and lets go further out
+    Object.assign(m.cursor, { x: 1000 - (start.x - wa.x) + 15, y: 370 });
+    await until(() => win.bounds.x === wa.x);
+    Object.assign(m.cursor, { x: 1000 - (start.x - wa.x) + 60, y: 370 });
+    await until(() => win.bounds.x === wa.x + 60);
+
+    // dropped half off-screen: settles fully onto the work area and saves the position
+    Object.assign(m.cursor, { x: 1000 + 5000, y: 400 - 5000 });
+    drag('drag-end');
+    expect(win.bounds).toEqual({ x: wa.x + wa.width - start.width, y: wa.y, width: start.width, height: start.height });
+    expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+    expect(main.__test.state.drag).toBe(null);
+    const settled = win.getBounds();
+    Object.assign(m.cursor, { x: 10, y: 10 });
+    await sleep(40);
+    expect(win.bounds).toEqual(settled); // no timer left running
+
+    // locked: a press never moves the window
+    await invoke('lm:settings:set', { window: { lockPosition: true } });
+    drag('drag-start');
+    expect(main.__test.state.drag).toBe(null);
+    await invoke('lm:settings:set', { window: { lockPosition: false } });
+
+    // hiding the window ends a drag in progress
+    drag('drag-start');
+    expect(main.__test.state.drag).not.toBe(null);
+    win.hide();
+    expect(main.__test.state.drag).toBe(null);
+    win.show();
+
+    // these calls take no arguments
+    m.listeners.get('lm:window:drag-start')(trusted(), { x: 1 });
+    expect(main.__test.state.drag).toBe(null);
+
+    // "Reset position": back to the bottom-right corner of the display
+    drag('reset-position');
+    expect(win.bounds).toEqual({ x: wa.x + wa.width - start.width - 24, y: wa.y + wa.height - start.height - 24, width: start.width, height: start.height });
+    expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+    const tray = main.__test.state.tray;
+    expect(tray.menu.template.some((i) => i.label === 'Lock position' && i.type === 'checkbox')).toBe(true);
+    expect(tray.menu.template.some((i) => i.label === 'Reset position')).toBe(true);
+  });
+
+  it('a drop on a shorter display refits the 2:3 avatar + chat to it; back on the big one it grows again', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    // a 1080p laptop at 150 % to the right of the primary: 1280×720 DIP, 672 px of work area
+    const laptop = { id: 2, bounds: { x: 1920, y: 0, width: 1280, height: 720 }, workArea: { x: 1920, y: 0, width: 1280, height: 672 }, scaleFactor: 1.5 };
+    m.extraDisplays.push(laptop);
+    try {
+      await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true, lockPosition: false } });
+      win.setBounds({ x: 1400, y: 100, width: 400, height: 840 });
+      Object.assign(m.cursor, { x: 1500, y: 200 });
+      drag('drag-start');
+      Object.assign(m.cursor, { x: 1500 + 900, y: 200 });
+      await sleep(60);
+      drag('drag-end');
+      const fit = windowLayout('medium', true, laptop.workArea);
+      expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: fit.width, height: fit.height });
+      expect(win.bounds.x).toBeGreaterThanOrEqual(laptop.workArea.x);
+      expect(win.bounds.y + win.bounds.height).toBeLessThanOrEqual(laptop.workArea.y + laptop.workArea.height);
+      expect((await invoke('lm:settings:get')).window.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+      // dragged back onto the primary display: the full medium + chat size again
+      Object.assign(m.cursor, { x: win.bounds.x + 50, y: 300 });
+      drag('drag-start');
+      Object.assign(m.cursor, { x: 900, y: 300 });
+      await sleep(60);
+      drag('drag-end');
+      expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: 400, height: 840 });
+      expect(win.bounds.x + win.bounds.width).toBeLessThanOrEqual(1920);
+    } finally {
+      m.extraDisplays.length = 0;
+      await invoke('lm:settings:set', { window: { sizePreset: 'large' } }); // as the tests below expect
+    }
+  });
+
+  it('a size change during a drag sticks (the drag goes on with the new size)', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const drag = (ch) => m.listeners.get(`lm:window:${ch}`)(trusted());
+    await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true } });
+    win.setBounds({ x: 600, y: 100, width: 400, height: 840 });
+    Object.assign(m.cursor, { x: 700, y: 200 });
+    drag('drag-start');
+    Object.assign(m.cursor, { x: 650, y: 200 });
+    await sleep(40);
+    expect(win.bounds.x).toBe(550);
+    m.listeners.get('lm:window:set-size-preset')(trusted(), 'large'); // Ctrl + wheel over the head
+    const large = windowLayout('large', true, m.display.workArea);
+    await sleep(60);
+    expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: large.width, height: large.height });
+    const x = win.bounds.x;
+    Object.assign(m.cursor, { x: 630, y: 200 }); // still following the cursor, from where it is
+    await sleep(40);
+    expect(win.bounds.x).toBe(x - 20);
+    drag('drag-end');
+    expect({ width: win.bounds.width, height: win.bounds.height }).toEqual({ width: large.width, height: large.height });
+    expect((await invoke('lm:settings:get')).window.sizePreset).toBe('large');
+  });
+
+  it('resizes from a corner grip like a normal window: the opposite corner stays, 2:3 kept, the size saved', async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeout = 2000) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > timeout) throw new Error('timeout');
+        await sleep(10);
+      }
+    };
+    const send = (ch, ...args) => m.listeners.get(`lm:window:${ch}`)(trusted(), ...args);
+    const wa = m.display.workArea;
+    try {
+      await invoke('lm:settings:set', { window: { sizePreset: 'medium', showChat: true, lockPosition: false } });
+      win.setBounds({ x: 1000, y: 180, width: 400, height: 840 }); // room above for 500 wide
+      const start = win.getBounds();
+      Object.assign(m.cursor, { x: 1002, y: 182 });
+
+      // top-left grip: a click does nothing
+      send('resize-start', 'tl');
+      expect(main.__test.state.resize).not.toBe(null);
+      expect(win.setResizable).toHaveBeenLastCalledWith(true);
+      m.cursor.x -= 2;
+      await sleep(60);
+      expect(win.bounds).toEqual(start);
+      // pulled out by 100 px: 500 wide, 2:3 avatar + the strip, bottom-right corner unchanged
+      Object.assign(m.cursor, { x: 902, y: 182 });
+      await until(() => win.bounds.width === 500);
+      expect(win.bounds.height).toBe(750 + windowLayout('medium', true, undefined, 500).chat.height);
+      expect(win.bounds.x + win.bounds.width).toBe(start.x + start.width);
+      expect(win.bounds.y + win.bounds.height).toBe(start.y + start.height);
+      // the renderer cannot make the window click-through mid-resize
+      send('set-ignore-mouse', true);
+      expect(main.__test.state.ignoreMouse).toBe(false);
+      // never past the top of the work area: the width stops where the window fits
+      Object.assign(m.cursor, { x: -3000, y: -3000 });
+      await sleep(60);
+      expect(win.bounds.y).toBeGreaterThanOrEqual(wa.y);
+      expect(win.bounds.y + win.bounds.height).toBe(start.y + start.height);
+      Object.assign(m.cursor, { x: 902, y: 182 });
+      await until(() => win.bounds.width === 500);
+      send('resize-end');
+      expect(main.__test.state.resize).toBe(null);
+      expect(win.setResizable).toHaveBeenLastCalledWith(false);
+      const saved = (await invoke('lm:settings:get')).window;
+      expect(saved.avatarWidth).toBe(500);
+      expect(saved.position).toEqual({ x: win.bounds.x, y: win.bounds.y });
+      // the settings change re-applies the layout: the same size, nothing moves
+      await sleep(20);
+      expect(win.bounds.width).toBe(500);
+      const after = win.getBounds();
+      Object.assign(m.cursor, { x: 10, y: 10 });
+      await sleep(40);
+      expect(win.bounds).toEqual(after); // no timer left running
+
+      // bottom-right grip, smaller: the top-left corner stays
+      Object.assign(m.cursor, { x: after.x + after.width, y: after.y + after.height });
+      send('resize-start', 'br');
+      Object.assign(m.cursor, { x: after.x + after.width - 160, y: after.y + after.height });
+      await until(() => win.bounds.width === 340);
+      expect({ x: win.bounds.x, y: win.bounds.y }).toEqual({ x: after.x, y: after.y });
+      send('resize-end');
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(340);
+
+      // Ctrl + wheel: a free width through IPC (clamped and even)
+      send('set-avatar-width', 431);
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(432);
+      expect(win.bounds.width).toBe(432);
+      send('set-avatar-width', 'big');
+      expect((await invoke('lm:settings:get')).window.avatarWidth).toBe(432);
+      // the tray shows the free size; a preset replaces it
+      expect(main.__test.state.tray.menu.template.find((i) => i.label === 'Size').submenu.some((i) => i.label === 'Custom (432 px wide)' && i.checked)).toBe(true);
+      send('set-size-preset', 'small');
+      const s = (await invoke('lm:settings:get')).window;
+      expect([s.sizePreset, s.avatarWidth]).toEqual(['small', null]);
+      expect(win.bounds.width).toBe(300);
+
+      // locked (position and size), a bad corner, the window hidden: no resize
+      await invoke('lm:settings:set', { window: { lockPosition: true } });
+      send('resize-start', 'br');
+      expect(main.__test.state.resize).toBe(null);
+      await invoke('lm:settings:set', { window: { lockPosition: false } });
+      send('resize-start', 'middle');
+      expect(main.__test.state.resize).toBe(null);
+      send('resize-start', 'bl');
+      win.hide();
+      expect(main.__test.state.resize).toBe(null);
+      win.show();
+    } finally {
+      await invoke('lm:settings:set', { window: { sizePreset: 'large', lockPosition: false } }); // as the tests below expect
+    }
   });
 
   it('cancel IPC validates the turn id', async () => {
@@ -294,8 +549,28 @@ describe('electron/main.js wiring', () => {
 
   it('installs CSP headers, permission policy and navigation guards', () => {
     const cb = vi.fn();
-    m.sessionHandlers.headers({ resourceType: 'mainFrame', responseHeaders: { 'Content-Type': ['text/html'] } }, cb);
+    m.sessionHandlers.headers({ resourceType: 'mainFrame', url: 'http://127.0.0.1:5173/', responseHeaders: { 'Content-Type': ['text/html'] } }, cb);
     expect(cb.mock.calls[0][0].responseHeaders['Content-Security-Policy']).toEqual([main.__test.csp]);
+    // a worker script of our own origin gets the policy too; other origins' scripts are left alone
+    m.sessionHandlers.headers({ resourceType: 'script', url: 'app://lawnmower/assets/face-worker-x.js', responseHeaders: {} }, cb);
+    expect(cb.mock.calls[1][0].responseHeaders['Content-Security-Policy']).toEqual([main.__test.csp]);
+    m.sessionHandlers.headers({ resourceType: 'script', url: 'https://cdn.example/x.js', responseHeaders: { a: ['b'] } }, cb);
+    expect(cb.mock.calls[2][0].responseHeaders).toEqual({ a: ['b'] });
+
+    // no request leaves the PC: loopback passes, anything else is cancelled (and logged once)
+    const { filter, h: before } = m.sessionHandlers.beforeRequest;
+    expect(filter.urls).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*']));
+    const decide = (url) => {
+      const done = vi.fn();
+      before({ url, resourceType: 'xhr' }, done);
+      return done.mock.calls[0][0];
+    };
+    expect(decide('http://127.0.0.1:8765/v1/tts')).toEqual({ cancel: false });
+    expect(main.__test.state.blockedRequests).toEqual([]);
+    expect(decide('https://odml.pa.googleapis.com/v1/log')).toEqual({ cancel: true });
+    expect(decide('wss://evil.example/socket')).toEqual({ cancel: true });
+    expect(main.__test.state.blockedRequests).toEqual(['https://odml.pa.googleapis.com/v1/log', 'wss://evil.example/socket']);
+    main.__test.state.blockedRequests.length = 0;
     const grant = vi.fn();
     m.sessionHandlers.request(win.webContents, 'media', grant, { requestingUrl: 'app://lawnmower/index.html', mediaTypes: ['audio'] });
     m.sessionHandlers.request(win.webContents, 'geolocation', grant, { requestingUrl: 'app://lawnmower/index.html' });
@@ -507,6 +782,106 @@ describe('electron/main.js wiring', () => {
       setup._o.findTerminal = saved.findTerminal;
       setup._set({ state: 'idle' });
       await voice.stop();
+    }
+  });
+
+  it('camera: video permission follows camera.enabled; images pass claude:send validation; tray item', async () => {
+    const grant = vi.fn();
+    const request = (url, types) => m.sessionHandlers.request(win.webContents, 'media', grant, { requestingUrl: url, mediaTypes: types });
+    const checkVideo = () => m.sessionHandlers.check(win.webContents, 'media', 'app://lawnmower', { mediaType: 'video' });
+    const cameraItem = () => main.__test.state.tray.menu.template.find((i) => i.label === 'Camera');
+    try {
+      request('app://lawnmower/index.html', ['video']);
+      expect(checkVideo()).toBe(false);
+      expect(cameraItem().checked).toBe(false);
+      await invoke('lm:settings:set', { camera: { enabled: true } });
+      request('app://lawnmower/index.html', ['video']);
+      request('app://lawnmower/index.html', ['audio']);
+      request('https://evil.example/', ['video']);
+      expect(checkVideo()).toBe(true);
+      expect(grant.mock.calls.map((c) => c[0])).toEqual([false, true, true, false]);
+      expect(cameraItem().checked).toBe(true);
+      cameraItem().click({ checked: false }); // the tray turns it off again
+      expect((await invoke('lm:settings:get')).camera.enabled).toBe(false);
+      expect(checkVideo()).toBe(false);
+
+      // a snapshot with the turn: validated, then an image block the fake CLI acknowledges
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9, 0]).toString('base64');
+      const { turnId } = await invoke('lm:claude:send', 'look at me', { images: [{ mediaType: 'image/jpeg', data: jpeg }] });
+      const [, ev] = await waitForSent(([ch, p]) => ch === 'lm:claude:event' && p.type === 'turn_end' && p.turnId === turnId);
+      expect(ev.result).toBe('You said: look at me [saw 1 image: image/jpeg 640x480, 24 bytes]');
+      await expect(invoke('lm:claude:send', 'x', { images: [{ mediaType: 'image/jpeg', data: `data:image/jpeg;base64,${jpeg}` }] })).rejects.toThrow(/data: prefix/);
+      await expect(invoke('lm:claude:send', 'x', { images: [{ mediaType: 'image/png', data: jpeg }] })).rejects.toThrow(/not really image\/png/);
+      await expect(invoke('lm:claude:send', 'x', 'images')).rejects.toThrow(/options must be an object/);
+    } finally {
+      await invoke('lm:settings:set', { camera: { enabled: false } });
+    }
+  });
+
+  it('home camera: its window comes and goes with tapo.enabled, may use only its own settings, gets them forwarded', async () => {
+    const t = main.__test;
+    const camWindows = () => m.windows.filter((w) => /preload-camera\.cjs$/.test(w.opts.webPreferences?.preload || ''));
+    expect(camWindows()).toHaveLength(0); // off by default: no window, no camera traffic
+    expect(t.state.tray.menu.template.find((i) => i.label === 'Home camera').submenu[0].label).toBe('Home camera is off');
+    const cam = { sender: null, senderFrame: { url: 'app://lawnmower/tapo/index.html' } };
+    try {
+      await invoke('lm:settings:set', { tapo: { enabled: true, name: 'front door camera' } });
+      const [cw] = camWindows();
+      expect(cw).toBeTruthy();
+      expect(cw.opts.webPreferences).toMatchObject({ contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true });
+      expect(cw.loadURL).toHaveBeenCalledWith('app://lawnmower/tapo/index.html');
+      expect(t.state.tapo.cameraWindow()).toBe(cw);
+      cam.sender = cw.webContents;
+      // the camera window: settings (its groups only), app info, its lm:tapo:* channels — never Claude
+      expect((await m.handlers.get('lm:settings:get')(cam)).tapo.name).toBe('front door camera');
+      expect(await m.handlers.get('lm:app:info')(cam)).toMatchObject({ version: '0.1.0-test' });
+      await expect(m.handlers.get('lm:settings:set')(cam, { window: { alwaysOnTop: false } })).rejects.toThrow(/only change the camera settings/);
+      await expect(m.handlers.get('lm:settings:set')(cam, { tapo: { name: 'porch camera' }, claude: { mode: 'agent' } })).rejects.toThrow(/only change the camera settings/);
+      expect((await m.handlers.get('lm:settings:set')(cam, { tapo: { name: 'porch camera' } })).tapo.name).toBe('porch camera');
+      expect(cw.webContents.sent.some(([ch, st]) => ch === 'lm:settings:changed' && st.tapo.name === 'porch camera')).toBe(true);
+      await expect(m.handlers.get('lm:claude:send')(cam, 'hi')).rejects.toThrow(/untrusted/);
+      await expect(m.handlers.get('lm:voice:info')(cam)).rejects.toThrow(/untrusted/);
+      expect((await m.handlers.get('lm:tapo:status')(cam)).connection).toBe('not-configured');
+      // a page from somewhere else in that window is not trusted either
+      await expect(m.handlers.get('lm:settings:get')({ sender: cw.webContents, senderFrame: { url: 'https://evil.example/' } })).rejects.toThrow(/untrusted/);
+      // the avatar window: status yes, the camera window's setup channels no
+      expect((await invoke('lm:tapo:status')).name).toBe('porch camera');
+      await expect(invoke('lm:tapo:set-credentials', { username: 'camacct', password: 'se&cret' })).rejects.toThrow(/untrusted/);
+      // the tray's Home camera submenu
+      const sub = t.state.tray.menu.template.find((i) => i.label === 'Home camera').submenu;
+      expect(sub.map((i) => i.label)).toEqual(['Not set up yet', 'Set up the home camera…', 'Armed', 'Open clips folder']);
+      // not configured: no camera tools for Claude
+      expect(t.state.tapo.mcpServers()).toEqual([]);
+    } finally {
+      await invoke('lm:settings:set', { tapo: { enabled: false, name: 'camera' } });
+    }
+    expect(camWindows()[0].destroyed).toBe(true);
+    expect(t.state.tapo.cameraWindow()).toBe(null);
+  });
+
+  it('quitting while the home camera is armed asks first (UX review); disarmed it just quits', async () => {
+    const t = main.__test;
+    const tapo = t.state.tapo;
+    const was = tapo.isArmed;
+    try {
+      tapo.isArmed = () => true;
+      electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 1 }); // Cancel
+      await t.trayActions.quit();
+      expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: 'The home camera is armed.', buttons: ['Quit anyway', 'Cancel'] }));
+      expect(electron.app.quit).not.toHaveBeenCalled();
+      electron.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 }); // Quit anyway
+      m.listeners.get('lm:window:quit')(trusted());
+      for (let i = 0; i < 50 && !electron.app.quit.mock.calls.length; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(electron.app.quit).toHaveBeenCalledTimes(1);
+      electron.app.quit.mockClear();
+      electron.dialog.showMessageBox.mockClear();
+      tapo.isArmed = () => false;
+      await t.trayActions.quit();
+      expect(electron.dialog.showMessageBox).not.toHaveBeenCalled();
+      expect(electron.app.quit).toHaveBeenCalledTimes(1);
+    } finally {
+      tapo.isArmed = was;
+      electron.app.quit.mockClear();
     }
   });
 

@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { visionWasm } from './scripts/vite-vision-wasm.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
@@ -10,6 +11,10 @@ export default defineConfig({
   root: resolve(here, 'src'),
   publicDir: resolve(here, 'public'),
   base: './',
+  // MediaPipe's wasm runtime for the camera (src/vision): served in dev, copied into dist/
+  plugins: [visionWasm({ root: here })],
+  // the face tracker runs in a module worker (it imports the ES-module MediaPipe runtime)
+  worker: { format: 'es' },
   server: { host: '127.0.0.1', port: 5173, strictPort: true },
   preview: { host: '127.0.0.1', port: 4173, strictPort: true },
   build: {
@@ -20,6 +25,8 @@ export default defineConfig({
       input: {
         main: resolve(here, 'src/index.html'),
         avatar: resolve(here, 'src/dev/avatar.html'),
+        // the Home camera window (src/tapo/, docs/TAPO.md) → dist/tapo/index.html
+        tapo: resolve(here, 'src/tapo/index.html'),
       },
     },
   },

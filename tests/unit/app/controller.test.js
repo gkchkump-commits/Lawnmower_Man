@@ -47,6 +47,18 @@ describe('Controller: text conversation', () => {
     expect(avatar.states).toEqual(['idle', 'thinking', 'speaking', 'idle']);
   });
 
+  it('passes the voice character to the player (also a player without one: the fakes)', async () => {
+    const { c, player } = setup();
+    const calls = [];
+    player.setVoiceFx = (o) => calls.push(o);
+    c.applySettings(deepMerge(DEFAULT_SETTINGS, { voice: { character: 'robot', fxAmount: 0.8 } }));
+    expect(calls.at(-1)).toEqual({ character: 'robot', amount: 0.8 });
+    c.applySettings(deepMerge(DEFAULT_SETTINGS, {}));
+    expect(calls.at(-1)).toEqual({ character: 'synth', amount: 0.6 });
+    delete player.setVoiceFx;
+    expect(() => c.applySettings(deepMerge(DEFAULT_SETTINGS, {}))).not.toThrow();
+  });
+
   it('ignores empty messages and unknown events', async () => {
     const { c, bridge, view } = setup();
     await c.start();
@@ -144,6 +156,50 @@ describe('Controller: speech pipeline', () => {
     expect(avatar.mouths.length).toBeGreaterThan(0);
     expect(avatar.mouths.at(-1).jaw).toBeGreaterThan(0.05); // 'aa' viseme from the fake TTS
     expect(avatar.levels.at(-1)).toBeGreaterThan(0);
+  });
+
+  it('forwards every mouth channel and the prosody cues of the lip-sync to the avatar', async () => {
+    const bridge = fakeBridge();
+    const player = fakePlayer({ clipMs: 40 });
+    const avatar = fakeAvatar();
+    avatar.cues = [];
+    avatar.setProsody = (c) => avatar.cues.push(c);
+    const shape = { jaw: 0.02, wide: 0.1, round: 0.2, press: 0.9, tuck: 0.05, teeth: 0.1, tongue: 0.3, level: 0.5 };
+    const cue = { type: 'accent', strength: 1, t: 0.2 };
+    let n = 0;
+    const lipsync = { update: () => ({ ...shape, source: 'speech', cues: n++ === 1 ? [cue] : null }), dispose() {} };
+    const c = new Controller({ bridge, view: fakeView(), player, tts: fakeTts(), stt: fakeStt(), mic: fakeMic(), avatar, lipsync, sleepAfterMs: 0 });
+    await c.start();
+    player._cur = { clip: { kind: 'speech' } }; // something is playing
+    for (let i = 0; i < 3; i++) c.tick(1 / 60, i / 60);
+    expect(avatar.mouths.at(-1)).toMatchObject({ jaw: 0.02, press: 0.9, tuck: 0.05, teeth: 0.1, tongue: 0.3, wide: 0.1, round: 0.2 });
+    expect(avatar.levels.at(-1)).toBe(0.5);
+    expect(avatar.cues).toEqual([[cue]]);
+    // a closed mouth (press) keeps the lip-sync running after playback until it relaxes
+    player._cur = null;
+    c.tick(1 / 60, 0.1);
+    expect(avatar.mouths.at(-1).press).toBe(0.9);
+  });
+
+  it('hands every synthesized clip to the lip-sync early, and the user\'s lip-sync timing', async () => {
+    const bridge = fakeBridge();
+    const player = fakePlayer({ clipMs: 20 });
+    const prepared = [], offsets = [];
+    const lipsync = {
+      update: () => ({ jaw: 0, wide: 0, round: 0, press: 0, tuck: 0, teeth: 0, tongue: 0, level: 0, source: 'none', cues: null }),
+      prepare: (clip) => { prepared.push(clip); return Promise.resolve(null); },
+      setOffset: (s) => offsets.push(s),
+      dispose() {},
+    };
+    const c = new Controller({ bridge, view: fakeView(), player, tts: fakeTts(), stt: fakeStt(), mic: fakeMic(), avatar: fakeAvatar(), lipsync, sleepAfterMs: 0 });
+    await c.start();
+    c.applySettings({ voice: { lipSyncOffsetMs: 40 } });
+    expect(offsets.at(-1)).toBeCloseTo(0.04, 9);
+    c.applySettings({ voice: {} });
+    expect(offsets.at(-1)).toBe(0);
+    expect(c.say('Hello there.')).toBe(true);
+    await waitFor(() => prepared.length === 1);
+    expect(prepared[0]).toMatchObject({ text: 'Hello there.' });
   });
 
   it('a spoken cue when Claude uses a tool without saying anything first', async () => {
@@ -340,6 +396,19 @@ describe('Controller: voice input', () => {
     expect(states.slice(0, 3)).toEqual(['listening', 'transcribing', 'thinking']);
     await tick();
     expect(bridge.calls).toContainEqual(['send', 'hello there']);
+  });
+
+  it('passes the mic level to the avatar while it listens (it nods at the pauses of the voice)', async () => {
+    const { c, mic, avatar } = setup();
+    await c.start();
+    c.tick(1 / 60, 0);
+    expect(avatar.users).toEqual([]);           // the mic is off: nothing
+    await c.startListening('ptt');
+    mic.level = 0.62;
+    c.tick(1 / 60, 1 / 60);
+    mic.paused = true;
+    c.tick(1 / 60, 2 / 60);
+    expect(avatar.users).toEqual([{ voice: 0.62 }, { voice: 0 }]);
   });
 
   it('ignores Whisper hallucinations on short noise', async () => {

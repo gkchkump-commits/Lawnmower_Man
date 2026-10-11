@@ -54,6 +54,47 @@ jobs:
           path: test-results/
           retention-days: 7
 
+  tapo-e2e-linux:
+    # The Home camera end to end in the real Electron app against the camera simulator
+    # (tools/tapo-sim), with the real go2rtc and the fake Claude CLI (docs/TAPO.md, "Tests").
+    name: Home camera (Electron e2e vs. simulator) — Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # this job needs the Electron binary (the workflow-wide setting skips it)
+      ELECTRON_SKIP_BINARY_DOWNLOAD: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install npm dependencies (with the Electron binary)
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+      - name: System libraries for Electron, and Xvfb
+        run: |
+          npx playwright install-deps chromium
+          command -v xvfb-run || sudo apt-get install -y xvfb
+          # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox uses
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Fetch go2rtc (pinned release, SHA-256 checked)
+        run: npm run fetch:go2rtc -- --platform linux-x64
+      - name: Build renderer
+        run: npx vite build
+      - name: Camera simulator self-tests and the integration tests against it
+        run: npx vitest run tests/unit/tapo-sim
+      - name: End-to-end (xvfb)
+        run: xvfb-run -a node scripts/tapo-e2e.mjs --report tapo-e2e/report.json --shots tapo-e2e/shots
+      - name: Upload the report and screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapo-e2e
+          path: tapo-e2e/
+          retention-days: 7
+
   app-windows:
     name: App (unit tests) — Windows
     runs-on: windows-latest

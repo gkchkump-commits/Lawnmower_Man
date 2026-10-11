@@ -3,7 +3,8 @@
 // Responsibilities: single-instance app lifecycle, the transparent always-on-top avatar window,
 // app:// protocol serving dist/, CSP + permission + navigation hardening, tray menu, global
 // shortcuts, IPC for the window.lawnmower contract (docs/ARCHITECTURE.md §3), and supervision of
-// the Claude CLI session and the local voice server.
+// the Claude CLI session and the local voice server. The Tapo home camera (electron/tapo/,
+// docs/TAPO.md) is composed here too: its window, IPC channels, clip mount and Claude tools.
 //
 // Dev/test environment overrides (all optional):
 //   VITE_DEV_SERVER_URL        load the renderer from a loopback Vite dev server (ignored unless loopback)
@@ -13,8 +14,12 @@
 //   LAWNMOWER_AGENT_PERMISSION_MODE  e.g. "acceptEdits" for agent mode
 //   LAWNMOWER_DEBUG=1          debug logging;  LAWNMOWER_DEVTOOLS=1  allow DevTools when packaged
 //   LAWNMOWER_FORCE_CLICK_THROUGH=1  honour click-through on Linux too (no mouse-move forwarding there)
-//   LAWNMOWER_E2E=1            expose a few main-process helpers to scripts/electron-e2e.mjs
-//                              (globalThis.__lawnmowerE2E; main process only, never the renderer)
+//   LAWNMOWER_E2E=1            expose a few main-process helpers to scripts/electron-e2e.mjs and
+//                              scripts/tapo-e2e.mjs (globalThis.__lawnmowerE2E; main process only,
+//                              never the renderer)
+//   LAWNMOWER_TAPO_ALLOW_LOOPBACK=1  the home camera may be on 127.0.0.1 (the camera simulator)
+//   LAWNMOWER_TAPO_FAKE_DETECTOR=1   the camera window's worker uses the test person detector
+//   LAWNMOWER_GO2RTC           path of the go2rtc binary (default: resources/tapo/ or vendor/go2rtc/)
 //
 // These are honoured in packaged builds too, deliberately (scripts/electron-e2e.mjs --packaged
 // drives the installed app with them). Threat model: the environment of a desktop process is set
@@ -28,12 +33,17 @@ import {
   app,
   BrowserWindow,
   Menu,
+  MessageChannelMain,
+  Notification,
   dialog,
   Tray,
   globalShortcut,
   ipcMain,
   nativeImage,
+  powerMonitor,
+  powerSaveBlocker,
   protocol,
+  safeStorage,
   screen,
   session,
   shell,
@@ -48,33 +58,40 @@ import { VoiceSidecar, packagedVoiceHome, voiceVenvDirs } from './voice-sidecar.
 import { VoiceSetupRunner, setupLogPath, setupScriptPath } from './voice-setup.js';
 import { refreshPathFromRegistry } from './claude-path.js';
 import { CursorTracker } from './cursor-tracker.js';
-import { windowLayout, placeWindow, resizeAnchored, reclamp } from './window-manager.js';
+import { windowLayout, initialBounds, resizeAnchored, reclamp, defaultBounds, dragBounds, settleDrop, snapToEdges, resizeBounds, DRAG_MAX_MS } from './window-manager.js';
 import {
   APP_HOST,
   APP_ORIGIN,
   APP_SCHEME,
   buildCsp,
   decidePermission,
+  isAllowedRequestUrl,
   isSafeExternalUrl,
   isTrustedUrl,
+  NETWORK_URL_PATTERNS,
   validateDevServerUrl,
   withCspHeader,
 } from './security.js';
 import { createAppProtocolHandler } from './app-protocol.js';
 import {
+  validateAvatarWidth,
   validateBoolean,
+  validateCorner,
   validateNoArgs,
   validatePermissionResponse,
   validateSettingsPatch,
   validateSetupOptions,
   validateSizePreset,
   validateTurnId,
+  validateTurnOptions,
   validateTurnText,
 } from './ipc-validate.js';
 import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
 import { HotkeyManager } from './hotkeys.js';
 import { renderIconPng } from './icon.js';
 import { createLogger } from './logger.js';
+import { createTapo } from './tapo/index.js';
+import { validateCameraSettingsPatch } from './tapo/validate.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, '..');
@@ -93,12 +110,28 @@ const state = {
   /** @type {SettingsStore|null} */ settings: null,
   /** @type {ClaudeSession|null} */ claude: null,
   /** @type {VoiceSidecar|null} */ voice: null,
+  /** The home camera (electron/tapo/index.js createTapo). @type {ReturnType<typeof createTapo>|null} */ tapo: null,
+  /** The camera's Claude tools as last handed to the session (see syncClaudeTools). */
+  tapoToolsKey: '',
+  /** The tray's Home camera state as last shown (see rebuildTrayForTapo). */
+  tapoTrayKey: '',
   /** @type {VoiceSetupRunner|null} */ setup: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
   /** @type {CursorTracker|null} */ cursor: null,
   followCursor: true, // settings.avatar.followCursor, cached (read ~30 times a second)
   /** @type {ReturnType<typeof createLogger>} */ log: createLogger({ dir: null }),
   /** @type {boolean|null} */ ignoreMouse: null,
+  /**
+   * Window drag in progress (renderer pressed on the head): cursor and bounds at the press.
+   * @type {{ from: {x:number,y:number}, start: {x:number,y:number,width:number,height:number}, moving: boolean, timer: NodeJS.Timeout, startedAt: number }|null}
+   */
+  drag: null,
+  /**
+   * Resize by a corner grip in progress: the grip, cursor and bounds at the press, the work area
+   * it is held to, and the free avatar width reached so far.
+   * @type {{ corner: import('./window-manager.js').Corner, from: {x:number,y:number}, start: {x:number,y:number,width:number,height:number}, workArea: {x:number,y:number,width:number,height:number}, moving: boolean, avatarWidth: number|null, timer: NodeJS.Timeout, startedAt: number }|null}
+   */
+  resize: null,
   quitting: false,
   cleanedUp: false,
   rendererCrashes: 0,
@@ -106,6 +139,9 @@ const state = {
   claudeDetail: '',
   /** @type {{ kind: string, detail: string }|null} */ claudeProblem: null,
   /** @type {Record<string, any>|null} */ gpu: null,
+  /** Network requests the session refused (see setupSessionSecurity), the first 50. @type {string[]} */
+  blockedRequests: [],
+  /** @type {Set<string>} */ blockedOrigins: new Set(),
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -129,6 +165,8 @@ if (process.platform === 'win32') app.setAppUserModelId('com.lawnmower.avatar');
 if (process.env.LAWNMOWER_USER_DATA) app.setPath('userData', path.resolve(process.env.LAWNMOWER_USER_DATA));
 
 const gotLock = app.requestSingleInstanceLock();
+/** Started at login (--hidden, "Start Lawnmower Man with Windows"): the avatar stays in the tray until shown. */
+const START_HIDDEN = process.argv.includes('--hidden');
 
 /** Resolves once the app is initialised (used by the smoke test). */
 export const mainReady = gotLock
@@ -179,8 +217,47 @@ async function init() {
   state.followCursor = settings.get().avatar.followCursor !== false;
 
   setupSessionSecurity(session.defaultSession);
-  protocol.handle(APP_SCHEME, createAppProtocolHandler({ root: distDir, host: APP_HOST, csp, log }));
+  // app:// serves dist/ and, under /__clips/, the home camera's clips and snapshots (Range for
+  // seeking). The handler reads `mounts` on every request: filled right after createTapo() below,
+  // in the same synchronous block, so the camera window (opened on the next tick) loads through it.
+  /** @type {import('./app-protocol.js').Mount[]} */
+  const appMounts = [];
+  protocol.handle(APP_SCHEME, createAppProtocolHandler({ root: distDir, host: APP_HOST, csp, log, mounts: appMounts }));
   Menu.setApplicationMenu(null);
+
+  // --- Home camera (Tapo C211, docs/TAPO.md; contract §3.2) ---
+  // Its own window, IPC channels (lm:tapo:*), notifications and the Claude tools. It talks to the
+  // camera only while settings.tapo.enabled is on and the camera is set up.
+  const tapo = createTapo({
+    electron: { app, ipcMain, safeStorage, Notification, nativeImage, shell, screen, BrowserWindow, MessageChannelMain, dialog, powerSaveBlocker, powerMonitor },
+    settings,
+    log,
+    userData,
+    appRoot,
+    resourcesPath: process.resourcesPath,
+    isPackaged: app.isPackaged,
+    devServerUrl,
+    trust,
+    env: process.env,
+    appVersion: app.getVersion(),
+    preloadCamera: path.join(here, 'preload-camera.cjs'),
+    // (state.tapo: the camera window is looked up when a call arrives, not now)
+    isTrustedSender: (event, kinds) => {
+      assertSender(event, kinds);
+    },
+    getAvatarWindow: () => state.win,
+    sendToAvatar: sendToRenderer,
+    showAvatar: () => showWindow(false),
+    icon: appIcon(),
+  });
+  state.tapo = tapo;
+  appMounts.push(...tapo.protocolMounts());
+  Object.assign(trayActions, tapo.trayActions);
+  // connection and armed state change on their own (status is coalesced to ≤ 4 a second)
+  tapo.service.on('status', () => {
+    rebuildTrayForTapo();
+    syncClaudeTools();
+  });
 
   // --- Claude ---
   const claude = new ClaudeSession({
@@ -189,6 +266,13 @@ async function init() {
     onSessionId: (id) => settings.update({ claude: { lastSessionId: id } }),
     cliPath: process.env.LAWNMOWER_CLAUDE_CLI || '',
     agentPermissionMode: process.env.LAWNMOWER_AGENT_PERMISSION_MODE || '',
+    // The home camera's tools (contract §10): in-process over the control channel; when a CLI
+    // does not take in-process servers (system/init without them), the session switches to the
+    // server's loopback HTTP endpoint (startHttp(), --mcp-config <userData>/mcp/…) by itself.
+    getSdkMcpServers: () => (state.tapo ? state.tapo.mcpServers() : []),
+    getToolPermissions: () => (state.tapo ? state.tapo.toolPermissions() : { allow: [], deny: [] }),
+    getPersonaContext: () => (state.tapo ? state.tapo.personaContext() : {}),
+    mcpDir: path.join(userData, 'mcp'),
     log,
   });
   claude.on('event', (ev) => {
@@ -204,6 +288,7 @@ async function init() {
     }
   });
   state.claude = claude;
+  state.tapoToolsKey = claudeToolsKey();
 
   // --- Voice ---
   // Packaged: the code ships in resources/voice, but the venv (and models) live in a per-user
@@ -292,14 +377,16 @@ async function init() {
 
 /** Stop child processes and release OS resources (bounded so quitting never hangs). */
 async function shutdown() {
+  endDrag();
   state.cursor?.stop();
   state.setup?.dispose(); // the setup window itself keeps running
   try {
     globalShortcut.unregisterAll();
   } catch { /* ignore */ }
   const timeout = new Promise((r) => setTimeout(r, 5000));
+  // tapo.stop() is bounded (≈ 4 s): Stop the motor, Unsubscribe, finish the clip, kill go2rtc
   await Promise.race([
-    Promise.allSettled([state.claude?.stop(), state.voice?.stop()]),
+    Promise.allSettled([state.claude?.stop(), state.voice?.stop(), state.tapo?.stop()]),
     timeout,
   ]);
   try {
@@ -314,25 +401,47 @@ async function shutdown() {
 
 /** @param {import('electron').Session} ses */
 function setupSessionSecurity(ses) {
-  // CSP for documents served over http (dev server); app:// responses carry it themselves.
+  // CSP for documents served over http (dev server) and for everything our own origin serves:
+  // a worker takes its policy from its script's response (app:// responses carry it themselves).
   ses.webRequest.onHeadersReceived((details, callback) => {
-    if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') {
+    if (details.resourceType === 'mainFrame' || details.resourceType === 'subFrame' || isTrustedUrl(details.url, trust)) {
       callback({ responseHeaders: withCspHeader(details.responseHeaders, csp) });
     } else {
       callback({ responseHeaders: details.responseHeaders });
     }
   });
+  // No request leaves the PC: network requests go to loopback only (the voice server, the dev
+  // server). Behind the CSP, this also stops a context without one (a library's telemetry).
+  ses.webRequest.onBeforeRequest({ urls: [...NETWORK_URL_PATTERNS] }, (details, callback) => {
+    const ok = isAllowedRequestUrl(details.url);
+    if (!ok) noteBlockedRequest(details.url);
+    callback({ cancel: !ok });
+  });
+  // The camera (media with video) is allowed only while settings.camera.enabled is on.
+  const policy = () => ({ ...trust, camera: !!state.settings?.get().camera?.enabled });
   ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
     const d = /** @type {any} */ (details);
-    const ok = decidePermission(permission, { url: d.requestingUrl, mediaTypes: d.mediaTypes }, trust);
-    if (!ok) state.log('info', `[security] denied permission "${permission}" for ${d.requestingUrl}`);
+    const ok = decidePermission(permission, { url: d.requestingUrl, mediaTypes: d.mediaTypes }, policy());
+    if (!ok) state.log('info', `[security] denied permission "${permission}"${Array.isArray(d.mediaTypes) ? ` (${d.mediaTypes.join('+')})` : ''} for ${d.requestingUrl}`);
     callback(ok);
   });
   ses.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
     const d = /** @type {any} */ (details) || {};
-    return decidePermission(permission, { url: requestingOrigin || d.requestingUrl, mediaType: d.mediaType }, trust);
+    return decidePermission(permission, { url: requestingOrigin || d.requestingUrl, mediaType: d.mediaType }, policy());
   });
   if (typeof ses.setDevicePermissionHandler === 'function') ses.setDevicePermissionHandler(() => false);
+}
+
+/** Remember (bounded) and log, once per origin, a request the session refused. @param {string} url */
+function noteBlockedRequest(url) {
+  let origin = url;
+  try {
+    origin = new URL(url).origin;
+  } catch { /* keep the raw string */ }
+  if (state.blockedRequests.length < 50) state.blockedRequests.push(url.slice(0, 300));
+  if (state.blockedOrigins.has(origin)) return;
+  state.blockedOrigins.add(origin);
+  state.log('warn', `[security] blocked a network request to ${origin}`);
 }
 
 /** Block navigation away from the app, new windows and webviews. @param {import('electron').WebContents} contents */
@@ -363,9 +472,9 @@ function appIcon() {
 
 function createWindow() {
   const s = /** @type {SettingsStore} */ (state.settings).get();
-  const primary = screen.getPrimaryDisplay();
-  const layout = windowLayout(s.window.sizePreset, s.window.showChat, primary.workArea);
-  const bounds = placeWindow({ saved: s.window.position, size: layout, displays: screen.getAllDisplays(), primary });
+  const { bounds } = initialBounds({
+    saved: s.window.position, preset: s.window.sizePreset, showChat: s.window.showChat, avatarWidth: s.window.avatarWidth, displays: screen.getAllDisplays(), primary: screen.getPrimaryDisplay(),
+  });
 
   const win = new BrowserWindow({
     ...bounds,
@@ -398,7 +507,8 @@ function createWindow() {
   if (s.window.alwaysOnTop) win.setAlwaysOnTop(true, 'floating');
 
   win.once('ready-to-show', () => {
-    win.show();
+    // started with Windows ("Start Lawnmower Man with Windows", Home camera): stay in the tray
+    if (!START_HIDDEN) win.show();
     applyMouseIgnore(false);
     syncCursorTracking();
   });
@@ -408,21 +518,35 @@ function createWindow() {
     moveTimer = setTimeout(savePosition, 400);
   });
   const onVisibility = () => {
+    endDrag();
+    endResize();
     rebuildTray();
     syncCursorTracking();
   };
   win.on('show', onVisibility);
   win.on('hide', onVisibility);
-  win.on('minimize', syncCursorTracking);
+  win.on('minimize', () => {
+    endDrag();
+    endResize();
+    syncCursorTracking();
+  });
   win.on('restore', syncCursorTracking);
   win.on('closed', () => {
+    endDrag();
+    endResize();
     if (state.win === win) state.win = null;
     syncCursorTracking();
+    // The avatar is the app: closing it quits, as before the home camera, whose hidden window
+    // (it hosts the security worker) would otherwise keep 'window-all-closed' from firing.
+    if (!state.quitting) app.quit();
   });
 
   win.webContents.on('render-process-gone', (_e, details) => {
     state.log('error', `[main] renderer gone: ${details.reason} (exit ${details.exitCode})`);
-    // Fail safe: a click-through window with no live renderer could never turn interactive again.
+    // Fail safe: a click-through window with no live renderer could never turn interactive again
+    // (and a drag it started could never end).
+    endDrag();
+    endResize();
     applyMouseIgnore(false);
     if (state.quitting || details.reason === 'clean-exit') return;
     if (++state.rendererCrashes <= 3) setTimeout(() => loadRenderer(win), 1000);
@@ -491,7 +615,8 @@ function applyMouseIgnore(wantIgnore) {
   if (!win || win.isDestroyed()) return;
   // Without forwarded mouse moves (Linux) the renderer could never turn interactivity back on.
   const allowed = CLICK_THROUGH_SUPPORTED && !!state.settings?.get().window.clickThrough;
-  const ignore = allowed && wantIgnore;
+  // never click-through mid-drag or mid-resize: the button-up must reach the renderer
+  const ignore = allowed && wantIgnore && !state.drag && !state.resize;
   if (state.ignoreMouse === ignore) return;
   state.ignoreMouse = ignore;
   win.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
@@ -505,9 +630,167 @@ function cursorTrackingWanted() {
 }
 
 function syncCursorTracking() {
+  notifyVisibility();
   if (!state.cursor) return;
   if (cursorTrackingWanted()) state.cursor.start();
   else state.cursor.stop();
+}
+
+/**
+ * The renderer pressed the primary button on the head: follow the global cursor (~60 Hz) until
+ * it reports the release. Moving starts only past DRAG_THRESHOLD, so a click stays a click.
+ */
+function startDrag() {
+  const win = state.win;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+  if (state.settings?.get().window.lockPosition) return;
+  endDrag();
+  endResize();
+  applyMouseIgnore(false);
+  const drag = {
+    from: screen.getCursorScreenPoint(),
+    start: win.getBounds(),
+    moving: false,
+    startedAt: Date.now(),
+    timer: setInterval(() => stepDrag(), 16),
+  };
+  state.drag = drag;
+}
+
+function stepDrag() {
+  const drag = state.drag;
+  const win = state.win;
+  if (!drag) return;
+  if (!win || win.isDestroyed() || Date.now() - drag.startedAt > DRAG_MAX_MS) {
+    endDrag();
+    return;
+  }
+  const raw = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), drag.moving);
+  if (!raw) return;
+  drag.moving = true;
+  const next = snapWanted() ? snapToEdges(raw, screen.getAllDisplays()) : raw;
+  const cur = win.getBounds();
+  // setBounds (not setPosition): on Windows with fractional display scaling setPosition can
+  // grow the window by a pixel per call; fixed width/height keep the 2:3 avatar exact.
+  if (cur.x !== next.x || cur.y !== next.y || cur.width !== next.width || cur.height !== next.height) win.setBounds(next);
+}
+
+/** settings.window.snapToEdges: lock flush against screen edges and corners while dragging. */
+function snapWanted() {
+  return state.settings?.get().window.snapToEdges !== false;
+}
+
+/** Pointer released (or the drag was abandoned): settle fully onto a display and save. */
+function endDrag() {
+  const drag = state.drag;
+  if (!drag) return;
+  clearInterval(drag.timer);
+  state.drag = null;
+  const win = state.win;
+  if (!drag.moving || !win || win.isDestroyed()) return;
+  stepDragFinal(win, drag);
+}
+
+/** @param {import('electron').BrowserWindow} win @param {NonNullable<typeof state.drag>} drag */
+function stepDragFinal(win, drag) {
+  const raw = dragBounds(drag.start, drag.from, screen.getCursorScreenPoint(), true) || win.getBounds();
+  const last = snapWanted() ? snapToEdges(raw, screen.getAllDisplays()) : raw;
+  const next = settleDrop(last, screen.getAllDisplays(), screen.getPrimaryDisplay());
+  win.setBounds(next);
+  applyWindowLayout(); // dropped on a display of another size: the 2:3 avatar + chat must fit it
+  savePosition();
+}
+
+/**
+ * The renderer pressed a corner grip: follow the global cursor (~60 Hz) and resize from that
+ * corner, the opposite one staying put, until it reports the release. Moving starts only past
+ * DRAG_THRESHOLD, so a click on a grip does nothing.
+ * @param {import('./window-manager.js').Corner} corner
+ */
+function startResize(corner) {
+  const win = state.win;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return;
+  if (state.settings?.get().window.lockPosition) return;
+  endDrag();
+  endResize();
+  applyMouseIgnore(false);
+  const start = win.getBounds();
+  state.resize = {
+    corner,
+    from: screen.getCursorScreenPoint(),
+    start,
+    workArea: screen.getDisplayMatching(start).workArea,
+    moving: false,
+    avatarWidth: /** @type {number|null} */ (null),
+    startedAt: Date.now(),
+    timer: setInterval(() => stepResize(), 16),
+  };
+  // Some window managers ignore programmatic resizes of non-resizable windows (see
+  // applyWindowLayout); resizable only while the grip is held.
+  win.setResizable(true);
+}
+
+function stepResize() {
+  const r = state.resize;
+  const win = state.win;
+  if (!r) return;
+  if (!win || win.isDestroyed() || Date.now() - r.startedAt > DRAG_MAX_MS) {
+    endResize();
+    return;
+  }
+  const next = resizeBounds(r.start, r.corner, r.from, screen.getCursorScreenPoint(), r.workArea, r.moving);
+  if (!next) return;
+  r.moving = true;
+  r.avatarWidth = next.avatarWidth;
+  const cur = win.getBounds();
+  const b = next.bounds;
+  if (cur.x !== b.x || cur.y !== b.y || cur.width !== b.width || cur.height !== b.height) win.setBounds(b);
+}
+
+/** Grip released (or the resize was abandoned): keep the new size as settings.window.avatarWidth. */
+function endResize() {
+  const r = state.resize;
+  if (!r) return;
+  clearInterval(r.timer);
+  state.resize = null;
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  if (r.moving) stepResizeFinal(win, r);
+  win.setResizable(false);
+}
+
+/** @param {import('electron').BrowserWindow} win @param {NonNullable<typeof state.resize>} r */
+function stepResizeFinal(win, r) {
+  const last = resizeBounds(r.start, r.corner, r.from, screen.getCursorScreenPoint(), r.workArea, true);
+  if (last) {
+    r.avatarWidth = last.avatarWidth;
+    win.setBounds(last.bounds);
+  }
+  win.setBounds(settleDrop(win.getBounds(), screen.getAllDisplays(), screen.getPrimaryDisplay()));
+  savePosition();
+  // the settings change re-applies the layout: the same size, so nothing moves
+  if (r.avatarWidth !== null) state.settings?.update({ window: { avatarWidth: r.avatarWidth } });
+}
+
+/** "Reset position": back to the default corner of the display the window is on. */
+function resetPosition() {
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  endDrag();
+  endResize();
+  const b = win.getBounds();
+  win.setBounds(defaultBounds({ width: b.width, height: b.height }, screen.getDisplayMatching(b).workArea));
+  savePosition();
+}
+
+/**
+ * Tell the renderer whether the window can be seen: the camera pauses (and is released) while it
+ * cannot. With backgroundThrottling off, document.visibilityState always says "visible".
+ */
+function notifyVisibility() {
+  const win = state.win;
+  if (!win || win.isDestroyed()) return;
+  sendToRenderer('lm:window:visibility', { visible: win.isVisible() && !win.isMinimized() });
 }
 
 function savePosition() {
@@ -523,13 +806,18 @@ function applyWindowLayout() {
   const s = /** @type {SettingsStore} */ (state.settings).get().window;
   const cur = win.getBounds();
   const display = screen.getDisplayMatching(cur);
-  const layout = windowLayout(s.sizePreset, s.showChat, display.workArea);
+  const layout = windowLayout(s.sizePreset, s.showChat, display.workArea, s.avatarWidth);
   if (cur.width === layout.width && cur.height === layout.height) return;
+  // a corner grip is being dragged: it owns the size until the release
+  if (state.resize) return;
   const next = resizeAnchored(cur, layout, display.workArea);
   // Some window managers ignore programmatic resizes of non-resizable windows.
   win.setResizable(true);
   win.setBounds(next);
   win.setResizable(false);
+  // resized mid-drag (Ctrl+wheel, the chat hotkey): the drag goes on with the new size
+  const drag = state.drag;
+  if (drag) drag.start = { x: drag.start.x + next.x - cur.x, y: drag.start.y + next.y - cur.y, width: next.width, height: next.height };
 }
 
 /** Work area of the display the window is on (primary before it exists). */
@@ -544,6 +832,7 @@ function reclampWindow() {
   if (!win || win.isDestroyed()) return;
   const next = reclamp(win.getBounds(), screen.getAllDisplays(), screen.getPrimaryDisplay());
   win.setBounds(next);
+  applyWindowLayout(); // moved to another display, or this one's resolution / scaling changed
 }
 
 /**
@@ -552,7 +841,11 @@ function reclampWindow() {
  */
 function onSettingsChanged(next, prev) {
   sendToRenderer('lm:settings:changed', next);
+  sendToCameraWindow('lm:settings:changed', next);
   const changed = (/** @type {keyof import('./settings.js').Settings} */ group) => JSON.stringify(next[group]) !== JSON.stringify(prev[group]);
+  const tapoChanged = changed('tapo') || changed('security');
+  // turns the camera window on/off, reconnects, arms (exit delay), applies the window options
+  if (tapoChanged) state.tapo?.applySettings(next, prev);
 
   const { lastSessionId: _a, ...claudeNext } = next.claude;
   const { lastSessionId: _b, ...claudePrev } = prev.claude;
@@ -572,9 +865,38 @@ function onSettingsChanged(next, prev) {
     }
     if (next.window.skipTaskbar !== prev.window.skipTaskbar) win.setSkipTaskbar(next.window.skipTaskbar);
     if (next.window.clickThrough !== prev.window.clickThrough && !next.window.clickThrough) applyMouseIgnore(false);
-    if (next.window.sizePreset !== prev.window.sizePreset || next.window.showChat !== prev.window.showChat) applyWindowLayout();
+    if (next.window.sizePreset !== prev.window.sizePreset || next.window.avatarWidth !== prev.window.avatarWidth
+      || next.window.showChat !== prev.window.showChat) applyWindowLayout();
   }
-  if (changed('window') || changed('claude') || changed('hotkeys')) rebuildTray();
+  if (changed('window') || changed('claude') || changed('hotkeys') || changed('camera') || tapoChanged) rebuildTray();
+  // the camera's tools, their permissions (security.claudeSee/claudeMove) and the persona's camera
+  // paragraph are part of the CLI's spawn key: a change restarts it after the running turn
+  if (tapoChanged) syncClaudeTools();
+}
+
+/** What the Claude CLI is given of the home camera (server names, permissions, persona context). */
+function claudeToolsKey() {
+  const t = state.tapo;
+  if (!t) return '';
+  return JSON.stringify([t.mcpServers().map((sv) => sv.name), t.toolPermissions(), t.personaContext()]);
+}
+
+/**
+ * Hand the camera's tools to the Claude session again when they changed: also on status changes,
+ * because they depend on more than settings (a saved password makes the camera "configured").
+ */
+function syncClaudeTools() {
+  const key = claudeToolsKey();
+  if (key === state.tapoToolsKey) return;
+  state.tapoToolsKey = key;
+  state.claude?.applySettings();
+}
+
+/** Rebuild the tray when the home camera's tray state (connection, armed, …) changed. */
+function rebuildTrayForTapo() {
+  const key = state.tapo ? JSON.stringify(state.tapo.trayState()) : '';
+  if (key === state.tapoTrayKey) return;
+  rebuildTray();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -598,13 +920,18 @@ function createTray() {
   rebuildTray();
 }
 
+/** Tray menu actions; createTapo() adds tapoShow / tapoArm / tapoOpenClips (the Home camera submenu). */
 const trayActions = {
   toggleVisible,
   setAlwaysOnTop: (/** @type {boolean} */ on) => state.settings?.update({ window: { alwaysOnTop: on } }),
   setClickThrough: (/** @type {boolean} */ on) => state.settings?.update({ window: { clickThrough: on } }),
   setShowChat: (/** @type {boolean} */ on) => state.settings?.update({ window: { showChat: on } }),
   setMode: (/** @type {string} */ mode) => state.settings?.update({ claude: { mode } }),
+  // (a preset replaces a free size from resizing: see applyPatch)
   setSizePreset: (/** @type {string} */ preset) => state.settings?.update({ window: { sizePreset: preset } }),
+  setLockPosition: (/** @type {boolean} */ on) => state.settings?.update({ window: { lockPosition: on } }),
+  resetPosition: () => resetPosition(),
+  setCamera: (/** @type {boolean} */ on) => state.settings?.update({ camera: { enabled: on } }),
   newConversation: () => {
     state.claude?.reset().catch((err) => state.log('warn', `[claude] reset failed: ${err.message}`));
   },
@@ -627,8 +954,29 @@ const trayActions = {
   openLogs: () => {
     if (state.log.dir) shell.openPath(state.log.dir).catch(() => {});
   },
-  quit: () => app.quit(),
+  quit: () => confirmQuit(),
 };
+
+/**
+ * Quit — but ask first while the home camera is armed: after quitting nothing watches it, and
+ * no alert or clip comes until the app runs again.
+ */
+async function confirmQuit() {
+  if (state.tapo?.isArmed?.() && process.env.LAWNMOWER_E2E !== '1') {
+    const r = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Quit anyway', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: 'Lawnmower Man',
+      message: 'The home camera is armed.',
+      detail: 'If Lawnmower Man quits, nothing watches the camera: no alerts and no clips until it runs again.',
+    }).catch(() => ({ response: 0 }));
+    if (r.response !== 0) return;
+  }
+  app.quit();
+}
 
 function rebuildTray() {
   const tray = state.tray;
@@ -645,7 +993,9 @@ function rebuildTray() {
     voiceSetup: state.setup ? state.setup.state.state : 'idle',
     claudeProblem: state.claudeProblem ? state.claudeProblem.kind : '',
     hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
+    tapo: state.tapo ? state.tapo.trayState() : undefined,
   };
+  state.tapoTrayKey = st.tapo ? JSON.stringify(st.tapo) : '';
   try {
     tray.setContextMenu(Menu.buildFromTemplate(/** @type {any} */ (buildTrayTemplate(/** @type {any} */ (st), /** @type {any} */ (trayActions)))));
     tray.setToolTip(trayTooltip(/** @type {any} */ (st)));
@@ -668,28 +1018,59 @@ function sendToRenderer(channel, payload) {
   }
 }
 
-/** Only our own window/page may call us. @param {import('electron').IpcMainEvent|import('electron').IpcMainInvokeEvent} event */
-function assertTrustedSender(event) {
-  const win = state.win;
-  const frameUrl = event.senderFrame ? event.senderFrame.url : '';
-  if (!win || event.sender !== win.webContents || !isTrustedUrl(frameUrl, trust)) {
-    throw new Error('IPC from an untrusted sender was rejected');
+/** The home camera window, while it exists (it lives hidden while the feature is on). @param {string} channel @param {unknown} payload */
+function sendToCameraWindow(channel, payload) {
+  const wc = state.tapo?.cameraWindow()?.webContents;
+  if (!wc || wc.isDestroyed() || wc.isCrashed()) return; // a crashed page reloads and reads settings again
+  try {
+    wc.send(channel, payload);
+  } catch (err) {
+    state.log('warn', `[ipc] send ${channel} to the camera window failed: ${/** @type {Error} */ (err).message}`);
   }
 }
 
-/** @param {string} channel @param {(...args: any[]) => any} fn */
-function handle(channel, fn) {
-  ipcMain.handle(channel, async (event, ...args) => {
-    assertTrustedSender(event);
-    return fn(...args);
-  });
+/** @typedef {'avatar'|'camera'} SenderKind */
+
+/**
+ * Only our own windows and pages may call us: `kinds` says which — 'avatar' is the avatar window,
+ * 'camera' the Home camera window — and the calling frame must show our own page. Returns the
+ * kind of the sender; throws for anyone else.
+ * @param {import('electron').IpcMainEvent|import('electron').IpcMainInvokeEvent} event
+ * @param {SenderKind[]} [kinds]
+ * @returns {SenderKind}
+ */
+function assertSender(event, kinds = ['avatar']) {
+  const frameUrl = event.senderFrame ? event.senderFrame.url : '';
+  if (isTrustedUrl(frameUrl, trust)) {
+    const win = state.win;
+    if (kinds.includes('avatar') && win && !win.isDestroyed() && event.sender === win.webContents) return 'avatar';
+    const cam = state.tapo?.cameraWindow();
+    if (kinds.includes('camera') && cam && !cam.isDestroyed() && event.sender === cam.webContents) return 'camera';
+  }
+  throw new Error('IPC from an untrusted sender was rejected');
 }
 
-/** @param {string} channel @param {(...args: any[]) => void} fn */
+/**
+ * An invoke handler for the windows in `kinds` (default: the avatar window only).
+ * @param {string} channel @param {(...args: any[]) => any} fn @param {SenderKind[]} [kinds]
+ */
+function handle(channel, fn, kinds = ['avatar']) {
+  handleFrom(channel, (_who, ...args) => fn(...args), kinds);
+}
+
+/**
+ * Like handle(), and `fn` is told which window called (its first argument).
+ * @param {string} channel @param {(who: SenderKind, ...args: any[]) => any} fn @param {SenderKind[]} kinds
+ */
+function handleFrom(channel, fn, kinds) {
+  ipcMain.handle(channel, async (event, ...args) => fn(assertSender(event, kinds), ...args));
+}
+
+/** A send (fire-and-forget) handler, from the avatar window only. @param {string} channel @param {(...args: any[]) => void} fn */
 function on(channel, fn) {
   ipcMain.on(channel, (event, ...args) => {
     try {
-      assertTrustedSender(event);
+      assertSender(event, ['avatar']);
       fn(...args);
     } catch (err) {
       state.log('warn', `[ipc] ${channel}: ${/** @type {Error} */ (err).message}`);
@@ -702,7 +1083,7 @@ function registerIpc() {
   const voice = /** @type {VoiceSidecar} */ (state.voice);
   const settings = /** @type {SettingsStore} */ (state.settings);
 
-  handle('lm:claude:send', (text) => claude.send(validateTurnText(text)));
+  handle('lm:claude:send', (text, options) => claude.send(validateTurnText(text), validateTurnOptions(options)));
   handle('lm:claude:cancel', (turnId) => claude.cancel(validateTurnId(turnId)));
   handle('lm:claude:interrupt', () => claude.interrupt());
   handle('lm:claude:reset', () => claude.reset());
@@ -726,8 +1107,13 @@ function registerIpc() {
     voice.restart();
   });
 
-  handle('lm:settings:get', () => settings.get());
-  handle('lm:settings:set', (patch) => settings.update(validateSettingsPatch(patch)).settings);
+  // The avatar window and the Home camera window; the camera window may change only its own
+  // groups (tapo, security).
+  handle('lm:settings:get', () => settings.get(), ['avatar', 'camera']);
+  handleFrom('lm:settings:set', (who, patch) => {
+    const p = who === 'camera' ? validateCameraSettingsPatch(patch) : patch;
+    return settings.update(validateSettingsPatch(p)).settings;
+  }, ['avatar', 'camera']);
 
   handle('lm:app:info', () => {
     const s = settings.get();
@@ -737,20 +1123,39 @@ function registerIpc() {
       electron: process.versions.electron,
       chrome: process.versions.chrome,
       // Extensions beyond the contract (renderer may ignore):
-      layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea()),
+      layout: windowLayout(s.window.sizePreset, s.window.showChat, currentWorkArea(), s.window.avatarWidth),
       clickThroughSupported: CLICK_THROUGH_SUPPORTED,
+      visible: !!state.win && !state.win.isDestroyed() && state.win.isVisible() && !state.win.isMinimized(),
       hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
       gpu: state.gpu,
       logFile: state.log.file,
     };
-  });
+  }, ['avatar', 'camera']);
 
   on('lm:window:set-ignore-mouse', (ignore) => applyMouseIgnore(validateBoolean(ignore, 'ignore')));
   on('lm:window:set-size-preset', (preset) => settings.update({ window: { sizePreset: validateSizePreset(preset) } }));
   on('lm:window:set-always-on-top', (onTop) => settings.update({ window: { alwaysOnTop: validateBoolean(onTop, 'alwaysOnTop') } }));
+  on('lm:window:drag-start', (...args) => {
+    validateNoArgs(args);
+    startDrag();
+  });
+  on('lm:window:drag-end', (...args) => {
+    validateNoArgs(args);
+    endDrag();
+  });
+  on('lm:window:resize-start', (corner) => startResize(validateCorner(corner)));
+  on('lm:window:resize-end', (...args) => {
+    validateNoArgs(args);
+    endResize();
+  });
+  on('lm:window:set-avatar-width', (w) => settings.update({ window: { avatarWidth: validateAvatarWidth(w) } }));
+  on('lm:window:reset-position', (...args) => {
+    validateNoArgs(args);
+    resetPosition();
+  });
   on('lm:window:minimize', () => state.win?.minimize());
   on('lm:window:hide', () => state.win?.hide());
-  on('lm:window:quit', () => app.quit());
+  on('lm:window:quit', () => { confirmQuit(); });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -852,7 +1257,7 @@ function logGpuInfo() {
 }
 
 /** Internals for the smoke test only. */
-export const __test = { state, csp, applyMouseIgnore, applyWindowLayout, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
+export const __test = { state, csp, assertSender, applyMouseIgnore, applyWindowLayout, startDrag, stepDrag, endDrag, startResize, stepResize, endResize, resetPosition, onSettingsChanged, trayActions, syncCursorTracking, runVoiceSetup, retryClaude, voiceInfo, openSetupLog };
 
 // scripts/electron-e2e.mjs (also against the packaged app): main-process helpers it can reach
 // through Playwright's app.evaluate(). Only with LAWNMOWER_E2E=1 (see the threat model above).
@@ -866,5 +1271,11 @@ if (process.env.LAWNMOWER_E2E === '1') {
     voiceSetup: (/** @type {{ cpu?: boolean }} */ o) => runVoiceSetup({ cpu: !!(o && o.cpu) }),
     voiceInfo: () => voiceInfo(),
     voiceSetupState: () => (state.setup ? state.setup.state : null),
+    blockedRequests: () => state.blockedRequests.slice(),
+    // The home camera's hooks (status, notifications, setPassword, clipsDir, workerStats,
+    // go2rtcPid, …): a getter, because this object exists before init() creates the camera.
+    get tapo() {
+      return state.tapo ? state.tapo.e2e : null;
+    },
   };
 }

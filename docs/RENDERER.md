@@ -57,6 +57,13 @@ src/styles/app.css       the glass UI
   `src/app/setup-help.js`); a voice setup that has to be run by hand shows its command the same way.
 * Hands-free (setting): a VAD listens whenever the conversation is idle and pauses while the
   avatar thinks or speaks (half-duplex, so it never hears itself).
+* "Hey Jade" (setting, [WAKE.md](WAKE.md)): a half-duplex VAD and a full-duplex wake-word
+  detector. The Mic's tap hands every 16 kHz block to the "Jade wake word" utility process
+  (`src/wake/port.js`, a MessagePort), whatever the mode and also while she speaks, so her name can
+  interrupt her; it also keeps the last 3 s in memory for the check of her name. The VAD still
+  runs only during a capture. While the wake word is on it replaces hands-free (her name is
+  needed); the capture after her name, the follow-up window and "look and talk" go through
+  `controller.wakeWordCapture()`, and `src/wake/machine.js` holds the states (`body[data-wake]`).
 * After 10 idle minutes the avatar dozes (`sleep` state); any activity wakes it.
 
 ## Lip-sync
@@ -542,6 +549,8 @@ pixels reach the desktop; the head, the panel and cards stay clickable.
 | `claude=missing` / `claude=auth` | first run without a Claude CLI / with a CLI that is not logged in: the setup cards; `claudeRetries=N` makes the first N Retry clicks fail |
 | `layout=electron` | use the desktop window's layout rule |
 | `bg=desk` | a colourful backdrop to judge transparency |
+| `wake=missing` / `error` / `basic` / `blocked` | "Hey Jade" with the wake-word engine missing or failing, on the basic model only (the extra one "downloading"), or with Windows blocking the microphone (`src/bridge/mock-wake.js`) |
+| `wakeMock=auto` | the mock wake-word spotter fires on every speech onset (demos); tests use `window.__wakeMock.arm()` / `.hit()`, and `__app.bridge.__mock.sttQueue([...])` sets what the fake `/stt` answers, call by call |
 
 The mock streams canned replies: a greeting ("hello"), a code example ("code"), a Markdown
 showcase ("markdown"), a long answer ("story", "explain"), a Bash tool call that waits for the

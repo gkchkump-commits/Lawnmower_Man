@@ -126,6 +126,20 @@ export const DEFAULT_SETTINGS = Object.freeze({
     startAtLoginOffered: false,
   },
   // ---- end Home camera -----------------------------------------------------------------------
+  // ---- "Hey Jade" (wake word; docs/WAKE.md) ----------------------------------------------------
+  // Mirror of electron/settings.js (contract-wake §4.1); main validates every value.
+  wake: {
+    enabled: false, // listen for "Hey Jade" (the microphone stays open while the app runs)
+    phrase: 'hey-jade', // 'hey-jade' | 'jade' ('jade' also accepts "Jade, …" at the very start)
+    sensitivity: 'normal', // 'low' | 'normal' | 'high'
+    followUpSec: 6, // 0 (off) or 4..15: talk again without her name after she answers
+    bargeIn: true, // "Hey Jade" while she talks stops her
+    sounds: 'start', // 'off' | 'start' | 'start-end'
+    whileHidden: true, // keep listening while the window is hidden in the tray
+    transcriptFallback: false, // only without the wake-word engine: Whisper checks speech for her name (GPU)
+    explained: false, // the one-time explainer was shown (set by the renderer)
+  },
+  // ---- end "Hey Jade" ----------------------------------------------------------------------------
 });
 
 /** @param {unknown} v @returns {v is Record<string, any>} */

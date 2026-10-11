@@ -57,3 +57,13 @@ describe('docs ↔ settings drawer', () => {
     expect(fields.find((f) => f.path === 'avatar.pack')?.emptyValue).toBe('reference');
   });
 });
+
+describe('"Hey Jade": what the drawer says leaves the PC', () => {
+  it('the hint says that her name sends your words to Claude (never "nothing leaves this PC")', async () => {
+    const { WAKE_HINT } = await import('../../../src/ui/settings-drawer.js');
+    const field = SECTIONS.flatMap((s) => s.fields || []).find((f) => f.path === 'wake.enabled');
+    expect(field?.hint).toBe(WAKE_HINT);
+    expect(WAKE_HINT).toMatch(/nothing is recorded or sent until you say her name \(then your words go to Claude\)/);
+    expect(WAKE_HINT).not.toMatch(/nothing leaves this PC/);
+  });
+});

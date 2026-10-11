@@ -3,7 +3,9 @@
 // the whole main-process stack end to end: window flags, app:// + CSP, the preload bridge
 // (window.lawnmower), settings IPC, a Claude turn streamed back to the renderer, voice status,
 // the Home camera window (its own preload, sandbox, settings limits; no camera needed),
-// a complete renderer boot without console errors, and a clean shutdown of child processes.
+// "Hey Jade" (the "Jade wake word" utility process with the real sherpa-onnx addon: off by
+// default, ready when turned on, gone when turned off), a complete renderer boot without console
+// errors, and a clean shutdown of child processes.
 //
 //   node scripts/electron-e2e.mjs                 # fake Claude CLI (free, deterministic)
 //   node scripts/electron-e2e.mjs --live          # the real logged-in `claude` CLI (one tiny turn)
@@ -19,13 +21,16 @@
 // pinned 1.9.14)}, the camera page and the person detector model in app.asar, the per-user voice folder the sidecar looks
 // in, and — through the real "Set up local voice…" launcher, in -CheckOnly mode — that the bundled
 // setup script reports exactly that folder (--no-setup-check skips it; on Linux without a terminal
-// emulator, --fake-terminal puts a stand-in "xterm" on PATH so the script really runs). The fake CLI and the
+// emulator, --fake-terminal puts a stand-in "xterm" on PATH so the script really runs), and the
+// wake-word engine in resources/wake/ (this platform's addon, model B, the VAD and the licences,
+// byte for byte the pinned files; never the zh-en model). The fake CLI and the
 // throwaway userData folder reach the packaged app through LAWNMOWER_CLAUDE_CLI /
 // LAWNMOWER_USER_DATA, which packaged builds honour on purpose (threat model: electron/main.js);
 // LAWNMOWER_E2E=1 exposes a few main-process helpers to app.evaluate().
 //
 // Needs the Electron binary (npm install downloads it) and a display (on headless Linux run it
 // under `xvfb-run -a`). Uses a throwaway userData folder; never touches your real settings.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,6 +38,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 import { windowLayout } from '../electron/window-manager.js';
+import { ADDON_FILES, LAYOUT, MODEL_FILES } from '../electron/wake/config.js';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -124,16 +130,19 @@ try {
     const lm = /** @type {any} */ (window).lawnmower;
     const keys = (o) => Object.keys(o).sort();
     return {
-      top: keys(lm), claude: keys(lm.claude), voice: keys(lm.voice), settings: keys(lm.settings), window: keys(lm.window), app: keys(lm.app), tapo: keys(lm.tapo),
+      top: keys(lm), claude: keys(lm.claude), voice: keys(lm.voice), settings: keys(lm.settings), window: keys(lm.window), app: keys(lm.app), tapo: keys(lm.tapo), wake: keys(lm.wake),
       nodeLeak: typeof (/** @type {any} */ (window).require) !== 'undefined' || typeof (/** @type {any} */ (window).process) !== 'undefined',
       ipcLeak: typeof (/** @type {any} */ (window).ipcRenderer) !== 'undefined',
     };
   });
   report.bridge = shape;
-  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'tapo', 'voice', 'window'])
+  check('bridge shape', JSON.stringify(shape.top) === JSON.stringify(['app', 'claude', 'onCursor', 'onHotkey', 'settings', 'tapo', 'voice', 'wake', 'window'])
     && JSON.stringify(shape.claude) === JSON.stringify(['cancel', 'interrupt', 'onEvent', 'reset', 'respondPermission', 'retry', 'send', 'status'])
     && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'openSetupLog', 'restart', 'setup'])
-    && JSON.stringify(shape.tapo) === JSON.stringify(['arm', 'events', 'onAlert', 'onLook', 'onStatus', 'openClips', 'openWindow', 'presets', 'ptz', 'status']), shape);
+    && JSON.stringify(shape.tapo) === JSON.stringify(['arm', 'events', 'onAlert', 'onLook', 'onStatus', 'openClips', 'openWindow', 'presets', 'ptz', 'status'])
+    // "Hey Jade" (contract-wake §6.2): the wake namespace and window.show
+    && JSON.stringify(shape.wake) === JSON.stringify(['download', 'micAccess', 'onPower', 'onStatus', 'openMicSettings', 'report', 'requestPort', 'restart', 'saveClip', 'status'])
+    && shape.window.includes('show'), shape);
   check('no Node/ipcRenderer in the page', !shape.nodeLeak && !shape.ipcLeak, shape);
 
   // CSP: inline script and remote fetch are blocked, the local voice range is allowed.
@@ -322,6 +331,8 @@ try {
 
   await homeCameraChecks(app, page);
 
+  await wakeChecks(app, page);
+
   if (packaged) await packagedChecks(app);
 
   // The renderer booted completely (UI wired, hologram created) and logged no errors on the way.
@@ -444,6 +455,126 @@ async function homeCameraChecks(electronApp, page) {
   check('turning the home camera off closes its window', left === 1, left);
 }
 
+// ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
+/**
+ * "Hey Jade" without a microphone test (scripts/wake-e2e.mjs does that): off by default there is
+ * no "Jade wake word" process; turned on, main forks it (from app.asar when packaged) with this
+ * platform's sherpa-onnx addon, model B and the VAD (resources/wake when packaged, vendor/wake
+ * otherwise) and it reports ready; turned off, the process is gone. Unpackaged without
+ * `npm run fetch:wake` the engine part is skipped (with WAKE_ENGINE_REQUIRED=1 it fails).
+ * @param {import('@playwright/test').ElectronApplication} electronApp @param {import('@playwright/test').Page} page
+ */
+async function wakeChecks(electronApp, page) {
+  const e2e = () => electronApp.evaluate(() => {
+    const w = /** @type {any} */ (globalThis).__lawnmowerE2E?.wake;
+    return w ? { keys: Object.keys(w).sort(), status: w.status(), rows: w.metrics(), pid: w.utilityPid(), wakeDir: w.wakeDir(), addon: w.addonPath(), zhenDir: w.zhenDir(), resources: process.resourcesPath } : null;
+  });
+  const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  const dataWake = () => page.evaluate(() => document.body.dataset.wake || '');
+  const w0 = await e2e();
+  check('LAWNMOWER_E2E: the wake-word hooks', !!w0 && ['addonPath', 'emitPower', 'lastHits', 'metrics', 'restartUtility', 'stats', 'status', 'utilityPid', 'wakeDir', 'zhenDir'].every((k) => w0.keys.includes(k)), w0?.keys);
+  if (!w0) return;
+  const st0 = await page.evaluate(() => /** @type {any} */ (window).lawnmower.wake.status());
+  const chip0 = await dataWake();
+  check('"Hey Jade" off by default: engine "off", no "Jade wake word" process, state "off"', st0.engine === 'off' && st0.version === '1.13.8' && w0.rows.length === 0 && !w0.pid && chip0 === 'off', { st0, rows: w0.rows, chip0 });
+  /** @type {Record<string, any>} */
+  const out = { wakeDir: w0.wakeDir, addon: w0.addon };
+  report.wake = out;
+  if (packaged) check('packaged: the wake-word engine comes from resources/wake', w0.wakeDir === path.join(w0.resources, 'wake'), w0.wakeDir);
+  if (!fs.existsSync(w0.addon)) {
+    if (packaged || process.env.WAKE_ENGINE_REQUIRED === '1') check('the wake-word engine is installed', false, w0.addon);
+    else out.skipped = `the wake-word engine is not fetched (${w0.addon}): npm run fetch:wake`;
+    return;
+  }
+  const t0 = Date.now();
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ wake: { enabled: true, explained: true } }));
+  let w = await e2e();
+  for (let i = 0; i < 120 && w && !['ready', 'error', 'missing'].includes(w.status.engine); i++) {
+    await sleep(500);
+    w = await e2e();
+  }
+  out.readyMs = Date.now() - t0;
+  out.status = w?.status;
+  check('turned on: the engine is ready with model B and the VAD', w?.status.engine === 'ready' && w.status.models.giga === 'ok' && w.status.models.vad === 'ok' && typeof w.status.loadMs === 'number', w?.status);
+  // (Electron reports the serviceName as the row's name; serviceName is the Mojo service)
+  const row = w?.rows.find((r) => r.pid === w.pid);
+  out.utility = row || null;
+  out.zhen = w?.zhenDir ? 'zh-en + GigaSpeech' : 'GigaSpeech alone';
+  check('a "Jade wake word" utility process is running', !!row && row.type === 'Utility' && (row.name === 'Jade wake word' || row.serviceName === 'Jade wake word'), w?.rows);
+  if (packaged) check('packaged: no zh-en model is used (it is never installed)', !w?.zhenDir, w?.zhenDir);
+  // the renderer's state follows (without the local voice it keeps the microphone closed)
+  await sleep(1500);
+  out.dataWake = await dataWake();
+  check('the renderer shows a "Hey Jade" state', !!out.dataWake && out.dataWake !== 'off', out.dataWake);
+  const pid = w?.pid;
+  await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ wake: { enabled: false } }));
+  let gone = false;
+  let st = null;
+  for (let i = 0; i < 50 && !gone; i++) {
+    await sleep(100);
+    const x = await e2e();
+    st = x?.status;
+    let alive = false;
+    try {
+      if (pid) {
+        process.kill(pid, 0);
+        alive = true;
+      }
+    } catch { /* gone */ }
+    gone = !!x && x.status.engine === 'off' && x.rows.length === 0 && !alive;
+  }
+  check('turned off: the "Jade wake word" process is gone', gone, st);
+}
+// ---- end "Hey Jade" ----
+
+// ---- "Hey Jade" (wake word; contract-wake §3.1 gate 5, §5.1) ----
+/**
+ * resources/wake/ of a built app: this platform's sherpa-onnx addon, model B (GigaSpeech), the
+ * Silero VAD and the licence texts, each byte for byte the file pinned in electron/wake/config.js,
+ * the utility's entry in app.asar — and no zh-en model anywhere (licence gate), nor another
+ * platform's addon.
+ * @param {string} res process.resourcesPath of the packaged app
+ */
+function packagedWakeChecks(res) {
+  const key = `${process.platform}-${process.arch}`;
+  const wake = path.join(res, 'wake');
+  const sha = (/** @type {string} */ f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+  /** @type {Array<{ rel: string, sha256?: string }>} */
+  const want = [
+    ...(/** @type {any} */ (ADDON_FILES)[key] || []).map((/** @type {any} */ f) => ({ rel: `${LAYOUT.addonDir(key)}/${f.name}`, sha256: f.sha256 })),
+    ...MODEL_FILES.giga.map((f) => ({ rel: `${LAYOUT.gigaDir}/${f.name}`, sha256: f.sha256 })),
+    { rel: `${LAYOUT.gigaDir}/MODEL_CARD.md` },
+    { rel: LAYOUT.vad, sha256: MODEL_FILES.vad.sha256 },
+    ...['sherpa-onnx-LICENSE.txt', 'onnxruntime-LICENSE.txt', 'silero-vad-LICENSE.txt'].map((n) => ({ rel: `${LAYOUT.licensesDir}/${n}` })),
+  ];
+  /** @type {string[]} */
+  const missing = [];
+  /** @type {string[]} */
+  const wrong = [];
+  for (const f of want) {
+    const file = path.join(wake, ...f.rel.split('/'));
+    if (!fs.existsSync(file)) missing.push(f.rel);
+    else if (f.sha256 && sha(file) !== f.sha256) wrong.push(f.rel);
+  }
+  /** @type {string[]} */
+  const all = [];
+  const walk = (/** @type {string} */ d, /** @type {string} */ rel) => {
+    for (const e of fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }) : []) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(d, e.name), r);
+      else all.push(r);
+    }
+  };
+  walk(wake, '');
+  // an allowlist: anything else (the zh-en model, another platform's addon, a stray file) fails
+  const unexpected = all.filter((r) => !want.some((f) => f.rel === r));
+  report.packagedWake = { files: all.length, missing, wrong, unexpected };
+  check(`resources/wake: the ${key} addon, model B, the VAD and the licences`, missing.length === 0, missing);
+  check('resources/wake: the engine files are the pinned ones (SHA-256)', wrong.length === 0, wrong);
+  check('resources/wake: nothing else (no zh-en model: it is downloaded on the user\'s PC; no other platform\'s addon)', unexpected.length === 0, unexpected);
+}
+// ---- end "Hey Jade" ----
+
 /**
  * What the installer has to deliver, checked inside the running packaged app.
  * @param {import('@playwright/test').ElectronApplication} electronApp
@@ -460,8 +591,12 @@ async function packagedChecks(electronApp) {
       'app.asar/dist/assets/vision/face_landmarker.task', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.js', 'app.asar/dist/assets/vision/wasm/vision_wasm_module_internal.wasm',
       // the home camera: its page, preload, person detector model, and go2rtc + its license
       'app.asar/dist/tapo/index.html', 'app.asar/electron/preload-camera.cjs', 'app.asar/electron/tapo/index.js', 'app.asar/dist/assets/security/efficientdet_lite0_int8.tflite',
+      // "Hey Jade": the utility's entry (forked from inside app.asar; resources/wake: packagedWakeChecks)
+      'app.asar/electron/wake/utility/main.js', 'app.asar/electron/wake/utility/sherpa.js',
       process.platform === 'win32' ? 'tapo/go2rtc.exe' : 'tapo/go2rtc', 'tapo/go2rtc-LICENSE.txt'];
-    const unwanted = ['voice/tests', 'voice/.venv', 'voice/models', 'app.asar.unpacked/node_modules', 'app.asar/dist/dev', 'app.asar/tools', 'app.asar/vendor'];
+    const unwanted = ['voice/tests', 'voice/.venv', 'voice/models', 'app.asar.unpacked/node_modules', 'app.asar/dist/dev', 'app.asar/tools', 'app.asar/vendor',
+      // "Hey Jade": the zh-en model (no stated licence) is downloaded on the user's PC, never shipped
+      'wake/dev-models', 'wake/models/zh-en-3m', 'wake/models/kws'];
     // the bundled go2rtc runs here and is the pinned release (docs/TAPO.md, scripts/fetch-go2rtc.mjs)
     let go2rtcVersion = '';
     try {
@@ -488,6 +623,7 @@ async function packagedChecks(electronApp) {
   check('resources complete', info.missing.length === 0, info.missing);
   check('no tests / venv / models in resources', info.unwanted.length === 0, info.unwanted);
   check('the bundled go2rtc runs and is 1.9.14', /^go2rtc version 1\.9\.14\b/.test(info.go2rtcVersion), info.go2rtcVersion);
+  packagedWakeChecks(info.resourcesPath);
   const sep = process.platform === 'win32' ? '\\' : '/';
   const expectedHome = process.platform === 'win32'
     ? [info.env.LOCALAPPDATA, 'LawnmowerMan', 'voice'].join(sep)

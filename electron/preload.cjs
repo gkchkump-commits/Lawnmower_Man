@@ -77,6 +77,8 @@ const api = {
     quit: () => send('lm:window:quit'),
     // { visible }: the window was shown / hidden / minimized / restored (the camera pauses)
     onVisibility: (cb) => subscribe('lm:window:visibility', cb),
+    // "Hey Jade" while hidden in the tray: show the window without taking the focus
+    show: () => send('lm:window:show'), // wake:
   },
   onHotkey: (cb) => subscribe('lm:hotkey', cb),
   // Global cursor position {x, y} in CSS px relative to the window's top-left (may be outside).
@@ -103,6 +105,35 @@ const api = {
     // { x, y, holdMs }: a point in this window's CSS px (the camera window's centre)
     onLook: (cb) => subscribe('lm:tapo:look', cb),
   },
+  // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §6.2) ----
+  // The engine's status, the audio port to the "Jade wake word" process (requestPort(); the port
+  // itself arrives as a window message, see below), the listening state for the tray, lock and
+  // sleep, the Windows microphone privacy state, test clips and the extra model's download.
+  wake: {
+    status: () => invoke('lm:wake:status'),
+    onStatus: (cb) => subscribe('lm:wake:status', cb),
+    requestPort: () => invoke('lm:wake:request-port'),
+    // { state, reason? }: the listening state (tray checkbox and tooltip)
+    report: (st) => send('lm:wake:state', st),
+    // { state: 'locked'|'unlocked'|'suspended'|'resumed' }
+    onPower: (cb) => subscribe('lm:wake:power', cb),
+    micAccess: () => invoke('lm:wake:mic-access'),
+    openMicSettings: () => invoke('lm:wake:open-mic-settings'),
+    // { wav: ArrayBuffer (PCM16 mono 16 kHz, ≤ 60 s), hits: [{ atSec, keyword, outcome }] }
+    saveClip: (o) => invoke('lm:wake:save-clip', o),
+    download: () => invoke('lm:wake:download'),
+    restart: () => invoke('lm:wake:restart'), // wake: "Retry" after the engine kept stopping
+  },
+  // ---- end "Hey Jade" ----
 };
+
+// ---- "Hey Jade" (wake word; contract-wake §6.2) ----
+// A MessagePort cannot cross contextBridge: main's port to the wake-word process is handed to the
+// page as a window message, the way preload-camera.cjs does it (Electron's MessagePort tutorial).
+// The page (src/wake/port.js) takes it only from this window and only with a newer gen.
+ipcRenderer.on('lm:wake:port', (event, info) => {
+  window.postMessage({ type: 'lm:wake:port', gen: Number(info && info.gen) || 0 }, '*', event.ports);
+});
+// ---- end "Hey Jade" ----
 
 contextBridge.exposeInMainWorld('lawnmower', api);

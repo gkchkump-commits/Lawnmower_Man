@@ -448,7 +448,7 @@ test.describe('the avatar and the Home camera', () => {
     await expect(page.locator('#transcript')).not.toContainText('You said');
     // anything else still goes to Claude
     await send(page, 'hello there');
-    await expect(page.locator('#transcript')).toContainText("I'm Claude", { timeout: 15_000 });
+    await expect(page.locator('#transcript')).toContainText("I'm Jade", { timeout: 15_000 });
   });
 
   test('without the Home camera turned on, the commands go to Claude and the section is short', async ({ page }) => {

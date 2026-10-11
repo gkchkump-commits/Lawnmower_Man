@@ -31,14 +31,14 @@ Each behaviour has its own switch in *Settings › Camera*:
 | **Eye contact** (`camera.followFace`) | on | The eyes look at you. A moving mouse cursor still wins for about 1.5 s, then the gaze comes back to you. Contact is broken now and then by a short glance away, like people do. |
 | **Notice when I leave** (`camera.presence`) | on | Away for more than 2 minutes while nothing is going on (no reply, no typing or mouse use): the avatar dozes off. When you are back it wakes up with a little eyebrow flash and a smile. While you are in view it does not doze off. |
 | **Smile back** (`camera.mirrorExpressions`) | on | When you smile, it smiles back gently. |
-| **Let Claude see me** (`camera.shareWithClaude`) | off | Every message you send, typed or spoken, carries one snapshot of you. |
-| **Greet me** (`camera.greeting`) | Hello | When the camera first sees you after it is turned on, and when you are back after 2 minutes or more away while nothing was going on (the same absence that makes it doze off: no reply, no typing or mouse use; a face out of view while you keep using the app is no absence), the avatar greets you, at most every 5 minutes, never during a reply or while you type. **Hello**: a quick spoken line of its own, right away, with no Claude turn ("Good morning!" by time of day the first time, "Welcome back!" later). **Claude**: the app sends Claude a short hidden note so it says hello in its own words (a second or two); the chat shows a line saying it happened, and the note carries no picture, even with *Let Claude see me* on. **Off**: no greeting. Hiding or minimizing the window does not count as being away. |
-| **Listen only when I look** (`camera.lookToTalk`) | off | With *Settings › Voice › Hands-free* on: it only listens while you look at the screen. Speech already in progress is never cut off. |
+| **Let Jade see me** (`camera.shareWithClaude`) | off | Every message you send, typed or spoken, carries one snapshot of you to Claude. |
+| **Greet me** (`camera.greeting`) | Hello | When the camera first sees you after it is turned on, and when you are back after 2 minutes or more away while nothing was going on (the same absence that makes it doze off: no reply, no typing or mouse use; a face out of view while you keep using the app is no absence), the avatar greets you, at most every 5 minutes, never during a reply or while you type. **Hello**: a quick spoken line of its own, right away, with no Claude turn ("Good morning!" by time of day the first time, "Welcome back!" later). **Jade**: the app sends Claude a short hidden note so Jade says hello in her own words (a second or two); the chat shows a line saying it happened ("…so the camera asked Jade to say hello."), and the note carries no picture, even with *Let Jade see me* on. **Off**: no greeting. Hiding or minimizing the window does not count as being away. |
+| **Listen only when I look** (`camera.lookToTalk`) | off | With *Settings › Voice › Hands-free* on: it only listens while you look at the screen. Speech already in progress is never cut off. With *Settings › Voice › Hey Jade* on it means **look and talk**: while you look at her, no name is needed (her name works either way; [WAKE.md](WAKE.md#5-settings)). |
 | **Device** (`camera.deviceId`) | default camera | Which camera to use. If the chosen one is unplugged, the default camera is used. |
 
 ### Pictures for Claude
 
-* **Let Claude see me** (above) sends a snapshot with every message.
+* **Let Jade see me** (above) sends a snapshot to Claude with every message.
 * The **camera button in the message box** (next to Send) attaches one snapshot to your **next**
   message only, typed or spoken. Press it again to cancel. It only shows while the camera is on.
 
@@ -54,7 +54,7 @@ webcam snapshots and should react naturally rather than describe them.
   (no download, no CDN). MediaPipe's built-in usage statistics, which it would send to Google once
   a minute, are blocked: the tracker's worker runs under the app's Content-Security-Policy, and the
   main process cancels every network request that does not go to this PC.
-* **Claude sees a picture only** when *Let Claude see me* is on or you pressed the camera button
+* **Claude sees a picture only** when *Let Jade see me* is on or you pressed the camera button
   for one message. The picture goes into that message to your Claude CLI, the same way as your
   text, and from there to Anthropic like the rest of the conversation. The app keeps no copy
   (the thumbnail lives only in the open chat panel), and pictures are never written to its log.
@@ -155,7 +155,7 @@ snapshot.js ── JPEG ≤ 640 px, q 0.75 ──► controller.sendText ─► 
 * Playwright (`tests/e2e/camera.spec.js`): Chromium's fake camera plays a frame of the reference
   video (`docs/reference/neutral.jpg`, turned into a Y4M by the test itself). **MediaPipe does
   detect that face** (frontal, looking at the screen), so the test checks the privacy card, the
-  light, real face detection in the worker, eye contact, the drawer, and that *Let Claude see me*
+  light, real face detection in the worker, eye contact, the drawer, and that *Let Jade see me*
   and the camera button deliver a 640×480 JPEG to the mock bridge.
 * Electron (`scripts/electron-e2e.mjs`, also `--packaged`): the camera is refused while the setting
   is off; with it on, the privacy card, then face tracking loading its wasm and model over `app://`

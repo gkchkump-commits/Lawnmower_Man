@@ -4,7 +4,9 @@
 // app:// protocol serving dist/, CSP + permission + navigation hardening, tray menu, global
 // shortcuts, IPC for the window.lawnmower contract (docs/ARCHITECTURE.md §3), and supervision of
 // the Claude CLI session and the local voice server. The Tapo home camera (electron/tapo/,
-// docs/TAPO.md) is composed here too: its window, IPC channels, clip mount and Claude tools.
+// docs/TAPO.md) is composed here too: its window, IPC channels, clip mount and Claude tools; and
+// so is the "Hey Jade" wake word (electron/wake/, docs/WAKE.md): its utility process, IPC
+// channels, tray entry and the persona's wake section.
 //
 // Dev/test environment overrides (all optional):
 //   VITE_DEV_SERVER_URL        load the renderer from a loopback Vite dev server (ignored unless loopback)
@@ -20,6 +22,8 @@
 //   LAWNMOWER_TAPO_ALLOW_LOOPBACK=1  the home camera may be on 127.0.0.1 (the camera simulator)
 //   LAWNMOWER_TAPO_FAKE_DETECTOR=1   the camera window's worker uses the test person detector
 //   LAWNMOWER_GO2RTC           path of the go2rtc binary (default: resources/tapo/ or vendor/go2rtc/)
+//   LAWNMOWER_WAKE_DIR         the wake-word engine folder (default: resources/wake/ or vendor/wake/)
+//   LAWNMOWER_WAKE_ZHEN_DIR    the extra wake-word model (zh-en) folder (default: the voice models folder)
 //
 // These are honoured in packaged builds too, deliberately (scripts/electron-e2e.mjs --packaged
 // drives the installed app with them). Threat model: the environment of a desktop process is set
@@ -47,6 +51,8 @@ import {
   screen,
   session,
   shell,
+  systemPreferences, // "Hey Jade": the Windows microphone privacy state
+  utilityProcess, // "Hey Jade": the "Jade wake word" process
 } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -86,11 +92,13 @@ import {
   validateTurnOptions,
   validateTurnText,
 } from './ipc-validate.js';
-import { buildTrayTemplate, trayTooltip } from './tray-menu.js';
+import { buildTrayTemplate, trayTooltip, wakeMicOpen, wakeTrayText } from './tray-menu.js'; // wake: wakeMicOpen, wakeTrayText
 import { HotkeyManager } from './hotkeys.js';
 import { renderIconPng } from './icon.js';
 import { createLogger } from './logger.js';
 import { createTapo } from './tapo/index.js';
+import { createWake } from './wake/index.js';
+import { listeningTrayImage } from './wake/tray-icon.js'; // wake: the tray's listening dot
 import { validateCameraSettingsPatch } from './tapo/validate.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -115,6 +123,13 @@ const state = {
   tapoToolsKey: '',
   /** The tray's Home camera state as last shown (see rebuildTrayForTapo). */
   tapoTrayKey: '',
+  // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
+  /** The wake word (electron/wake/index.js createWake). @type {ReturnType<typeof createWake>|null} */ wake: null,
+  /** The tray's wake-word state as last shown (see rebuildTrayForWake). */
+  wakeTrayKey: '',
+  /** The tray icon shows the listening dot. */
+  wakeTrayOpen: false,
+  // ---- end "Hey Jade" ----
   /** @type {VoiceSetupRunner|null} */ setup: null,
   /** @type {HotkeyManager|null} */ hotkeys: null,
   /** @type {CursorTracker|null} */ cursor: null,
@@ -271,7 +286,8 @@ async function init() {
     // server's loopback HTTP endpoint (startHttp(), --mcp-config <userData>/mcp/…) by itself.
     getSdkMcpServers: () => (state.tapo ? state.tapo.mcpServers() : []),
     getToolPermissions: () => (state.tapo ? state.tapo.toolPermissions() : { allow: [], deny: [] }),
-    getPersonaContext: () => (state.tapo ? state.tapo.personaContext() : {}),
+    // the camera's paragraph and (while the wake word is on) the persona's wake section
+    getPersonaContext: () => ({ ...(state.tapo ? state.tapo.personaContext() : {}), ...(state.wake ? state.wake.personaContext() : {}) }), // wake:
     mcpDir: path.join(userData, 'mcp'),
     log,
   });
@@ -303,8 +319,34 @@ async function init() {
   voice.on('status', () => {
     sendToRenderer('lm:voice:status', voiceInfo());
     rebuildTray();
+    state.wake?.voiceChanged(); // wake: the utility follows the local voice
   });
   state.voice = voice;
+
+  // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
+  // The "Jade wake word" utility process (stage 1), only while settings.wake.enabled is on (and
+  // stopped after the local voice has been unusable for a minute: it could never listen then); the
+  // lm:wake:* IPC channels; lock/unlock to the avatar; the extra zh-en model through the voice
+  // package (it needs voiceDir and the venv dirs, hence after the sidecar).
+  const wake = createWake({
+    electron: { app, ipcMain, utilityProcess, MessageChannelMain, powerMonitor, systemPreferences, shell },
+    settings, log, userData, appRoot, resourcesPath: process.resourcesPath, isPackaged: app.isPackaged,
+    env: process.env,
+    voice: { voiceDir, venvDirs: voiceVenvDirs({ packaged: app.isPackaged, voiceDir }), getVoiceSettings: () => settings.get().voice, status: () => voice.info().status },
+    isTrustedSender: (event, kinds) => {
+      assertSender(event, kinds);
+    },
+    getAvatarWindow: () => state.win,
+    sendToAvatar: sendToRenderer,
+    showAvatar: () => showWindow(false),
+  });
+  state.wake = wake;
+  Object.assign(trayActions, wake.trayActions);
+  // 'status' comes with every engine change and stats line; the tray only when its entry changed
+  wake.on('status', () => rebuildTrayForWake());
+  // the persona's wake section is part of the CLI's spawn key from the start (no restart for it)
+  state.tapoToolsKey = claudeToolsKey();
+  // ---- end "Hey Jade" ----
 
   // --- "Set up local voice…": the bundled setup script in a visible console window ---
   // The script logs every run to <voice home>/setup.log: the per-user folder of an installed app
@@ -384,9 +426,10 @@ async function shutdown() {
     globalShortcut.unregisterAll();
   } catch { /* ignore */ }
   const timeout = new Promise((r) => setTimeout(r, 5000));
-  // tapo.stop() is bounded (≈ 4 s): Stop the motor, Unsubscribe, finish the clip, kill go2rtc
+  // tapo.stop() is bounded (≈ 4 s): Stop the motor, Unsubscribe, finish the clip, kill go2rtc;
+  // wake.stop() too (≈ 2 s, then the utility is killed)
   await Promise.race([
-    Promise.allSettled([state.claude?.stop(), state.voice?.stop(), state.tapo?.stop()]),
+    Promise.allSettled([state.claude?.stop(), state.voice?.stop(), state.tapo?.stop(), state.wake?.stop()]), // wake:
     timeout,
   ]);
   try {
@@ -591,7 +634,9 @@ function loadRenderer(win) {
 function showWindow(focus) {
   const win = state.win;
   if (!win) return;
-  if (win.isMinimized()) win.restore();
+  // wake: restore() activates the window on Windows (SW_RESTORE); without focus, showInactive()
+  // alone brings a minimized window back (SW_SHOWNOACTIVATE) and leaves the keyboard focus alone
+  if (focus && win.isMinimized()) win.restore(); // wake: only when it may take the focus
   if (focus) win.show();
   else win.showInactive();
   if (focus) win.focus();
@@ -872,13 +917,29 @@ function onSettingsChanged(next, prev) {
   // the camera's tools, their permissions (security.claudeSee/claudeMove) and the persona's camera
   // paragraph are part of the CLI's spawn key: a change restarts it after the running turn
   if (tapoChanged) syncClaudeTools();
+  // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
+  // on/off starts or stops the utility, sensitivity/phrase go to it; the persona's wake section
+  // follows wake.enabled, followUpSec and bargeIn (a change restarts the CLI after the turn)
+  if (changed('wake')) {
+    state.wake?.applySettings(next, prev);
+    rebuildTray();
+    syncClaudeTools();
+  }
+  // ---- end "Hey Jade" ----
 }
 
-/** What the Claude CLI is given of the home camera (server names, permissions, persona context). */
+/**
+ * What the Claude CLI is given of the home camera (server names, permissions, persona context)
+ * and of the wake word (the persona's wake section).
+ */
 function claudeToolsKey() {
   const t = state.tapo;
-  if (!t) return '';
-  return JSON.stringify([t.mcpServers().map((sv) => sv.name), t.toolPermissions(), t.personaContext()]);
+  const w = state.wake; // wake:
+  if (!t && !w) return ''; // wake:
+  return JSON.stringify([
+    t ? [t.mcpServers().map((sv) => sv.name), t.toolPermissions(), t.personaContext()] : null, // wake:
+    w ? w.personaContext() : null, // wake:
+  ]);
 }
 
 /**
@@ -898,6 +959,37 @@ function rebuildTrayForTapo() {
   if (key === state.tapoTrayKey) return;
   rebuildTray();
 }
+
+// ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2) ----
+/**
+ * The tray as the wake word shows it: the checkbox, the tooltip's text and the listening dot
+ * (not the raw state: every exchange walks waiting → attention → listening → busy → …, which
+ * all read "listening", and a rebuilt menu could close under the user's pointer).
+ * @param {any} w state.wake.trayState()
+ */
+function wakeTrayKey(w) {
+  return w ? JSON.stringify({ enabled: !!w.enabled, text: wakeTrayText(w), open: wakeMicOpen(w) }) : '';
+}
+
+/** Rebuild the tray when what the tray shows of the wake word changed. */
+function rebuildTrayForWake() {
+  const key = state.wake ? wakeTrayKey(state.wake.trayState()) : '';
+  if (key === state.wakeTrayKey) return;
+  rebuildTray();
+}
+
+/** The tray icon gets a cyan dot while the microphone is open for her name. @param {any} w */
+function setWakeTrayImage(w) {
+  const open = wakeMicOpen(w);
+  if (open === state.wakeTrayOpen || !state.tray) return;
+  state.wakeTrayOpen = open;
+  try {
+    state.tray.setImage?.(open ? listeningTrayImage(nativeImage) : trayImage());
+  } catch (err) {
+    state.log('warn', `[main] tray icon update failed: ${/** @type {Error} */ (err).message}`);
+  }
+}
+// ---- end "Hey Jade" ----
 
 // ---------------------------------------------------------------------------------------------
 // Tray
@@ -920,7 +1012,10 @@ function createTray() {
   rebuildTray();
 }
 
-/** Tray menu actions; createTapo() adds tapoShow / tapoArm / tapoOpenClips (the Home camera submenu). */
+/**
+ * Tray menu actions; createTapo() adds tapoShow / tapoArm / tapoOpenClips (the Home camera submenu),
+ * createWake() adds setWakeWord (Listen for “Hey Jade”).
+ */
 const trayActions = {
   toggleVisible,
   setAlwaysOnTop: (/** @type {boolean} */ on) => state.settings?.update({ window: { alwaysOnTop: on } }),
@@ -994,8 +1089,11 @@ function rebuildTray() {
     claudeProblem: state.claudeProblem ? state.claudeProblem.kind : '',
     hotkeyConflicts: state.hotkeys ? state.hotkeys.conflicts : [],
     tapo: state.tapo ? state.tapo.trayState() : undefined,
+    wake: state.wake ? state.wake.trayState() : undefined, // wake: the "Listen for “Hey Jade”" entry and tooltip
   };
   state.tapoTrayKey = st.tapo ? JSON.stringify(st.tapo) : '';
+  state.wakeTrayKey = wakeTrayKey(st.wake); // wake:
+  setWakeTrayImage(st.wake); // wake: the listening dot
   try {
     tray.setContextMenu(Menu.buildFromTemplate(/** @type {any} */ (buildTrayTemplate(/** @type {any} */ (st), /** @type {any} */ (trayActions)))));
     tray.setToolTip(trayTooltip(/** @type {any} */ (st)));
@@ -1156,6 +1254,14 @@ function registerIpc() {
   on('lm:window:minimize', () => state.win?.minimize());
   on('lm:window:hide', () => state.win?.hide());
   on('lm:window:quit', () => { confirmQuit(); });
+  // ---- "Hey Jade" (wake word; docs/WAKE.md; contract-wake §3.2, §6.1) ----
+  // A verified "Hey Jade" while the window is hidden: show it without taking the focus.
+  // (The lm:wake:* channels are registered by createWake().)
+  on('lm:window:show', (...args) => {
+    validateNoArgs(args);
+    showWindow(false);
+  });
+  // ---- end "Hey Jade" ----
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1277,5 +1383,12 @@ if (process.env.LAWNMOWER_E2E === '1') {
     get tapo() {
       return state.tapo ? state.tapo.e2e : null;
     },
+    // ---- "Hey Jade" (wake word; contract-wake §6.5) ----
+    // status, utilityPid, metrics, emitPower, lastHits, stats, restartUtility, wakeDir, addonPath,
+    // zhenDir (electron/wake/index.js); null until init() created it
+    get wake() {
+      return state.wake ? state.wake.e2e : null;
+    },
+    // ---- end "Hey Jade" ----
   };
 }

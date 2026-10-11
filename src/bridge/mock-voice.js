@@ -94,13 +94,26 @@ const round3 = (x) => Math.round(x * 1000) / 1000;
 
 /**
  * A fetch() implementation answering the voice-server endpoints.
- * @param {{ transcript?: string, latencyMs?: number, token?: string }} [o]
- * @returns {(url: string, init?: RequestInit) => Promise<Response>}
+ * transcripts ("Hey Jade" tests: the wake segment and the command differ): a queue (each /stt
+ * call takes the next; the last one repeats) or a function ({ durationSec, n }) → text
+ * (undefined: the default transcript). `fetch.stats` counts the calls ({ stt, tts }).
+ * sttDelayMs: extra time /stt takes (tests: a slow check of the wake segment).
+ * @param {{ transcript?: string, transcripts?: string[] | ((x: { durationSec: number, n: number }) => string|undefined), latencyMs?: number, sttDelayMs?: () => number, token?: string }} [o]
+ * @returns {((url: string, init?: RequestInit) => Promise<Response>) & { stats: { stt: number, tts: number } }}
  */
 export function createFakeVoiceFetch(o = {}) {
   const latency = o.latencyMs ?? 60;
   const token = o.token || 'mock-token';
-  return async (url, init = {}) => {
+  const stats = { stt: 0, tts: 0 };
+  /** @param {number} durationSec */
+  const transcriptFor = (durationSec) => {
+    const n = stats.stt - 1;
+    const q = o.transcripts;
+    if (typeof q === 'function') return q({ durationSec, n }) ?? o.transcript ?? FAKE_TRANSCRIPT;
+    if (Array.isArray(q) && q.length) return q[Math.min(n, q.length - 1)];
+    return o.transcript || FAKE_TRANSCRIPT;
+  };
+  const fetchFn = async (url, init = {}) => {
     const u = new URL(String(url), 'http://127.0.0.1');
     const method = (init.method || 'GET').toUpperCase();
     await wait(latency, init.signal);
@@ -111,6 +124,7 @@ export function createFakeVoiceFetch(o = {}) {
     if (u.pathname === '/voices' && method === 'GET') return json(200, FAKE_VOICES);
     if (u.pathname === '/warmup' && method === 'POST') return json(200, { ok: true, stt: true, tts: true });
     if (u.pathname === '/tts' && method === 'POST') {
+      stats.tts++;
       let body;
       try {
         body = JSON.parse(String(init.body || '{}'));
@@ -131,6 +145,9 @@ export function createFakeVoiceFetch(o = {}) {
       });
     }
     if (u.pathname === '/stt' && method === 'POST') {
+      stats.stt++;
+      const extra = Number(o.sttDelayMs?.()) || 0;
+      if (extra > 0) await wait(extra, init.signal);
       let level = 0;
       try {
         const buf = init.body instanceof Blob ? await init.body.arrayBuffer() : /** @type {ArrayBuffer} */ (init.body);
@@ -138,13 +155,14 @@ export function createFakeVoiceFetch(o = {}) {
         let acc = 0;
         for (let i = 0; i < d.samples.length; i++) acc += d.samples[i] * d.samples[i];
         level = d.samples.length ? Math.sqrt(acc / d.samples.length) : 0;
-        return json(200, { text: level > 1e-4 ? o.transcript || FAKE_TRANSCRIPT : '', language: 'en', durationSec: d.durationSec, processingMs: latency });
+        return json(200, { text: level > 1e-4 ? transcriptFor(d.durationSec) : '', language: 'en', durationSec: d.durationSec, processingMs: latency });
       } catch (err) {
         return json(400, { error: `Bad audio: ${err?.message || err}`, code: 'bad_audio' });
       }
     }
     return json(404, { error: 'not found', code: 'not_found' });
   };
+  return Object.assign(fetchFn, { stats });
 }
 
 /** @param {number} ms @param {AbortSignal|null|undefined} signal */

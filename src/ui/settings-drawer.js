@@ -36,6 +36,11 @@ export function lipSyncLabel(v) {
 }
 const LIPSYNC_HINT = 'Mouth before the voice (e.g. Bluetooth headphones)? Move it right. Test lip-sync says a line with many m, b and p.';
 
+// ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+/** The wake word's hint (what leaves the PC, said plainly: after her name, the words go to Claude). */
+export const WAKE_HINT = 'Say “Hey Jade” to talk. The microphone stays on; nothing is recorded or sent until you say her name (then your words go to Claude)';
+// ---- end "Hey Jade" ----
+
 /** The voice character's hint: what it applies to, with the voice that is speaking now. */
 export const VOICE_FX_HINT = Object.freeze({
   server: 'Applies to the local voice',
@@ -63,7 +68,20 @@ export const SECTIONS = [
       { type: 'info', id: 'voiceInfo' },
       { type: 'toggle', path: 'voice.enabled', label: 'Local voice (GPU)', hint: 'Speech recognition and natural speech on your GPU' },
       { type: 'toggle', path: 'voice.speakReplies', label: 'Speak replies' },
-      { type: 'toggle', path: 'voice.handsFree', label: 'Hands-free', hint: 'Listen whenever idle; pauses while speaking' },
+      { type: 'toggle', path: 'voice.handsFree', label: 'Hands-free', hint: 'Listen whenever idle; pauses while speaking. Off while “Hey Jade” is on' },
+      // ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+      { type: 'info', id: 'wakeInfo' }, // state line + last wake events + action buttons (filled by src/wake/ui.js)
+      { type: 'toggle', path: 'wake.enabled', label: 'Hey Jade', hint: WAKE_HINT },
+      { type: 'segmented', path: 'wake.phrase', label: 'Wake phrase', options: [['hey-jade', '“Hey Jade”'], ['jade', '“Hey Jade” or “Jade”']] },
+      { type: 'segmented', path: 'wake.sensitivity', label: 'Sensitivity', options: [['low', 'Less'], ['normal', 'Normal'], ['high', 'More']], hint: 'More hears you better in noise and wakes by mistake more often' },
+      { type: 'segmented', path: 'wake.followUpSec', label: 'Follow-up', options: [[0, 'Off'], [6, '6 s'], [10, '10 s']], hint: 'After she answers, keep talking without her name' },
+      { type: 'toggle', path: 'wake.bargeIn', label: 'Interrupt with her name', hint: '“Hey Jade” while she talks stops her' },
+      { type: 'segmented', path: 'wake.sounds', label: 'Sounds', options: [['off', 'Off'], ['start', 'Start'], ['start-end', 'Start + end']] },
+      { type: 'toggle', path: 'wake.whileHidden', label: 'Listen while hidden', hint: 'Keep listening when the window is in the tray; “Hey Jade” brings her back' },
+      { type: 'toggle', path: 'wake.transcriptFallback', label: 'Transcript check', hint: 'Only when the wake-word engine cannot run: Whisper listens for her name on the GPU' },
+      { type: 'button', label: 'Test my echo', action: 'wakeEchoTest', variant: 'ghost' },
+      { type: 'button', label: 'Record a test clip (30 s)…', action: 'wakeRecord', variant: 'ghost' },
+      // ---- end "Hey Jade" ----
       { type: 'select', path: 'voice.ttsVoice', label: 'Voice', options: [] },
       // shown instead of the Kokoro list while the local voice is not running (Web Speech voices)
       { type: 'select', path: 'voice.systemVoice', label: 'Voice', options: [['', 'Automatic (most natural voice)']] },
@@ -108,9 +126,9 @@ export const SECTIONS = [
       { type: 'toggle', path: 'camera.followFace', label: 'Eye contact', hint: 'Looks at you; a moving cursor still wins' },
       { type: 'toggle', path: 'camera.presence', label: 'Notice when I leave', hint: 'Dozes off when you are away, wakes up when you are back' },
       { type: 'toggle', path: 'camera.mirrorExpressions', label: 'Smile back' },
-      { type: 'toggle', path: 'camera.shareWithClaude', label: 'Let Claude see me', hint: 'A snapshot goes with every message you send' },
-      { type: 'segmented', path: 'camera.greeting', label: 'Greet me', options: [['off', 'Off'], ['hello', 'Hello'], ['claude', 'Claude']], hint: 'When it first sees you and when you are back. Claude = a personal hello from Claude (a short reply)' },
-      { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free mode listens only while you look at the screen' },
+      { type: 'toggle', path: 'camera.shareWithClaude', label: 'Let Jade see me', hint: 'A snapshot goes to Claude with every message you send' },
+      { type: 'segmented', path: 'camera.greeting', label: 'Greet me', options: [['off', 'Off'], ['hello', 'Hello'], ['claude', 'Jade']], hint: 'When it first sees you and when you are back. Jade = a personal hello from Jade (a short reply)' },
+      { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free: listen only while you look at the screen. With “Hey Jade”: while you look at her, no name needed' },
     ],
   },
   // ---- Home camera (a Tapo pan/tilt camera as home security; src/tapo/, docs/TAPO.md) --------
@@ -221,6 +239,15 @@ export class SettingsDrawer {
       const v = c.value ? c.value(settings) : getPath(settings, path);
       if (v !== undefined) c.set(v);
     }
+    // ---- "Hey Jade": hands-free waits for her name while the wake word is on (contract-wake §4.1) ----
+    const hands = this.controls.get('voice.handsFree');
+    if (hands) {
+      const wake = !!getPath(settings, 'wake.enabled');
+      hands.row.classList.toggle('disabled', wake);
+      /** @type {HTMLButtonElement} */ (hands.el).disabled = wake;
+      hands.row.title = wake ? 'Off while “Hey Jade” is on: say her name instead' : '';
+    }
+    // ---- end "Hey Jade" ----
     // the intensity of 'natural' means nothing
     const amount = this.controls.get('voice.fxAmount');
     if (amount) {
@@ -402,7 +429,9 @@ export class SettingsDrawer {
         set = (v) => {
           for (const b of buttons) b.setAttribute('aria-checked', String(b.dataset.value === String(v)));
         };
-        row.append(h('span', { class: 'field-label' }, f.label), el);
+        // wake: a hint under the label (like a toggle's)
+        const name = h('span', { class: 'field-label' }, f.label);
+        row.append(f.hint ? h('div', { class: 'field-text' }, name, h('div', { class: 'field-hint' }, f.hint)) : name, el);
         break;
       }
       case 'toggle': {

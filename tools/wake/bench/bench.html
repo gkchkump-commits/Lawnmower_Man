@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Jade wake word bench</title></head>
+<body>
+<pre id="log">bench</pre>
+<script>
+// Plays the plan's phases to the utility over the forwarded port in real time, the way the
+// avatar window's mic tap would (683-sample frames of 16 kHz audio, each posted when its last
+// sample "happened"; plain structured-clone copies, never a transfer list).
+const log = (s) => { document.getElementById('log').textContent += `\n${s}`; };
+let port = null;
+let gen = 0;
+let ready = null;
+const hits = [];
+const vad = [];
+let lastStats = null;
+const pongs = new Map();
+const rtts = [];
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window || !ev.data || ev.data.type !== 'lm:wake:port' || !(ev.data.gen > gen)) return;
+  gen = ev.data.gen;
+  if (port) port.close();
+  port = ev.ports[0];
+  port.onmessage = (e) => {
+    const m = e.data;
+    const now = performance.now();
+    if (m.t === 'ready') ready && ready(m);
+    else if (m.t === 'hit') hits.push({ ...m, arrival: now });
+    else if (m.t === 'vad') vad.push({ ...m, arrival: now });
+    else if (m.t === 'stats') lastStats = m;
+    else if (m.t === 'pong' && pongs.has(m.n)) rtts.push(now - pongs.get(m.n));
+  };
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function play(audio, at0, frame) {
+  const t0 = performance.now();
+  let late = 0;
+  for (let p = 0; p < audio.length; p += frame) {
+    const n = Math.min(frame, audio.length - p);
+    const due = t0 + ((p + n) / 16) ; // ms: the frame's last sample
+    const wait = due - performance.now();
+    if (wait > 1) await sleep(wait);
+    else if (wait < -50) late++;
+    port.postMessage({ t: 'pcm', at: at0 + p, pcm: audio.slice(p, p + n) });
+  }
+  return { t0, late };
+}
+
+window.bench.onPlan(async (plan) => {
+  try {
+    const st0 = await window.bench.status();
+    log(`status ${st0.engine}`);
+    const waitReady = new Promise((r) => { ready = r; });
+    const rp = await window.bench.requestPort();
+    log(`port ${JSON.stringify(rp)}`);
+    const rdy = await Promise.race([waitReady, sleep(30000).then(() => null)]);
+    if (!rdy) throw new Error('no ready on the port within 30 s');
+    window.bench.report({ state: 'waiting' });
+    // round trips
+    for (let n = 1; n <= 20; n++) {
+      pongs.set(n, performance.now());
+      port.postMessage({ t: 'ping', n });
+      await sleep(50);
+    }
+    const results = { ready: rdy, rttMs: rtts.slice(), phases: [] };
+    let at = 0;
+    for (const ph of plan.phases) {
+      window.bench.progress({ phase: ph.name, start: true });
+      const h0 = hits.length;
+      const { t0, late } = await play(ph.audio, at, plan.frame);
+      await sleep(1500); // the last hits
+      window.bench.progress({ phase: ph.name, end: true });
+      results.phases.push({ name: ph.name, t0, at0: at, samples: ph.audio.length, late, hits: hits.slice(h0) });
+      at += ph.audio.length + 16000; // a gap in the indices between phases, like a reopened mic
+    }
+    results.stats = lastStats;
+    results.vadTransitions = vad.length;
+    window.bench.done(results);
+  } catch (err) {
+    window.bench.done({ error: String(err && err.stack || err) });
+  }
+});
+</script>
+</body>
+</html>

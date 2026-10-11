@@ -141,6 +141,19 @@ export const DEFAULT_SETTINGS = Object.freeze({
     startAtLoginOffered: false, // the camera window offered it once, on the first arm
   },
   // ---- end of the Home camera block ----------------------------------------------------------
+  // ---- "Hey Jade" (wake word; docs/WAKE.md) ----------------------------------------------------
+  wake: {
+    enabled: false, // listen for "Hey Jade" (the microphone stays open while the app runs)
+    phrase: 'hey-jade', // 'hey-jade' | 'jade'   'jade' also accepts "Jade, …" at the very start
+    sensitivity: 'normal', // 'low' | 'normal' | 'high'   (thresholds and veto rule)
+    followUpSec: 6, // 0 (off) or 4..15: talk again without her name after she answers
+    bargeIn: true, // "Hey Jade" while she talks stops her
+    sounds: 'start', // 'off' | 'start' | 'start-end'   the listening chime (and the softer end chime)
+    whileHidden: true, // keep listening while the window is hidden in the tray
+    transcriptFallback: false, // only without the wake-word engine: Whisper checks speech for her name (GPU)
+    explained: false, // the one-time explainer was shown (set by the renderer)
+  },
+  // ---- end "Hey Jade" ----------------------------------------------------------------------------
 });
 
 /**
@@ -347,6 +360,15 @@ const absPath = () => (/** @type {unknown} */ v) => {
 };
 // ---- end of the Home camera validators ---------------------------------------------------------
 
+// ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+/** 0 (off), or an integer clamped into min..max (rounded first). */
+const intOrZero = (/** @type {number} */ min, /** @type {number} */ max) => (/** @type {unknown} */ v) => {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return { ok: false, reason: 'expected a number' };
+  const n = Math.round(v);
+  return { ok: true, value: n <= 0 ? 0 : Math.min(max, Math.max(min, n)) };
+};
+// ---- end "Hey Jade" ----
+
 const SCHEMA = {
   claude: {
     cliPath: str({ max: 1024 }),
@@ -470,6 +492,19 @@ const SCHEMA = {
     startAtLoginOffered: bool(),
   },
   // ---- end of the Home camera groups ------------------------------------------------------------
+  // ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+  wake: {
+    enabled: bool(),
+    phrase: oneOf(['hey-jade', 'jade']),
+    sensitivity: oneOf(['low', 'normal', 'high']),
+    followUpSec: intOrZero(4, 15),
+    bargeIn: bool(),
+    sounds: oneOf(['off', 'start', 'start-end']),
+    whileHidden: bool(),
+    transcriptFallback: bool(),
+    explained: bool(),
+  },
+  // ---- end "Hey Jade" ----
 };
 
 /** @param {unknown} v @returns {v is Record<string, any>} */

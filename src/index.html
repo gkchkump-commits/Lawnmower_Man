@@ -12,7 +12,7 @@
     <div id="app">
       <!-- Avatar area: the hologram canvas (press on the head to move the window), window
            toolbar, toasts and permission cards. Transparent everywhere the head isn't. -->
-      <section id="stage" class="stage" aria-label="Claude">
+      <section id="stage" class="stage" aria-label="Jade">
         <canvas id="avatar" class="avatar-canvas"></canvas>
         <div class="avatar-fallback" aria-hidden="true">
           <div class="orb"><span class="eye l"></span><span class="eye r"></span><span class="mouth"></span></div>
@@ -41,6 +41,9 @@
         <button id="cam-live" type="button" class="cam-live no-drag" hidden aria-label="The camera is on. Turn it off">
           <span class="cam-live-dot" aria-hidden="true"></span><span class="cam-live-text">camera</span>
         </button>
+        <!-- "Hey Jade": shown while the microphone is open for her name (also in minimal chat mode,
+             where the status bar folds away); click: turn "Hey Jade" off -->
+        <button id="wake-mic" type="button" class="wake-mic no-drag" hidden aria-label="The microphone is on for “Hey Jade”. Turn it off"></button>
         <div id="toasts" class="toasts no-drag"></div>
         <div id="cards" class="cards no-drag" aria-live="assertive"></div>
       </section>
@@ -53,8 +56,8 @@
             <span class="mic-ring" aria-hidden="true"></span>
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3M8.5 21h7" /></svg>
           </button>
-          <textarea id="input" rows="1" placeholder="Message Claude…" aria-label="Message Claude" spellcheck="true"></textarea>
-          <button id="shot" type="button" class="shot-btn" hidden aria-pressed="false" aria-label="Let Claude see you with the next message" title="📷 Let Claude see you with your next message">
+          <textarea id="input" rows="1" placeholder="Message Jade…" aria-label="Message Jade" spellcheck="true"></textarea>
+          <button id="shot" type="button" class="shot-btn" hidden aria-pressed="false" aria-label="Let Jade see you with the next message" title="📷 Let Jade see you with your next message (the picture goes to Claude)">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" /></svg>
           </button>
           <button id="send" type="submit" class="send-btn" aria-label="Send" title="Send (Enter)">

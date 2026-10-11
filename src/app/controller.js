@@ -25,7 +25,7 @@ import { spokenPermissionPrompt, summarizeToolInput, toolChipLabel, toolCue, cli
 import { SentenceChunker } from './sentence-chunker.js';
 import { withDefaults } from './settings-defaults.js';
 import { SpeechQueue } from './speech-queue.js';
-import { toSpeechText } from './speech-text.js';
+import { toSpeechText, wakeSafeSpeech } from './speech-text.js'; // wake: wakeSafeSpeech
 
 /** @typedef {'idle'|'listening'|'transcribing'|'thinking'|'speaking'} ConversationState */
 export const CONVERSATION_STATES = /** @type {const} */ (['idle', 'listening', 'transcribing', 'thinking', 'speaking']);
@@ -34,7 +34,7 @@ export const CONVERSATION_STATES = /** @type {const} */ (['idle', 'listening', '
 export const AVATAR_STATE = Object.freeze({ idle: 'idle', listening: 'listening', transcribing: 'thinking', thinking: 'thinking', speaking: 'speaking' });
 
 /** Whisper's classic outputs for noise/silence; ignored for short utterances. */
-const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watching!?|you\.?|bye\.?|\.+|okay\.?|so\.?|uh\.?|um\.?)$/i;
+export const HALLUCINATION = /^(?:thank you\.?|thanks for watching!?|thank you for watching!?|you\.?|bye\.?|\.+|okay\.?|so\.?|uh\.?|um\.?)$/i; // wake: shared with src/wake/ (the command rules)
 
 /**
  * @typedef {object} ControllerView
@@ -126,7 +126,7 @@ export class Controller extends Emitter {
     this.pendingSends = 0;
     /** @type {Map<string, { requestId: string, turnId: string|null, toolName: string, input: object }>} */
     this.permissions = new Map();
-    /** @type {null | { mode: 'ptt'|'utterance' }} */
+    /** @type {null | { mode: 'ptt'|'utterance', wake?: any }} wake: a wake capture's meta */
     this.listen = null;
     this.handsFree = false;
     this.claudeStatus = /** @type {Record<string, any>} */ ({ status: 'starting' });
@@ -168,6 +168,20 @@ export class Controller extends Emitter {
     this._interceptor = null;
     /** when wake() last woke the avatar (postpones sleep, but is not user activity) */
     this._wokeAt = -Infinity;
+    // ---- "Hey Jade" (wake word; src/wake/, contract-wake §9.4) ----
+    /** @type {WakeWordAdapter|null} */
+    this._wakeWord = null;
+    this._wakeIdleTimer = null;
+    this._wakeCancelling = false;
+    /** the last message's turn id and whether it was spoken by the user (the follow-up window) */
+    this._lastTurnId = /** @type {string|null} */ (null);
+    this._lastTurnVoice = false;
+    this._localTurns = 0;
+    /** what she said last: 'say' (her own line: the camera's hello, an alert), 'confirm' (a local
+     * command's say() confirmation), 'reply'; a say() line never opens a follow-up (FUP-1) */
+    this._lastSpokeKind = /** @type {null|'say'|'confirm'|'reply'} */ (null);
+    this._wakeConfirmPending = false;
+    // ---- end "Hey Jade" ----
   }
 
   // ------------------------------------------------------------------------------------------
@@ -245,6 +259,7 @@ export class Controller extends Emitter {
     this._clearTimeout(this._errorTimer);
     this._clearTimeout(this._resumeTimer);
     this._clearTimeout(this._thinkTimer);
+    this._clearTimeout(this._wakeIdleTimer); // wake:
     this._sttAbort?.abort();
     this.speech.clear();
     this.lipsync.dispose?.();
@@ -299,8 +314,13 @@ export class Controller extends Emitter {
     const hidden = !!o.hidden;
     if (!hidden) this.noteActivity();
     if (this.listen) this._cancelListening();
+    this._lastTurnVoice = source === 'voice' && !hidden; // wake: only a spoken turn opens a follow-up window
+    this._lastSpokeKind = null; // wake:
     // a local command ("camera left"): the user's bubble, no Claude turn
-    if (!hidden && this._interceptor && this._intercepted(clean, source)) return true;
+    if (!hidden && this._interceptor && this._intercepted(clean, source)) {
+      this._lastTurnId = `local-${++this._localTurns}`; // wake: its confirmation may open a follow-up
+      return true;
+    }
     // Newer input wins: the running reply is interrupted and older messages that have not
     // started yet are dropped (they would otherwise be answered — and spoken — first).
     if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
@@ -344,6 +364,7 @@ export class Controller extends Emitter {
     send
       .then((r) => {
         if (!r || typeof r.turnId !== 'string') return;
+        if (gen === this._sendGen) this._lastTurnId = r.turnId; // wake:
         this._userMsgByTurn.set(r.turnId, msgId);
         const t = this.turns.get(r.turnId);
         if (t) t.userMsgId = msgId;
@@ -374,6 +395,7 @@ export class Controller extends Emitter {
       this._toast(this.stt.unavailableReason?.() || 'Voice input is unavailable.', 'info');
       return Promise.resolve(false);
     }
+    if (this.listen?.wake) this._cancelListening(); // wake: push-to-talk wins over a wake capture (T14)
     if (this.listen) return this._micStarting || Promise.resolve(true);
     // barge-in: stop talking and stop the current reply
     if (this.speech.busy || this.activeTurnId) this._preempt();
@@ -419,24 +441,40 @@ export class Controller extends Emitter {
     } catch (err) {
       this._toast(errMsg(err), 'error');
     }
+    if (!res && l.wake) {
+      // wake: a wake capture that heard nothing ends silently (END-3)
+      this._wakeWord?.noSpeech?.(l.wake);
+      this._restoreAfterWake();
+      return;
+    }
     if (!res) {
       this._toast("I didn't hear anything.", 'info');
       this._setState('idle');
       this._maybeIdle();
       return;
     }
-    await this._transcribe(res);
+    if (l.wake) this._wakeWord?.captured?.(l.wake); // wake:
+    await this._transcribe(res, l.wake); // wake: its meta
   }
 
   /** Hotkey / mic-button toggle: stop+send while listening; barge in while busy; else listen. */
   toggleListening() {
     this.noteActivity();
+    // wake: during a follow-up or look-and-talk window: listen now, with the chime (T13)
+    if (this.listen?.wake && this.listen.wake.kind !== 'command' && this.wakeWordActive) {
+      this._wakeWord?.manual({ from: 'hotkey' });
+      return Promise.resolve();
+    }
     if (this.listen) return this.stopListening();
     const busy = this.speech.busy || !!this.activeTurnId || this.pendingSends > 0;
     if (!this.mic || !this.stt.available()) {
       // no voice input: the hotkey still stops a reply; otherwise explain how to enable it
       if (busy) this.interrupt();
       else this._toast(this.stt.unavailableReason?.() || 'Voice input is unavailable.', 'info');
+      return Promise.resolve();
+    }
+    if (this.wakeWordActive && !busy && this.state === 'idle') {
+      this._wakeWord?.manual({ from: 'hotkey' }); // wake: listen now, no name needed (T13)
       return Promise.resolve();
     }
     if (this.handsFree && !busy && this.state === 'idle') {
@@ -450,6 +488,10 @@ export class Controller extends Emitter {
   async bargeIn() {
     this.noteActivity();
     this._preempt();
+    if (this.wakeWordActive) {
+      this._wakeWord?.manual({ from: 'barge' }); // wake: stopped; now listening, with the chime (T13)
+      return;
+    }
     if (this.handsFree) {
       this._maybeIdle();
       return;
@@ -547,18 +589,172 @@ export class Controller extends Emitter {
   /** @param {string} text @param {string} source @returns {boolean} handled */
   _intercepted(text, source) {
     let handled = false;
+    this._wakeConfirmPending = true; // wake: a say() from the command is its confirmation
     try {
       handled = /** @type {CommandInterceptor} */ (this._interceptor)(text, { source }) === true;
     } catch (err) {
       console.warn('[controller] command interceptor failed', err);
     }
-    if (!handled) return false;
+    if (!handled) {
+      this._wakeConfirmPending = false; // wake:
+      return false;
+    }
     // newer input wins, as for a message to Claude; the command confirms itself with say()
     if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
     this.view.addUserMessage?.(text, { source });
     this._maybeIdle();
     return true;
   }
+
+  // ---- "Hey Jade" (wake word; src/wake/, contract-wake §9.4) ----
+  /**
+   * What src/wake/feature.js gives the controller. Names avoid wake() (the Home camera's).
+   * @typedef {object} WakeWordAdapter
+   * @property {() => boolean} active      wake mode is on and running (the name is required: no "listen to everything")
+   * @property {() => boolean} [fallback]  the transcript check runs (no engine): the hands-free VAD hands every utterance to decide()
+   * @property {(o: { from: 'hotkey'|'mic-button'|'barge' }) => void} manual
+   * @property {(info: { turnId: string|null, voiceTurn: boolean, spoke: boolean, permissionPending: boolean, say: boolean }) => void} idle
+   * @property {(s: ConversationState) => void} state
+   * @property {(text: string, meta: object, o: { speechMs: number, failed?: boolean }) => Promise<import('../wake/phrase.js').WakeDecision>} decide
+   * @property {(meta: object) => void} noSpeech
+   * @property {(meta: object) => void} [captured]   a wake capture's utterance ended (being transcribed)
+   * @property {(meta: object) => void} [cancelled]  push-to-talk, typing or Esc took a wake capture over
+   */
+
+  /** @param {WakeWordAdapter|null} adapter null removes it */
+  setWakeWord(adapter) {
+    this._wakeWord = adapter || null;
+    this._syncHandsFree();
+  }
+
+  /** The wake word is on and running: speech without her name is not for her. */
+  get wakeWordActive() {
+    try {
+      return !!this._wakeWord && !!this._wakeWord.active();
+    } catch {
+      return false;
+    }
+  }
+
+  /** The adapter's running / transcript-check state changed: hands-free follows. */
+  wakeWordChanged() {
+    this._syncHandsFree();
+  }
+
+  /**
+   * Listen for the wake word: the command after "Hey Jade" (from the sample where the keyword
+   * ended), a follow-up window, look-and-talk. show: the listening state now (false while a
+   * barge-in or a strict-mode wake is still being checked). Push-to-talk and typing win over it.
+   * @param {{ kind: 'command'|'followup'|'look', fromSample?: number, noSpeechMs: number, show?: boolean, meta?: object }} o
+   * @returns {Promise<boolean>} the mic started
+   */
+  wakeWordCapture(o) {
+    if (!this.mic || !this.stt.available()) return Promise.resolve(false);
+    if (this.listen && !this.listen.wake) return Promise.resolve(false);
+    if (this.listen) {
+      this._wakeCancelling = true;
+      try { this._cancelListening(); } finally { this._wakeCancelling = false; }
+    }
+    const meta = { kind: o.kind, ...(o.meta || {}) };
+    const l = { mode: /** @type {const} */ ('utterance'), wake: meta };
+    this.listen = l;
+    if (o.show !== false) this.wakeWordShow();
+    const p = Promise.resolve()
+      .then(() => this.mic.start('utterance', { fromSample: o.fromSample, noSpeechMs: o.noSpeechMs }))
+      .then(() => true, (err) => {
+        if (this.listen === l) {
+          this.listen = null;
+          this.view.setListening?.(null);
+          this._toast(errMsg(err), 'error');
+          this._restoreAfterWake();
+        }
+        return false;
+      });
+    return p;
+  }
+
+  /** The wake capture is shown as listening (after a strict-mode wake was verified). */
+  wakeWordShow() {
+    if (!this.listen?.wake) return;
+    this.view.setListening?.('utterance');
+    this._setState('listening');
+  }
+
+  /** Cancel the wake capture silently; the state goes back to whatever still runs. */
+  wakeWordCancel() {
+    if (!this.listen?.wake) return;
+    this._wakeCancelling = true;
+    try { this._cancelListening(); } finally { this._wakeCancelling = false; }
+    this._restoreAfterWake();
+  }
+
+  /** "Hey Jade" while a reply is being prepared: what it says from now on is not spoken. */
+  wakeWordQuiet() {
+    this._silenceTurns();
+    if (this.speech.busy) this.speech.clear();
+  }
+
+  /** After a wake capture ended without a message: speaking, thinking or idle. */
+  _restoreAfterWake() {
+    if (this.listen) return;
+    if (this.speech.busy) this._setState('speaking');
+    else if (this.activeTurnId || this.pendingSends > 0) this._setState('thinking');
+    else this._setState('idle');
+    this._maybeIdle();
+  }
+
+  /**
+   * A wake capture's transcript: the adapter decides (src/wake/phrase.js decideCommand).
+   * @param {string} text @param {any} meta @param {{ speechMs?: number }} u @param {{ failed?: boolean }} [o]
+   */
+  async _wakeDecide(text, meta, u, o = {}) {
+    let d = null;
+    try {
+      d = this._wakeWord ? await this._wakeWord.decide(text, meta, { speechMs: u.speechMs || 0, failed: !!o.failed }) : null;
+    } catch (err) {
+      console.warn('[controller] the wake word could not decide', err);
+    }
+    switch (d?.action) {
+      case 'send':
+        this.sendText(d.text, { source: 'voice' });
+        return;
+      case 'interrupt':
+        this.interrupt();
+        return;
+      case 'again':
+        return; // the adapter listens for the rest of the command window
+      default:
+        this._restoreAfterWake(); // end, drop, local: silently
+    }
+  }
+
+  /** The wake idle hook: after the 350 ms tail, a reply may open the follow-up window (T10). */
+  _armWakeIdle() {
+    if (!this._wakeWord) return;
+    this._clearTimeout(this._wakeIdleTimer);
+    this._wakeIdleTimer = this._setTimeout(() => {
+      this._wakeIdleTimer = null;
+      if (this.state !== 'idle' || this.listen || this.speech.busy || this.activeTurnId || this.pendingSends > 0) return;
+      const t = this._lastTurnId ? this.turns.get(this._lastTurnId) : null;
+      const info = { turnId: this._lastTurnId, voiceTurn: this._lastTurnVoice, spoke: !!t?.spoke, permissionPending: !!this.permissions.size, say: this._lastSpokeKind === 'say' };
+      // the turn's one chance at a follow-up window is used now, whether it opens or not (the PC
+      // was locked, the camera saw nobody…): a later say() line can never open it for that turn
+      this._lastTurnVoice = false;
+      this._wakeConfirmPending = false;
+      if (!this.wakeWordActive) return;
+      try {
+        this._wakeWord?.idle(info);
+      } catch (err) {
+        console.warn('[controller] the wake word idle hook failed', err);
+      }
+    }, 350);
+  }
+
+  /** The user chose the wake word (and the feature is there): hands-free waits for her name. */
+  _wakeWordOn() {
+    return !!this._wakeWord && !!this.settings.wake?.enabled;
+  }
+  // ---- end "Hey Jade" ----
 
   /**
    * Hands-free listening may run (true) or must wait (false): the camera's look-to-talk closes
@@ -587,6 +783,8 @@ export class Controller extends Emitter {
     const clean = String(text ?? '').trim();
     if (!clean || !this.isIdle()) return false;
     const id = `say-${++this._sayCounter}`;
+    this._lastSpokeKind = this._wakeConfirmPending ? 'confirm' : 'say'; // wake: her own line opens no follow-up
+    this._wakeConfirmPending = false; // wake:
     this.view.assistantStart?.(id);
     this.view.assistantDelta?.(id, clean);
     this.view.assistantEnd?.(id, {});
@@ -946,9 +1144,10 @@ export class Controller extends Emitter {
   /** @param {any} t @param {string[]} chunks */
   _enqueue(t, chunks) {
     for (const c of chunks) {
-      const text = toSpeechText(c);
+      const text = wakeSafeSpeech(toSpeechText(c)); // wake: never "hey Jade" in her own voice
       if (!text) continue;
       t.spoke = true;
+      this._lastSpokeKind = 'reply'; // wake:
       this.speech.push(text, { turnId: t.id, kind: 'reply' });
     }
   }
@@ -1025,9 +1224,11 @@ export class Controller extends Emitter {
 
   _cancelListening() {
     if (this.listen) {
+      const w = this.listen.wake; // wake:
       this.listen = null;
       this.view.setListening?.(null);
       try { this.mic?.cancel(); } catch { /* ignore */ }
+      if (w && !this._wakeCancelling) this._wakeWord?.cancelled?.(w); // wake: push-to-talk, typing, Esc
     }
     if (this._sttAbort) {
       this._sttAbort.abort();
@@ -1037,6 +1238,8 @@ export class Controller extends Emitter {
 
   /** @param {{ wav: ArrayBuffer, durationMs: number, speechMs: number }} u */
   _onMicUtterance(u) {
+    // wake: a wake capture's meta, or the transcript check's for a hands-free utterance
+    const meta = this.listen?.wake || (!this.listen && this.handsFree && this.wakeWordActive ? { kind: 'fallback' } : undefined);
     if (this.listen && this.listen.mode === 'utterance') {
       this.listen = null;
       this.view.setListening?.(null);
@@ -1044,10 +1247,12 @@ export class Controller extends Emitter {
       return; // stray event (e.g. after cancel)
     }
     if (this.handsFree) this.mic.pause();
-    this._transcribe(u);
+    if (meta && meta.kind !== 'fallback') this._wakeWord?.captured?.(meta); // wake:
+    this._transcribe(u, meta); // wake: meta
   }
 
   _onMicSpeechStart() {
+    if (this.wakeWordActive && !this.listen) return; // wake: speech without her name changes nothing
     if (this.handsFree && !this.listen && this.state === 'idle') {
       this._setState('listening');
       // Idle with speech queued can only be a say() line still being synthesized (the camera's
@@ -1060,8 +1265,15 @@ export class Controller extends Emitter {
   /** @param {{ reason: string }} d */
   _onMicDiscard(d) {
     if (d?.reason === 'no-speech' && this.listen?.mode === 'utterance') {
+      const w = this.listen.wake; // wake:
       this.listen = null;
       this.view.setListening?.(null);
+      if (w) {
+        // wake: the window closes silently (END-3)
+        this._wakeWord?.noSpeech?.(w);
+        this._restoreAfterWake();
+        return;
+      }
       this._toast("I didn't hear anything.", 'info');
       this._setState('idle');
       this._maybeIdle();
@@ -1076,6 +1288,8 @@ export class Controller extends Emitter {
   _onMicError(err) {
     this._toast(errMsg(err), 'error');
     if (this.listen) {
+      const w = this.listen.wake; // wake:
+      if (w) this._wakeWord?.cancelled?.(w); // wake:
       this.listen = null;
       this.view.setListening?.(null);
       this._setState('idle');
@@ -1083,26 +1297,36 @@ export class Controller extends Emitter {
     this._maybeIdle();
   }
 
-  /** @param {{ wav: ArrayBuffer, durationMs: number, speechMs: number }} u */
-  async _transcribe(u) {
-    this._setState('transcribing');
+  /**
+   * @param {{ wav: ArrayBuffer, durationMs: number, speechMs: number }} u
+   * @param {any} [meta] wake: the wake capture's (or the transcript check's) meta: the adapter decides, silently
+   */
+  async _transcribe(u, meta) {
+    if (meta?.kind !== 'fallback') this._setState('transcribing'); // wake: the transcript check is silent
     const ctrl = new AbortController();
     this._sttAbort = ctrl;
     let text = '';
+    // wake: Esc, push-to-talk or typing aborted the transcription: the adapter must hear it, or its
+    // episode would wait for a decision forever (and ignore her name meanwhile)
+    const aborted = () => {
+      if (meta && meta.kind !== 'fallback') this._wakeWord?.cancelled?.(meta); // wake:
+    };
     try {
       const r = await this.stt.transcribe(u.wav, { signal: ctrl.signal });
       text = String(r?.text || '').trim();
     } catch (err) {
-      if (ctrl.signal.aborted || isAbortError(err)) return;
+      if (ctrl.signal.aborted || isAbortError(err)) return aborted(); // wake:
       this._sttAbort = null;
+      if (meta) return this._wakeDecide('', meta, u, { failed: true }); // wake: no toast
       this._toast(`Speech recognition failed: ${errMsg(err)}`, 'error');
       this._flashError();
       this._setState('idle');
       this._maybeIdle();
       return;
     }
-    if (ctrl.signal.aborted) return;
+    if (ctrl.signal.aborted) return aborted(); // wake:
     this._sttAbort = null;
+    if (meta) return this._wakeDecide(text, meta, u); // wake: empty and hallucinations drop silently there
     if (!text || (HALLUCINATION.test(text) && (u.speechMs || 0) < 1500)) {
       this._toast("Sorry, I didn't catch that.", 'info');
       this._setState('idle');
@@ -1113,7 +1337,9 @@ export class Controller extends Emitter {
   }
 
   _syncHandsFree() {
-    const want = !!this.settings.voice.handsFree && !!this.mic && this.stt.available();
+    // wake: with "Hey Jade" on, hands-free runs only as the transcript check (§4.1, §8.4)
+    const wakeOn = this._wakeWordOn();
+    const want = (wakeOn ? this.wakeWordActive && !!this._wakeWord?.fallback?.() : !!this.settings.voice.handsFree) && !!this.mic && this.stt.available(); // wake:
     if (want !== this.handsFree) {
       this.handsFree = want;
       this.view.setHandsFree?.(want);
@@ -1128,7 +1354,7 @@ export class Controller extends Emitter {
       if (this.mic.mode === 'handsfree') this.mic.pause();
       return;
     }
-    if (!this._listenGate) {
+    if (!this._listenGate && !this._wakeWordOn()) { // wake: the name always works
       // look-to-talk: wait until the user looks at the screen (the mic is not even opened)
       if (this.mic.mode === 'handsfree') this.mic.pause();
       return;
@@ -1164,6 +1390,7 @@ export class Controller extends Emitter {
     // half-duplex: hands-free listening pauses while the avatar is busy
     if (this.handsFree && this.mic && s !== 'idle' && s !== 'listening' && this.mic.mode === 'handsfree') this.mic.pause();
     this.emit('state', s);
+    try { this._wakeWord?.state(s); } catch (err) { console.warn('[controller] the wake word state hook failed', err); } // wake:
   }
 
   _maybeIdle() {
@@ -1187,6 +1414,7 @@ export class Controller extends Emitter {
       // short tail so the end of our own audio is not picked up
       this._resumeTimer = this._setTimeout(() => this._armHandsFree(), 350);
     }
+    this._armWakeIdle(); // wake: the follow-up window opens after the same tail (T10)
   }
 
   /** @param {number} ms */

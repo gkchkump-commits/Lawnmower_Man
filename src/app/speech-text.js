@@ -5,6 +5,20 @@
 // box-drawing junk, and a few symbols spelled out ("&" → "and", "→" → "to"). Works on whole
 // replies as well as on the sentence-sized chunks produced by sentence-chunker.js.
 
+// ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+/**
+ * What she says must not wake her up: a reply that puts a greeting or "say" right before her name
+ * ("Just say hey Jade", "OK Jade") is reworded for the voice only (the chat keeps the text). The
+ * persona forbids those words; this catches what slips through (the text mask is the last line).
+ * @param {string} text speech text
+ */
+export function wakeSafeSpeech(text) {
+  return String(text ?? '')
+    .replace(/\b(just\s+)?(?:say|says|said|saying)\s*[,:]?\s*["“'‘]?\s*(?:(?:hey|hi|hello|okay|ok)\b[\s,.!?;:-]*)?jade\b["”'’]?/gi, (_m, just) => `${just || ''}call my name`)
+    .replace(/\b(hey|hi|hello|okay|ok)\b(?:[\s,.!?;:"“”'‘’-]+)jade\b/gi, (_m, w) => `${w} there`);
+}
+// ---- end "Hey Jade" ----
+
 export const SPEECH_PHRASES = Object.freeze({
   code: "I've put the code in the chat.",
   table: "I've put a table in the chat.",

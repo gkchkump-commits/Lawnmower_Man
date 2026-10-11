@@ -113,10 +113,11 @@ export class PermissionCards {
     const body = h('div', { class: 'perm-body' });
     const renderBody = (/** @type {import('../app/permission.js').PermissionSummary} */ sum, /** @type {boolean} */ expanded) => {
       body.replaceChildren();
-      // the app's own words are not Claude's: only what Claude wrote gets "Claude says:"
+      // the app's own words are not hers: only what Claude wrote gets "Jade says:" (Jade is the
+      // character Claude plays; contract-wake §10.2)
       if (sum.note) body.append(h('p', { class: 'perm-desc perm-note' }, sum.note));
       const explanation = sum.explanation || (req.description && req.description !== sum.title ? req.description : '');
-      if (explanation) body.append(h('p', { class: 'perm-desc' }, h('span', { class: 'k' }, 'Claude says: '), explanation));
+      if (explanation) body.append(h('p', { class: 'perm-desc' }, h('span', { class: 'k' }, 'Jade says: '), explanation));
       if (sum.target) body.append(h('pre', { class: 'perm-target' }, sum.target));
       const details = [];
       if (sum.detail) details.push(h('pre', { class: 'perm-detail' }, sum.detail));
@@ -150,7 +151,7 @@ export class PermissionCards {
     },
     h('div', { class: 'perm-head' },
       icon('shield', 'icon'),
-      h('span', { class: 'perm-ask' }, 'Claude wants to use'),
+      h('span', { class: 'perm-ask' }, 'Jade wants to use'),
       h('span', { class: 'perm-tool', title: req.toolName }, toolDisplayName(req.toolName, req.input)),
       h('span', { class: `perm-risk ${s.risk}` }, RISK_LABEL[s.risk] || 'uses a tool')),
     h('div', { class: 'perm-title', id: titleId }, s.title),

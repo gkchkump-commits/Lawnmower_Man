@@ -139,6 +139,36 @@ describe('package.json build (electron-builder)', () => {
     for (const w of ['TensorFlow Lite', 'XNNPACK', 'Protocol Buffers', 'Eigen', 'OpenCV', '## BSD-3-Clause License', 'MPL-2.0']) expect(notices, w).toContain(w);
   });
 
+  // ---- "Hey Jade" (docs/WAKE.md; contract-wake §3.2, §5.1) ----
+  it('ships the "Hey Jade" engine per platform (addon, model B, the VAD, licences), never the zh-en model', () => {
+    for (const [os, key] of [['win', 'win32-x64'], ['linux', 'linux-x64']]) {
+      const r = build[os].extraResources;
+      expect(r).toEqual(expect.arrayContaining([
+        { from: `vendor/wake/sherpa-onnx/${key}`, to: `wake/sherpa-onnx/${key}` },
+        // only model B and the VAD: the folder never holds model A, and the filter keeps it that way
+        { from: 'vendor/wake/models', to: 'wake/models', filter: ['gigaspeech-3.3m/**', 'silero_vad.onnx'] },
+        { from: 'vendor/wake/LICENSES', to: 'wake/LICENSES' },
+      ]));
+      const wake = r.filter((x) => x.from.startsWith('vendor/wake'));
+      expect(wake).toHaveLength(3);
+      expect(JSON.stringify(wake)).not.toMatch(/dev-models|zh-en/);
+      expect(wake.filter((x) => x.from.startsWith('vendor/wake/sherpa-onnx/')).map((x) => x.from)).toEqual([`vendor/wake/sherpa-onnx/${key}`]);
+    }
+    // nothing of vendor/ in app.asar or the shared resources; the utility's entry is in electron/**
+    expect(JSON.stringify(build.extraResources)).not.toMatch(/vendor\/wake/);
+    expect(build.files.some((f) => /vendor/.test(f))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'electron/wake/utility/main.js'))).toBe(true);
+    // the packaged smoke test checks resources/wake against the pins, with an allowlist
+    const e2e = readText('scripts/electron-e2e.mjs');
+    expect(e2e).toContain('packagedWakeChecks(info.resourcesPath)');
+    expect(e2e).toContain("'app.asar/electron/wake/utility/main.js'");
+    for (const k of ['fetch:wake', 'wake:smoke', 'wake:eval', 'test:wake-e2e']) expect(pkg.scripts[k], k).toBeTruthy();
+    // the notices name what ships, and say that the zh-en model does not
+    const notices = readText('THIRD_PARTY_NOTICES.md');
+    for (const w of ['sherpa-onnx', 'ONNX Runtime', 'GigaSpeech', 'Silero VAD', 'zh-en']) expect(notices, w).toContain(w);
+  });
+  // ---- end "Hey Jade" ----
+
   it('has the build scripts the docs and the workflow use', () => {
     expect(pkg.scripts['dist:win']).toBe('vite build && electron-builder --win --publish never');
     expect(pkg.scripts['dist:linux-dir']).toMatch(/electron-builder --linux dir --publish never/);
@@ -177,6 +207,22 @@ describe('.github/workflows/release.yml', () => {
     expect(update).toMatch(/the update deleted user data/);
     expect(uninstall).toMatch(/the silent uninstall deleted user data/);
   });
+
+  // ---- "Hey Jade" ----
+  it('fetches the wake-word engine (never zh-en) before dist:win, loads it on Windows, checks the install', () => {
+    const fetch = yml.indexOf('run: npm run fetch:wake -- --platform win32-x64\n');
+    const smoke = yml.indexOf('run: node scripts/wake-smoke.mjs --no-zhen');
+    const dist = yml.indexOf('run: npm run dist:win');
+    expect(fetch).toBeGreaterThan(0);
+    expect(smoke).toBeGreaterThan(fetch);
+    expect(dist).toBeGreaterThan(smoke);
+    expect(yml).not.toMatch(/fetch:wake[^\n]*--with-zhen/);
+    for (const f of ['resources\\wake\\sherpa-onnx\\win32-x64\\sherpa-onnx.node', 'resources\\wake\\sherpa-onnx\\win32-x64\\onnxruntime.dll',
+      'resources\\wake\\models\\gigaspeech-3.3m\\encoder.int8.onnx', 'resources\\wake\\models\\silero_vad.onnx', 'resources\\wake\\LICENSES\\sherpa-onnx-LICENSE.txt']) expect(yml).toContain(f);
+    expect(yml).toContain('the zh-en wake-word model must not be installed');
+    expect(yml).toMatch(/sherpa-onnx\.node is not the pinned sherpa-onnx 1\.13\.8/);
+  });
+  // ---- end "Hey Jade" ----
 
   it('publishes only for v* tag pushes and releases published on GitHub (never for PRs or manual runs)', () => {
     expect(yml).toMatch(/tags: \['v\*'\]/);

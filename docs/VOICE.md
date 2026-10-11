@@ -108,7 +108,8 @@ The setup script does the following:
 3. Installs the GPU wheels described in section 3.
 4. Removes the CPU `onnxruntime` wheel that dependencies drag in.
 5. Checks CUDA.
-6. Downloads the models into `voice/models/`.
+6. Downloads the models into `voice/models/`: Whisper, Kokoro and the extra keyword model of the
+   ["Hey Jade" wake word](WAKE.md) (`kws/zh-en-3m/`, see [2.5](#25-the-hey-jade-wake-word)).
 7. Runs a smoke test that loads both engines and times one request each.
 
 It is idempotent: re-running it reuses the venv and skips models it already has. It needs no
@@ -152,6 +153,7 @@ The models are about 2.0 GB:
 | Whisper base.en (CPU fallback) | 145 MB |
 | Kokoro ONNX | 326 MB |
 | Kokoro voices | 28 MB |
+| "Hey Jade" keyword model A (zh-en 3M; a 33 MB download) | 5.5 MB |
 
 ---
 
@@ -246,6 +248,8 @@ the same shift; it was not measured separately.
 `python -m lawnmower_voice --fake` needs no models:
 
 * **STT** returns `"Hello Claude, this is a test of the fake voice server."` for non-silent audio and `""` for silence. Override the text with `LAWNMOWER_VOICE_FAKE_TEXT`.
+* **Scripted STT answers:** `LAWNMOWER_VOICE_FAKE_TEXTS=<path to a JSON array of strings>` answers each `/stt` call that hears sound with the next entry; the last one repeats, and it wins over `LAWNMOWER_VOICE_FAKE_TEXT`. Silence takes no entry. Rewriting the file starts over from its first entry, so one server can serve several test scenarios. The "Hey Jade" end-to-end test (`scripts/wake-e2e.mjs`) answers the wake segment and then the command this way. A missing or malformed file is a `503` that names the problem.
+* `LAWNMOWER_VOICE_FAKE_STT_LOG=<path>` appends one JSON line per such call (`{"n", "durationSec", "text"}`), so a test can count the calls and see how long each segment was.
 * **TTS** synthesises a short formant buzz with an exact viseme timeline.
 * `LAWNMOWER_VOICE_FAKE_DELAY_MS` adds latency.
 
@@ -378,6 +382,27 @@ WAV path in `src/audio/wav.js`.
 **Tuning or demos:** `node tools/voicefx/render.mjs --dry --out DIR clip.wav …` renders every
 character at 40/60/90 % with the app's own DSP (resampled to 48 kHz like the AudioContext); the
 preset parameters are `presetParams()` in `src/audio/voicefx.js`.
+
+### 2.5 The "Hey Jade" wake word
+
+[WAKE.md](WAKE.md) is the guide. What it means for the voice server:
+
+* **Stage 2 is `/stt`.** The keyword spotter itself runs in the app ("Jade wake word" utility
+  process), not in Python: it needs no new pip package and its onnxruntime never meets
+  `onnxruntime-gpu`. When the spotter fires, the renderer sends only the **wake segment**
+  (≤ 2.65 s) to `/stt` to check that it was really a call, then the command on its own. Neither
+  call uses `--stt-hotwords` or an initial prompt: a "Jade" hotword turns "Hey Jay" into "hey
+  Jade". Nothing is sent to `/stt` while nobody calls her. The check needs the server: while it
+  starts or restarts, "Hey Jade" shows *starting…*; without it, *needs the local voice*; either way
+  the microphone stays closed.
+* **The extra keyword model (A)** has no stated licence, so the installer does not ship it; this
+  package downloads it on the user's PC into `<models>/kws/zh-en-3m/` with pinned SHA-256 hashes:
+  `python -m lawnmower_voice.download --kws` (the default when neither `--skip-kws` nor
+  `--kws-only` is given, so the setup scripts fetch it), `--kws-only` (only that model), `--check`
+  (report, download nothing), `--json` (one result line). The app runs `--kws-only --check --json`
+  when the wake word starts and, if the model is missing, `--kws-only --json` once per run in the
+  background; Jade works with the shipped model meanwhile. `LAWNMOWER_VOICE_KWS_URL` sets a
+  mirror. A failed wake-word download does not fail a full setup run.
 
 ---
 

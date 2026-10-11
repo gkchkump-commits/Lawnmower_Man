@@ -24,6 +24,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:wake-e2e": "node scripts/wake-e2e.mjs",
     "test:voice": "cd voice && python -m pytest -q",
     "lint": "eslint .",
     "dist": "vite build && electron-builder --publish never",
@@ -33,6 +34,9 @@
     "dist:linux-dir": "vite build && electron-builder --linux dir --publish never",
     "test:packaged": "node scripts/electron-e2e.mjs --packaged",
     "fetch:go2rtc": "node scripts/fetch-go2rtc.mjs",
+    "fetch:wake": "node scripts/fetch-wake.mjs",
+    "wake:smoke": "node scripts/wake-smoke.mjs",
+    "wake:eval": "node tools/wake/eval-folder.mjs",
     "probe:tapo": "node tools/tapo-probe.mjs",
     "sim:tapo": "node tools/tapo-sim --onvif-port 12020 --rtsp-port 10554 --control-port 12021",
     "test:tapo-e2e": "node scripts/tapo-e2e.mjs"
@@ -135,6 +139,22 @@
         {
           "from": "vendor/go2rtc/LICENSE",
           "to": "tapo/go2rtc-LICENSE.txt"
+        },
+        {
+          "from": "vendor/wake/sherpa-onnx/win32-x64",
+          "to": "wake/sherpa-onnx/win32-x64"
+        },
+        {
+          "from": "vendor/wake/models",
+          "to": "wake/models",
+          "filter": [
+            "gigaspeech-3.3m/**",
+            "silero_vad.onnx"
+          ]
+        },
+        {
+          "from": "vendor/wake/LICENSES",
+          "to": "wake/LICENSES"
         }
       ]
     },
@@ -175,6 +195,22 @@
         {
           "from": "vendor/go2rtc/LICENSE",
           "to": "tapo/go2rtc-LICENSE.txt"
+        },
+        {
+          "from": "vendor/wake/sherpa-onnx/linux-x64",
+          "to": "wake/sherpa-onnx/linux-x64"
+        },
+        {
+          "from": "vendor/wake/models",
+          "to": "wake/models",
+          "filter": [
+            "gigaspeech-3.3m/**",
+            "silero_vad.onnx"
+          ]
+        },
+        {
+          "from": "vendor/wake/LICENSES",
+          "to": "wake/LICENSES"
         }
       ]
     }

@@ -44,7 +44,8 @@ test.describe('hardening (mock bridge)', () => {
     await expect(card).toHaveCount(1); // not decided
     expect(await page.evaluate(() => window.__app.bridge.__mock.pendingPermissions().length)).toBe(1);
     await expect(card.locator('.perm-title')).toHaveText('Run a command');
-    await expect(card.locator('.perm-desc')).toHaveText('Claude says: Run the test suite');
+    await expect(card.locator('.perm-ask')).toHaveText('Jade wants to use');
+    await expect(card.locator('.perm-desc')).toHaveText('Jade says: Run the test suite');
     await expect(card.locator('.perm-target')).toHaveText('npm test -- --reporter=dot');
     await card.locator('.perm-allow').click(); // waits until the buttons are armed
     await expect(card).toHaveCount(0);
@@ -71,7 +72,7 @@ test.describe('hardening (mock bridge)', () => {
     await expect(card.locator('.perm-showall')).toHaveCount(0);
   });
 
-  test('a Home camera card: the app\'s own words are not "Claude says", the tool reads "Camera: snapshot"', async ({ page }) => {
+  test('a Home camera card: the app\'s own words are not "Jade says", the tool reads "Camera: snapshot"', async ({ page }) => {
     await boot(page);
     await page.evaluate(() => window.__app.bridge.__mock.emitClaude({
       type: 'permission_request', turnId: null, requestId: 'perm-cam', toolName: 'mcp__lawnmower-camera__camera_snapshot', input: {},
@@ -81,7 +82,7 @@ test.describe('hardening (mock bridge)', () => {
     await expect(card.locator('.perm-tool')).toHaveText('Camera: snapshot');
     await expect(card.locator('.perm-title')).toHaveText('Look through the home camera');
     await expect(card.locator('.perm-desc')).toHaveText('Claude gets one picture from the camera (it becomes part of the conversation).');
-    await expect(card).not.toContainText('Claude says');
+    await expect(card).not.toContainText(/(?:Jade|Claude) says/);
     await expect(card).not.toContainText('mcp__');
   });
 

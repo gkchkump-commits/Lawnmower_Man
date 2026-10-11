@@ -102,6 +102,7 @@ const check = (name, cond, detail) => {
 };
 
 const app = await electron.launch({ executablePath, args, env, timeout: 60000 });
+const launchedAt = Date.now();
 try {
   const page = await app.firstWindow();
   /** @type {string[]} */
@@ -487,6 +488,8 @@ async function wakeChecks(electronApp, page) {
     return;
   }
   const t0 = Date.now();
+  // (without the local voice the engine parks a minute after the app started: VOICE_PARK_MS)
+  out.enabledAfterLaunchMs = t0 - launchedAt;
   await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ wake: { enabled: true, explained: true } }));
   let w = await e2e();
   for (let i = 0; i < 120 && w && !['ready', 'error', 'missing'].includes(w.status.engine); i++) {
@@ -495,6 +498,12 @@ async function wakeChecks(electronApp, page) {
   }
   out.readyMs = Date.now() - t0;
   out.status = w?.status;
+  // the engine's own lines (the utility's output included): why it did or did not start
+  try {
+    out.log = fs.readFileSync(path.join(userData, 'logs', 'main.log'), 'utf8').split(/\r?\n/).filter((l) => l.includes('[wake]')).slice(-40);
+  } catch (err) {
+    out.log = [`(main.log: ${/** @type {Error} */ (err).message})`];
+  }
   check('turned on: the engine is ready with model B and the VAD', w?.status.engine === 'ready' && w.status.models.giga === 'ok' && w.status.models.vad === 'ok' && typeof w.status.loadMs === 'number', w?.status);
   // (Electron reports the serviceName as the row's name; serviceName is the Mojo service)
   const row = w?.rows.find((r) => r.pid === w.pid);

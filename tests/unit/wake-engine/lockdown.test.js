@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BLOCKED_MODULES, isBlocked } from '../../../electron/wake/utility/lockdown.js';
 import { checkPcm } from '../../../electron/wake/utility/protocol.js';
@@ -25,7 +25,7 @@ describe('the wake-word utility opens no sockets (in-process guard)', () => {
 
   it('in a fresh Node process: require and import of them fail, fetch is gone, the addon path (process.dlopen) stays', () => {
     const probe = `
-      import { lockdown } from ${JSON.stringify(path.join(root, 'electron/wake/utility/lockdown.js'))};
+      import { lockdown } from ${JSON.stringify(pathToFileURL(path.join(root, 'electron/wake/utility/lockdown.js')).href)};
       import { createRequire } from 'node:module';
       lockdown();
       const req = createRequire(import.meta.url);

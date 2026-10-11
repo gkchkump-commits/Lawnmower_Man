@@ -155,7 +155,7 @@ describe('"Hey Jade" across the lanes', () => {
   });
 
   it('the bridge: the preload, the mock and main expose the same wake surface and channels', () => {
-    const preload = fs.readFileSync(path.join(root, 'electron/preload.cjs'), 'utf8');
+    const preload = fs.readFileSync(path.join(root, 'electron/preload.cjs'), 'utf8').replace(/\r\n/g, '\n'); // (CRLF in a Windows checkout)
     const block = preload.match(/\n {2}wake: \{\n([\s\S]*?)\n {2}\},/)?.[1] || '';
     const preloadKeys = [...block.matchAll(/^ {4}(\w+): /gm)].map((m) => m[1]).sort();
     const mock = createMockWake({ getSettings: () => RENDERER_DEFAULTS, win: null });

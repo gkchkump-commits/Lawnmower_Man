@@ -1048,6 +1048,8 @@ describe('electron/main.js wiring', () => {
 
   it('shuts down child processes on will-quit, then quits', async () => {
     const claude = main.__test.state.claude;
+    // turning "Hey Jade" off above changed the persona, which restarts the CLI (slower on Windows)
+    for (let i = 0; i < 200 && claude.status().status !== 'ready'; i++) await new Promise((r) => setTimeout(r, 50));
     expect(claude.status().status).toBe('ready');
     const prevent = vi.fn();
     m.appEvents.get('will-quit')({ preventDefault: prevent });

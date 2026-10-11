@@ -65,7 +65,11 @@ function stats() {
 function init(m) {
   if (engine) return;
   try {
+    // (the stages in the log tell a slow or stuck start apart: no "started", the addon, the models)
+    const t0 = Date.now();
+    console.log('[wake] utility: loading the addon');
     const addon = loadAddon(String(m.addon));
+    console.log(`[wake] utility: addon loaded in ${Date.now() - t0} ms; loading the models`);
     const models = { giga: m.models.giga, vad: String(m.models.vad), zhen: m.models.zhen || null };
     engine = new WakeEngine({ addon, models, params: m.params || {}, log: (level, msg) => (level === 'error' ? console.error(msg) : console.log(msg)) });
     const r = engine.load();
@@ -122,6 +126,7 @@ function stop() {
   process.exit(0);
 }
 
+console.log(`[wake] utility: started (pid ${process.pid})`);
 parent.on('message', (/** @type {any} */ e) => {
   const m = e?.data;
   if (!m || typeof m !== 'object') return;

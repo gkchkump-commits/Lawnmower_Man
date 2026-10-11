@@ -23,7 +23,9 @@ describe('normalize', () => {
   it('word classes', () => {
     for (const w of ['jade', 'jaid', 'jayde', 'jada', 'gade', 'jades', 'jeid']) expect(JADE_LIKE.test(w), w).toBe(true);
     for (const w of ['jude', 'jay', 'jane', 'james', 'jaden', 'jed', 'jayden', 'jd']) expect(JADE_LIKE.test(w), w).toBe(false);
-    for (const w of ['jude', 'judah', 'judy', 'jujoo', 'jay', 'joey', 'jake', 'dave', 'jody', 'jodie', 'gage', 'jd', 'dj', 'dre', 'join', 'joy']) expect(RIVAL.test(w), w).toBe(true);
+    for (const w of ['jude', 'judah', 'judy', 'jujoo', 'jay', 'joey', 'jake', 'dave', 'jody', 'jodie', 'gage', 'jd', 'dj', 'dre']) expect(RIVAL.test(w), w).toBe(true);
+    // Whisper's spelling of a clean male "Hey Jade" far more often than of another name
+    for (const w of ['joy', 'join']) expect(RIVAL.test(w), w).toBe(false);
     for (const w of ['jade', 'jayden', 'jaden', 'hey', 'joke', 'jobs']) expect(RIVAL.test(w), w).toBe(false);
     for (const w of ['hey', 'hi', 'a', 'i', 'oh', 'hello']) expect(HEY_LIKE.test(w), w).toBe(true);
   });
@@ -43,6 +45,9 @@ describe('veto (the wake segment)', () => {
     // Whisper's misreadings of a clean "Hey Jade." that the veto keeps (eval §0.1: 23 % of them)
     ['I enjoyed it.', 'ok'],
     ['Hey Jayden!', 'ok'],
+    // Whisper's "Hey, joy!" for a clean male "Hey Jade" (11 times in the eval, 4 times a noisy "Hey Jane")
+    ['Hey, joy!', 'ok'],
+    ['Hey, join!', 'ok'],
     // rival names and the song
     ['Hey Jude.', 'jude'],
     ['Hey Jude, don\'t make it bad.', 'jude'],
@@ -88,8 +93,6 @@ describe('veto (the wake segment)', () => {
     ['Hey, J.D.', 'rival'],
     ['A hey, DJ.', 'rival'],
     ['Hey, Dre!', 'rival'],
-    ['Hey, join!', 'rival'],
-    ['hey joy', 'rival'],
     ['so, hey Jake', 'rival'],
     // "Hey Jayden": only when nothing follows it may it be her (Whisper's spelling of "Hey Jade.")
     ['Hey Jayden, come here.', 'rival'],

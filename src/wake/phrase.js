@@ -35,10 +35,12 @@ export function normalize(text) {
 export const JADE_LIKE = /^[jg](?:a|ai|ay|ei|ey|ae)i?d(?:e|ed|es|a)?$/;
 /**
  * names and words Whisper hears instead of her name (eval.md §7.2; "joey" added after its one
- * AGC-mix leak; Jodie, Gage, JD/DJ, Dre, join, joy after the review's fresh near-name and noisy-mix
- * clips woke her through the whole cascade)
+ * AGC-mix leak; Jodie, Gage, JD/DJ, Dre after the review's fresh near-name and noisy-mix clips
+ * woke her through the whole cascade). Not "joy" / "join": Whisper writes "Hey, joy!" for a clean
+ * male "Hey Jade" about ten times as often as for a noisy "Hey Jane" (11 positives vs 4 hard
+ * negatives in the eval's transcripts)
  */
-export const RIVAL = /^(?:jud\w*|juj\w*|jay|jays|j|jane|james|jams|jim|jimmy|jamie|jake|jen|jenn|jean|jack|joe|joey|jed|jason|jess|jesse|dave|kate|grace|wade|shade|fade|they|day|jod(?:y|ie|i|ee)(?:'s)?|jo|jd|dj|dre|join|joy|gage|gauge)$/;
+export const RIVAL = /^(?:jud\w*|juj\w*|jay|jays|j|jane|james|jams|jim|jimmy|jamie|jake|jen|jenn|jean|jack|joe|joey|jed|jason|jess|jesse|dave|kate|grace|wade|shade|fade|they|day|jod(?:y|ie|i|ee)(?:'s)?|jo|jd|dj|dre|gage|gauge)$/;
 /** "Jude" as Whisper writes it, also when the segment cuts it short ("Hey, Jujoo!") */
 export const JUDE_LIKE = /^ju[dj]\w*$/;
 /** "Jayden": Whisper's spelling of a real isolated "Hey Jade." too, so it counts as a rival only with words after it */

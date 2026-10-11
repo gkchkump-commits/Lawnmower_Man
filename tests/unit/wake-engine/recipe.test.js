@@ -242,13 +242,75 @@ describe('OnsetRecipe', () => {
     expect(a.streams.length).toBe(1);
   });
 
-  it('maxStreamMs renews a stream in continuous speech (off by default)', () => {
+  it('maxStreamMs renews the streams in continuous speech (8 s by default; 0 = off)', () => {
+    // (changed on purpose: on by default now, with the old streams overlapping)
     const { rec, a } = make({ recipe: { maxStreamMs: 2000 } });
     feed(rec, audio([['q', 1000], ['s', 7000], ['q', 1000]]));
     expect(a.streams.length).toBeGreaterThanOrEqual(3);
-    const { rec: off, a: a2 } = make();
-    feed(off, audio([['q', 1000], ['s', 7000], ['q', 1000]]));
-    expect(a2.streams.length).toBe(1);
+    expect(rec.stats.renewals).toBeGreaterThanOrEqual(2);
+    const { rec: def, a: a2 } = make();
+    feed(def, audio([['q', 1000], ['s', 7000], ['q', 1000]]));
+    expect(a2.streams.length).toBe(1); // 7 s: no renewal at 8 s
+    feed(def, audio([['s', 20000], ['q', 1000]]), 16000 * 9);
+    expect(def.stats.renewals).toBe(2);
+    const { rec: off } = make({ recipe: { maxStreamMs: 0 } });
+    feed(off, audio([['q', 1000], ['s', 20000], ['q', 1000]]));
+    expect(off.stats.renewals).toBe(0);
+  });
+
+  /** fires only on a marker it saw at least `needSamples` into its own stream (a keyword needs its context) */
+  function contextSpotter(needSamples) {
+    const sp = fakeSpotter();
+    const accept = sp.accept;
+    sp.accept = (s, x) => {
+      const before = s.due.length;
+      accept(s, x);
+      s.due = s.due.filter((d, i) => i < before || d.at >= needSamples);
+    };
+    return sp;
+  }
+
+  it('a call across a renewal is still heard: the old streams run on for overlapMs (no recall lost to renewing)', () => {
+    const need = 16000; // a spotter that needs 1 s of the call in its stream
+    const mk = (overlapMs) => {
+      const a = contextSpotter(need);
+      const rec = new OnsetRecipe({ spotters: [{ name: 'zhen', spotter: a }], vad: fakeVad(), maxStreamMs: 8000, overlapMs });
+      return { rec, a };
+    };
+    // continuous speech from 1 s; the streams began at 0.6 s (the pre-roll), so they are renewed at
+    // 8.6 s; the marker 0.2 s after that
+    const x = audio([['q', 1000], ['s', 7800], ['k', 'HEY_JADE'], ['s', 2000], ['q', 1000]]);
+    const withOverlap = mk(2000);
+    const hits = feed(withOverlap.rec, x);
+    expect(withOverlap.rec.stats.renewals).toBe(1);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].streamAt).toBe(16000 - 6400); // from the old stream (it began at the onset, minus the pre-roll)
+    // a plain renewal (no overlap) loses it: the new stream has not heard enough of the call
+    const plain = mk(0);
+    expect(feed(plain.rec, x)).toHaveLength(0);
+    // the old streams stop after the overlap
+    const fedOld = withOverlap.a.streams[0].fed.length;
+    expect(fedOld).toBeLessThan(16000 * 11);
+  });
+
+  it('re-anchors a hit whose timestamps drifted (long streams): endAt = emitAt − 0.45 s, its length kept', () => {
+    // a spotter whose stamps are 5 s early
+    const drift = fakeSpotter();
+    const drain = drift.drain;
+    drift.drain = (s) => drain(s).map((h) => ({ ...h, timestamps: h.timestamps.map((t) => t - 5) }));
+    const rec = new OnsetRecipe({ spotters: [{ name: 'zhen', spotter: drift }], vad: fakeVad(), maxStreamMs: 0 });
+    const hits = feed(rec, audio([['q', 1000], ['s', 7000], ['k', 'HEY_JADE'], ['s', 1200], ['q', 2000]]));
+    expect(hits).toHaveLength(1);
+    const h = hits[0];
+    expect(h.reanchored).toBe(true);
+    expect(h.emitAt - h.endAt).toBe(Math.round(0.45 * SR));
+    expect(h.endAt - h.startAt).toBe(4800); // the keyword's own length (0.3 s)
+    expect(rec.stats.reanchored).toBe(1);
+    // a plausible stamp (200 ms before the decision) is left alone
+    const { rec: ok } = make();
+    const [g] = feed(ok, audio([['q', 1000], ['s', 600], ['k', 'HEY_JADE'], ['s', 1200], ['q', 2000]]));
+    expect(g.reanchored).toBeUndefined();
+    expect(g.emitAt - g.endAt).toBeLessThan(0.9 * SR);
   });
 
   it('applies the level normaliser to what the spotters see, observing the raw input', () => {

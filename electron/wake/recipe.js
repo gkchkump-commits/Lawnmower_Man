@@ -13,7 +13,14 @@
 //   * a JADE hit (the name-only stream, wake.phrase = 'jade') counts only when its first token lies
 //     within namePrefixMs of the stream start ("Jade, …" at the very start of an utterance);
 //   * nothing is fed hangoverMs after the last speech block, and a gap in the sample indices (the
-//     mic reopened, a paused tap) ends any stream and resets the VAD.
+//     mic reopened, a paused tap) ends any stream and resets the VAD;
+//   * continuous speech without a quiet gap (TV, radio, a long reply of hers): after maxStreamMs a
+//     new set of streams starts and the old one keeps running for overlapMs, so a call that spans
+//     the renewal is still heard whole by the old streams (long streams lose wakes and their
+//     timestamps drift by seconds);
+//   * a hit whose last-token time lies more than stampLateMs before the moment it was decided is
+//     re-anchored to emitAt - reanchorMs: the decoder's timestamps drift in long streams, while a
+//     correct stamp is always ≤ 0.56 s before the decision (measured, TV bed and clean speech).
 // Sample indices (`at`) count 16 kHz samples of the renderer's Mic (monotonic, §6.3).
 
 import { RECIPE_DEFAULTS, SAMPLE_RATE } from './config.js';
@@ -46,6 +53,7 @@ import { RECIPE_DEFAULTS, SAMPLE_RATE } from './config.js';
  * @property {number} startAt    streamAt + first token time
  * @property {number} endAt      streamAt + last token time (≈ 90 ms before the acoustic end of "Jade")
  * @property {number} emitAt     sample index at which the hit was decided (end of the block)
+ * @property {boolean} [reanchored]  the stamps were implausible and were put just before emitAt
  */
 
 const PRIORITY = { HEY_JADE: 0, JADE: 1, HEY_JUDE: 2 };
@@ -53,7 +61,8 @@ const PRIORITY = { HEY_JADE: 0, JADE: 1, HEY_JUDE: 2 };
 export class OnsetRecipe {
   /**
    * @param {{ spotters: Array<{ name: string, spotter: SpotterLike }>, vad: VadLike, agc?: AgcLike|null, sampleRate?: number,
-   *   quietMs?: number, prerollMs?: number, hangoverMs?: number, maxStreamMs?: number, namePrefixMs?: number, nameFeedMs?: number,
+   *   quietMs?: number, prerollMs?: number, hangoverMs?: number, maxStreamMs?: number, overlapMs?: number, namePrefixMs?: number, nameFeedMs?: number,
+   *   stampLateMs?: number, reanchorMs?: number, maxKeywordMs?: number,
    *   blockSamples?: number, agcLookaheadMs?: number, onStreams?: (n: number) => void }} o
    */
   constructor(o) {
@@ -69,6 +78,10 @@ export class OnsetRecipe {
     this.preroll = ms(o.prerollMs ?? RECIPE_DEFAULTS.prerollMs);
     this.hangover = ms(o.hangoverMs ?? RECIPE_DEFAULTS.hangoverMs);
     this.maxStream = ms(o.maxStreamMs ?? RECIPE_DEFAULTS.maxStreamMs);
+    this.overlap = ms(o.overlapMs ?? RECIPE_DEFAULTS.overlapMs);
+    this.stampLate = ms(o.stampLateMs ?? RECIPE_DEFAULTS.stampLateMs);
+    this.reanchorBy = ms(o.reanchorMs ?? RECIPE_DEFAULTS.reanchorMs);
+    this.maxKeyword = ms(o.maxKeywordMs ?? RECIPE_DEFAULTS.maxKeywordMs);
     this.namePrefix = ms(o.namePrefixMs ?? RECIPE_DEFAULTS.namePrefixMs);
     // the name-only stream is useless once a call at the very start can no longer complete
     this.nameFeed = ms(o.nameFeedMs ?? (o.namePrefixMs ?? RECIPE_DEFAULTS.namePrefixMs) + 2000);
@@ -90,9 +103,10 @@ export class OnsetRecipe {
     this._lastSpeechEnd = -Infinity;
     this._active = false;
     this._streamAt = 0;
-    /** @type {Array<{ name: string, spotter: SpotterLike, s: any, spent: boolean }>} */
+    /** at: the stream's first sample; until: the sample after which an overlapped old stream stops
+     * @type {Array<{ name: string, spotter: SpotterLike, s: any, spent: boolean, at: number, until: number }>} */
     this._streams = [];
-    this.stats = { blocks: 0, samples: 0, speechSamples: 0, fedSamples: 0, onsets: 0, fresh: 0, streams: 0, hits: 0, gaps: 0 };
+    this.stats = { blocks: 0, samples: 0, speechSamples: 0, fedSamples: 0, onsets: 0, fresh: 0, streams: 0, hits: 0, gaps: 0, renewals: 0, reanchored: 0 };
   }
 
   /** A stream is being fed now. */
@@ -194,8 +208,8 @@ export class OnsetRecipe {
       }
       this._end();
     }
-    // continuous speech without a quiet gap: renew on purpose (off by default, §7.5)
-    if (this._active && this.maxStream > 0 && start - this._streamAt >= this.maxStream) this._fresh(start, true, false);
+    // continuous speech without a quiet gap: a new set of streams, the old one overlapping (§7.5)
+    if (this._active && speaking && this.maxStream > 0 && !this._hold && start - this._streamAt >= this.maxStream) this._renew(start);
     if (this._active) {
       st.fedSamples += blk.length;
       if (this._hold) {
@@ -210,9 +224,10 @@ export class OnsetRecipe {
 
   /** Feed one block to every live stream. @param {Float32Array} x @param {number} end */
   _feed(x, end) {
+    if (this._streams.some((r) => end - x.length >= r.until)) this._streams = this._streams.filter((r) => end - x.length < r.until);
     for (const r of this._streams) {
       if (r.spent) continue;
-      if (r.name === 'name' && end - this._streamAt > this.nameFeed) {
+      if (r.name === 'name' && end - r.at > this.nameFeed) {
         r.spent = true;
         continue;
       }
@@ -243,7 +258,15 @@ export class OnsetRecipe {
           r.spent = true;
           if (t0 > this.namePrefix) continue;
         }
-        const hit = { keyword: kw, model: r.name, streamAt: this._streamAt, startAt: this._streamAt + t0, endAt: this._streamAt + t1, emitAt: end };
+        /** @type {Hit} */
+        const hit = { keyword: kw, model: r.name, streamAt: r.at, startAt: r.at + t0, endAt: r.at + t1, emitAt: end };
+        if (this.stampLate > 0 && end - hit.endAt > this.stampLate) {
+          // drifted timestamps (a long stream): the keyword ended just before it was decided
+          hit.endAt = Math.max(r.at, end - this.reanchorBy);
+          hit.startAt = Math.max(r.at, hit.endAt - Math.min(Math.max(0, t1 - t0), this.maxKeyword));
+          hit.reanchored = true;
+          this.stats.reanchored++;
+        }
         if (!best || PRIORITY[kw] < PRIORITY[best.keyword]) best = hit;
       }
     }
@@ -268,7 +291,7 @@ export class OnsetRecipe {
     this._active = true;
     const pre = preroll ? this._ringTail() : null;
     this._streamAt = start - (pre ? pre.length : 0);
-    this._streams = this._spotters.map(({ name, spotter }) => ({ name, spotter, s: spotter.newStream(), spent: false }));
+    this._streams = this._spotters.map(({ name, spotter }) => ({ name, spotter, s: spotter.newStream(), spent: false, at: this._streamAt, until: Infinity }));
     this.stats.streams += this._streams.length;
     if (preroll) this.stats.fresh++;
     if (onset && this.agc && this.lookahead > 0) {
@@ -279,6 +302,31 @@ export class OnsetRecipe {
       if (pre && pre.length) this._feed(this.agc ? this.agc.apply(pre) : pre, start);
     }
     this._onStreams?.(this._streams.length);
+  }
+
+  /**
+   * Renew during continuous speech: new streams from `start` (with the pre-roll); the current ones
+   * go on for overlapMs, so a call that began before the renewal is still heard whole.
+   * @param {number} start
+   */
+  _renew(start) {
+    if (this._pending) {
+      this._spotters = this._pending;
+      this._pending = null;
+    }
+    const until = start + this.overlap;
+    const old = this._streams.filter((r) => !r.spent && r.until === Infinity).map((r) => ({ ...r, until }));
+    const pre = this._ringTail();
+    this._streamAt = start - pre.length;
+    const fresh = this._spotters.map(({ name, spotter }) => ({ name, spotter, s: spotter.newStream(), spent: false, at: this._streamAt, until: Infinity }));
+    this._streams = this.overlap > 0 ? [...old, ...fresh] : fresh;
+    this.stats.streams += fresh.length;
+    this.stats.renewals++;
+    if (pre.length) {
+      const x = this.agc ? this.agc.apply(pre) : pre;
+      for (const r of fresh) r.spotter.accept(r.s, x);
+    }
+    this._onStreams?.(fresh.length);
   }
 
   _end() {

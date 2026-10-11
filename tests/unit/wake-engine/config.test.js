@@ -20,7 +20,8 @@ describe('wake config: keywords and thresholds (contract §7.7)', () => {
       high: { zhen: 0.05, giga: 0.05, gigaOnly: 0.05, veto: 'jude' },
     });
     expect(SPOTTER_DEFAULTS).toEqual({ maxActivePaths: 16, numTrailingBlanks: 1, keywordsScore: 1.0, numThreads: 1 });
-    expect(RECIPE_DEFAULTS).toMatchObject({ quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 0, namePrefixMs: 720 });
+    // (changed on purpose: streams are renewed in continuous speech, overlapping; drifted stamps are re-anchored)
+    expect(RECIPE_DEFAULTS).toMatchObject({ quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 8000, overlapMs: 2000, namePrefixMs: 720, stampLateMs: 900, reanchorMs: 450 });
   });
 
   it('builds A + B at normal, B alone with gigaOnly, strict → low', () => {

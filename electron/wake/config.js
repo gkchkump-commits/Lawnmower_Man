@@ -55,16 +55,22 @@ export const VAD_DEFAULTS = Object.freeze({ threshold: 0.5, minSpeechDuration: 0
 /**
  * The onset recipe (§7.5): a fresh stream at each VAD onset after ≥ quietMs without speech, fed
  * prerollMs of the audio before it; nothing fed hangoverMs after the last speech; a JADE hit counts
- * only when its first token lies within namePrefixMs of the stream start. maxStreamMs = 0: off.
- * 8000 was evaluated (tools/wake/eval-folder.mjs --max-stream-ms) on 100 min of long prose
- * (Kokoro + MS-SNSD speech) with the 252 positives spliced in 0-0.1 s apart: it cut false wakes
- * from 3 to 1 but lost recall (243 → 237 of 252), and on the clean stream it changed nothing
- * (246/252 either way), so it stays off (§7.5: only if no recall is lost). agcLookaheadMs: at an utterance onset
- * the spotters' feed waits until this much speech has set the utterance's own level (no added
- * latency: "Jade" ends later); measured on the eval's noisy mix, 198 → 202 of 252 against the
- * previous utterance's gain (docs: the lane report).
+ * only when its first token lies within namePrefixMs of the stream start.
+ * maxStreamMs / overlapMs: in continuous speech (TV, radio, people talking) a new set of streams
+ * starts every maxStreamMs and the old set runs on for overlapMs, so a call across the renewal is
+ * still heard whole (a plain renewal at 8 s lost recall on long prose, 243 → 237 of 252, which is
+ * why it was off; an endless stream loses wakes and its timestamps drift by seconds under a TV).
+ * stampLateMs / reanchorMs: a hit whose last token lies more than stampLateMs before the decision
+ * is re-anchored to emitAt - reanchorMs (correct stamps are ≤ 0.56 s before it, drifted ones
+ * ≥ 1.88 s; measured over clean, noisy and TV-bed runs), its length kept (≤ maxKeywordMs).
+ * agcLookaheadMs: at an utterance onset the spotters' feed waits until this much speech has set the
+ * utterance's own level (no added latency: "Jade" ends later); measured on the eval's noisy mix,
+ * 198 → 202 of 252 against the previous utterance's gain (docs: the lane report).
  */
-export const RECIPE_DEFAULTS = Object.freeze({ quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 0, namePrefixMs: 720, blockSamples: 320, agcLookaheadMs: 300 });
+export const RECIPE_DEFAULTS = Object.freeze({
+  quietMs: 600, prerollMs: 400, hangoverMs: 700, maxStreamMs: 8000, overlapMs: 2000, namePrefixMs: 720, blockSamples: 320, agcLookaheadMs: 300,
+  stampLateMs: 900, reanchorMs: 450, maxKeywordMs: 1200,
+});
 
 /**
  * The level normaliser in front of the spotters (§7.6). `limit`: a block whose peak would pass it

@@ -65,8 +65,9 @@ You can also turn it **off** by voice: "Hey Jade, stop listening" (or "go to sle
 She answers "Okay, I stopped listening. Turn me back on in the tray." Turning it **on** always
 needs a click: nobody can switch the microphone on by talking to the PC.
 
-When it is off, the microphone is released within a second and the Windows microphone icon goes
-away, unless you use push-to-talk or *Hands-free* at that moment.
+When it is off, the app releases the microphone at once, also in the middle of a command (what
+she was hearing is dropped, nothing is sent), unless you use push-to-talk or *Hands-free* at that
+moment. Windows then removes its microphone icon from the taskbar.
 
 ## 3. How to talk to Jade
 
@@ -114,15 +115,23 @@ The states without the microphone (paused, locked, blocked, muted, off) use a sl
 never depend on colour alone. Screen readers hear "Listening", "Stopped listening", "Microphone
 off" and "Microphone muted" through a polite live region.
 
+**The ear badge.** Whenever "Hey Jade" has the microphone open, a small round ear badge sits in
+the top-left corner of her window, also when the status bar is hidden (minimal chat mode): dim
+while she waits for her name, bright while she listens, slashed when the microphone is muted or
+blocked. Click it to turn "Hey Jade" off. The **tray icon** carries a cyan dot for as long as the
+microphone is open for her name, so you can tell while the window is hidden too.
+
 The chime only plays once she is sure you called her. When she was not sure ("Hey Jude" from a
 song, someone saying "Hey Jake"), you see her eyes flicker and nothing else: no sound, no message,
 no chat entry. The tray tooltip says what she is doing: *Jade: listening for "Hey Jade"*,
 *listening*, *mic off*, *paused (PC locked)*, *microphone blocked*.
 
-*Settings › Voice* also shows a status line, the echo cancellation in use, and the **last 20
-wake events** with their times: *09:41 woke · 280 ms*, *09:43 ignored · sounded like “Hey
-Jude”*, *09:50 ignored · my own voice*, *10:02 no command after 8 s*. These keep only the kind of
-event, never what was said.
+*Settings › Voice* also shows a status line (with **Retry** when the wake-word engine keeps
+stopping or could not start; the details are in the tray's **Open logs folder**), the echo
+cancellation in use, and the **last 20 wake events** with their times: *09:41 woke · 520 ms
+(noticed after 230 ms)* (from the end of "Jade" until she listened, and until her eyes
+brightened), *09:43 ignored · sounded like “Hey Jude”*, *09:50 ignored · my own voice*, *10:02 no
+command after 8 s*. These keep only the kind of event, never what was said.
 
 ## 5. Settings
 
@@ -138,8 +147,8 @@ All in *Settings › Voice*, right after *Hands-free*. Only *Hey Jade* shows whi
 | *Settings › Voice › Sounds* | Start | The chime when she starts listening; **Start + end** adds a soft tone when she stops; **Off**. |
 | *Settings › Voice › Listen while hidden* | on | Keep listening while the window is hidden in the tray. "Hey Jade" brings her back without taking the keyboard focus. Off: she pauses while hidden, like the camera. |
 | *Settings › Voice › Transcript check* | off | Shown only when the wake-word engine cannot run (§9). Speech recognition then listens for her name instead: every sentence said in the room is transcribed on your graphics card and thrown away at once unless it starts with her name. |
-| **Test my echo** | | She says "Just say hey Jade whenever you need me." twice, at the current volume, and tells you whether she heard herself (§7). It only reports; it changes no setting. |
-| **Record a test clip (30 s)…** | | Records 30 s from the microphone with the wake-word events it saw, and saves both to `Documents\Lawnmower Man\Hey Jade tests` (§8). |
+| **Test my echo** | | She says "Just say hey Jade whenever you need me." twice, at the current volume, and tells you whether she heard herself (§7). It only reports; it changes no setting. It needs her voice (*Settings › Voice › Speak replies*) and gives up after 20 s. |
+| **Record a test clip (30 s)…** | | Records 30 s from the microphone with the wake-word events it saw, and saves both to `Documents\Lawnmower Man\Hey Jade tests` (§8). **Cancel recording** stops it and saves nothing; turning "Hey Jade" off, locking the PC or hiding the window (with *Listen while hidden* off) cancels it too. |
 
 **Hands-free and "Hey Jade".** *Settings › Voice › Hands-free* listens to everything you say while
 she is idle. While "Hey Jade" is on, the name is needed instead and *Hands-free* is greyed out. It
@@ -152,24 +161,30 @@ when she has not seen your face for 3 seconds: if you walked away, the TV cannot
 
 ## 6. Privacy
 
-* **What runs where.** The wake-word engine runs in its own small process of the app, called
-  **Jade wake word** in the Task Manager. It gets the microphone's sound from the app's window and
-  answers "heard her name" or not. It opens no network connection and writes no files. The check
+* **What runs where.** The wake-word engine runs in its own small process of the app (in the
+  Task Manager one more **Lawnmower Man** process; see §9 for how to tell which). It gets the
+  microphone's sound from the app's window and answers "heard her name" or not. It opens no
+  network connection and writes no files: its code refuses network and process modules and has no
+  fetch or sockets. This is a check inside the process, not an operating-system sandbox. The check
   of her name and your words then go to the app's local voice server (speech recognition on your
   graphics card), also on this PC. Only your words after her name go to Claude, as typed messages
   do.
 * **Before her name, nothing is kept.** The app holds the last 3 seconds of sound in memory, so it
-  can check the moment you said her name, and forgets everything older. Nothing is written to
-  disk, logged or transcribed unless the engine heard her name.
+  can check the moment you said her name, and forgets everything older; when the microphone is
+  released, those 3 seconds are wiped too. Nothing is written to disk, logged or transcribed unless
+  the engine heard her name.
 * **The wake log** in the settings keeps the last 20 events (time and kind), in memory only, never
   text or sound.
 * **The Windows microphone icon stays on** while "Hey Jade" is on, because the microphone really
-  is open. Turn it off and the icon goes away within a second.
-* **Locked PC, sleep:** the microphone is released when you lock the PC or it goes to sleep, and
-  taken again when you unlock it. Nobody in the room can talk to Jade (or to an agent session)
-  while the PC is locked.
-* **Test clips** are written only when you click **Record a test clip (30 s)…**, and only to your
-  Documents folder.
+  is open; the ear badge on her window and the tray dot say the same (§4). Turn it off and the app
+  releases the microphone at once, even while she is listening to a command.
+* **Locked PC, sleep:** the microphone is released when you lock the PC or it goes to sleep, at
+  once and also in the middle of a command, and taken again only when you unlock it. A PC that
+  wakes up at the lock screen stays locked for her. Nobody in the room can talk to Jade (or to an
+  agent session) while the PC is locked.
+* **Test clips** are recorded only after a click on **Record a test clip (30 s)…**, and only to
+  your Documents folder. Turning "Hey Jade" off, locking the PC or **Cancel recording** ends the
+  recording without saving it; a later click starts a new one.
 * **Voice never approves anything.** An approval card (Agent mode) can only be answered with its
   buttons. While a card is waiting, no follow-up window opens, so a "yes" in the room is not taken
   as an answer.
@@ -187,7 +202,9 @@ waking herself:
   Jade" from the speakers is ignored ("ignored · my own voice" in the log). So saying her name
   cannot interrupt the few sentences in which she says it herself.
 * **She never says the words that wake her.** Her instructions forbid "hey Jade", "okay Jade" and
-  "say Jade"; she explains the wake word as "say hey, then my name".
+  "say Jade"; she explains the wake word as "just call my name". If a reply still contains such a
+  phrase, her voice says it differently ("just call my name", "hey there"); the chat text is
+  unchanged.
 * **The check of her name** rejects transcripts that sound like her talking about herself ("I'm
   Jade", "Jade here"), and what she hears after her name is dropped when it repeats one of her own
   recent sentences.
@@ -217,9 +234,11 @@ never be cancelled; that is what the name check and *Sensitivity* are for.
 * **How good is it?** Measured on 252 synthetic "Hey Jade"s (28 computer voices) and 2.2 hours of
   real speech, words and music per condition: in a quiet room the engine missed about 1 in 100
   calls with both models (about 1 in 10 with the basic model alone); with room noise and reverb
-  about 1 in 4. Together with the name check: no false wake in 4.4 hours of audio, and no "Hey
-  Jude" (song title or first line) woke her. **These numbers come from synthetic voices**, not
-  from you, your accent or your laptop's microphone. That is why the test clip recorder exists.
+  about 1 in 4. With a TV or other people talking only 10 dB below you, about half of the calls
+  get through (closer to the PC, or a pause in the talk, helps). Together with the name check: no
+  false wake in 4.4 hours of audio, and no "Hey Jude" (song title or first line) woke her. **These
+  numbers come from synthetic voices**, not from you, your accent or your laptop's microphone.
+  That is why the test clip recorder exists.
 * **Record a test clip (30 s)…** records what the microphone hears plus what the engine thought of
   it. Two files land in `Documents\Lawnmower Man\Hey Jade tests` (a WAV and a JSON); send them in,
   and the thresholds can be checked on real audio (`npm run wake:eval`, §10.8).
@@ -246,12 +265,13 @@ never be cancelled; that is what the name check and *Sensitivity* are for.
 | "Hey Jade: unavailable" | the wake-word engine is missing or keeps stopping (an antivirus may have quarantined it) | reinstall Lawnmower Man; until then *Transcript check* can stand in (§5) |
 | Never wakes | microphone blocked or muted; the wrong input device; a very quiet microphone | the chip says which; *Settings › System › Sound › Input*; *Sensitivity* › **More** |
 | Wakes by mistake | TV or podcasts with similar names | *Sensitivity* › **Less**; after repeated mistakes she gets stricter on her own |
-| Stops talking when she says her name | weak echo cancellation (loud speakers, Bluetooth delay) | **Test my echo**; headphones; turn off *Interrupt with her name* |
+| Stops talking when she says her name | weak echo cancellation (loud speakers, Bluetooth delay) | **Test my echo**; headphones; turn off *Settings › Voice › Interrupt with her name* |
 | Music gets quieter while she listens | Windows communications ducking | *Settings › System › Sound › More sound settings* › Communications › **Do nothing** |
 | Headphones sound like a phone call | a Bluetooth headset's microphone is the input | use the laptop's microphone for input |
 | "The extra wake-word model could not be downloaded" | offline, or a proxy | **Download the extra wake-word model** later; she works with the basic model meanwhile |
 | "Jade can't hear anything" | the microphone delivers silence (a driver, a privacy switch, a hardware mute key) | check the input in Windows' sound settings |
-| She answers "Yes?" to nothing / starts mid-sentence | normal: the call is removed before Claude sees your words | — |
+| The chat shows your question without "Hey Jade" | normal: her name is removed before Claude sees your words | — |
+| "Hey Jade: unavailable" with **Retry** | the engine kept stopping or did not start | **Retry**; the reason is in the log (tray › **Open logs folder**) |
 
 **Checking it on your PC** (once, after installing; the shipped settings were tuned on synthetic
 voices, so these checks tell whether they suit your voice, room and microphone):
@@ -270,10 +290,20 @@ voices, so these checks tell whether they suit your voice, room and microphone):
    and replug a USB microphone: she comes back on her own.
 6. Play music (Spotify) with "Hey Jade" on and watch the Volume Mixer: if the music gets quieter,
    set *Communications* to **Do nothing** (above).
-7. Task Manager: the "Jade wake word" process of Lawnmower Man uses about 0 % while it is quiet and
-   a few % while people talk.
-8. **Record a test clip (30 s)…**: say "Hey Jade" about 5 times, near and across the room, and send
-   the two files from `Documents\Lawnmower Man\Hey Jade tests`.
+7. Task Manager › **Details**: right-click a column header › *Select columns* › **Command line**.
+   Of the several `Lawnmower Man.exe` processes, the wake-word engine is the one whose command
+   line contains `--utility-sub-type=node.mojom.NodeService` (Windows does not show the name "Jade
+   wake word"; that is the app's internal name). It should use about 0-1 % while it is quiet and a
+   few % while people talk.
+8. **Timing**: say "Hey Jade" a few times. The wake log in *Settings › Voice* says for each call
+   when she noticed it, e.g. *woke · 520 ms (noticed after 230 ms)*: the second number is from the
+   end of "Jade" to her eyes brightening. It should be under about 500 ms (measured on Linux
+   0.2-0.6 s; on Windows the echo cancellation of all apps adds about 0.17 s, and it is slower
+   until the extra wake-word model is there).
+9. Minimize the window, then say "Hey Jade, what time is it?": she comes back and answers, and the
+   app you are typing in keeps the keyboard focus.
+10. **Record a test clip (30 s)…**: say "Hey Jade" about 5 times, near and across the room, and send
+    the two files from `Documents\Lawnmower Man\Hey Jade tests`.
 
 ---
 
@@ -300,14 +330,22 @@ microphone ─ Chromium (echo cancellation, noise suppression, gain) ─► avat
   **A** = `kws-zipformer-zh-en-3M-2025-12-20` (four pronunciations of HEY_JADE), **B** =
   `kws-zipformer-gigaspeech-3.3M-2024-01-01`. Both also know **HEY_JUDE**, a label that soaks up
   the song title. A fresh stream starts at each speech onset after ≥ 0.6 s of quiet, with 0.4 s of
-  sound before it; nothing is fed after a 0.7 s hangover.
-* **Stage 2** (only on a hit, GPU) transcribes **only the wake segment** (at most 2.5 s before the
-  end of "Jade", plus 0.15 s) with the app's own faster-whisper, without hotwords or a prompt (a
-  "Jade" hotword turns "Hey Jay" into "hey Jade"). Its **veto** rejects: a rival name among the
-  first three words (Jude, Jay, Jane, James, Jake, Joey, …), her own lines ("I'm Jade", "Jade
-  here", "okay/say Jade"), and anything that does not start like a call. Otherwise it accepts. It
-  is a veto rather than a "must say hey Jade" rule because Whisper writes "I enjoyed it" or "Hey
-  Jayden" for about a quarter of isolated "Hey Jade."s.
+  sound before it; nothing is fed after a 0.7 s hangover. In speech without such a gap (a TV, a
+  conversation) a new set of streams starts every 8 s while the old one runs on for 2 s, so a call
+  across the change is heard whole. The spotter's keyword timestamps drift early in long streams
+  (by seconds, measured up to 50 s); a hit whose "Jade" ends more than 0.9 s before the moment it
+  was decided is re-anchored to 0.45 s before that moment.
+* **Stage 2** (only on a hit, GPU) transcribes **only the wake segment**: from 1.2 s before the
+  end of "Jade" (not before the stream started) to where stage 1 decided, at most 0.6 s after
+  "Jade" (≤ 1.8 s in all, inside the 3 s ring even when the hit is late). It uses the app's own
+  faster-whisper, without hotwords or a prompt (a "Jade" hotword turns "Hey Jay" into "hey Jade").
+  Its **veto** rejects: a "Jude"-like word anywhere (Jude, Judy, Judge, …); her own lines ("I'm
+  Jade", "Jade here", "okay/say Jade", "just say hey Jade"); a rival name at the call (Jay, Jane,
+  James, Jake, Joey, Jodie, Gage, JD, Jayden followed by more words, …); and anything that is not a
+  call at the start ("hey …" or "Jade" among the first three words) or at the end ("… hey Jade",
+  so a lead-in such as "Okay, so, hey Jade" works). Otherwise it accepts. It is a veto rather than
+  a "must say hey Jade" rule because Whisper writes "I enjoyed it" or "Hey Jayden" for about a
+  quarter of isolated "Hey Jade."s.
 * **The command** is captured from where the keyword ended and transcribed on its own, so no
   fragile "remove 'hey Jade' from Whisper's spelling" step is needed. Any leftover "Jade," at the
   start is stripped.
@@ -316,10 +354,10 @@ microphone ─ Chromium (echo cancellation, noise suppression, gain) ─► avat
 
 | Where | What |
 |---|---|
-| `electron/wake/` (main) | `createWake()` (`index.js`): supervises the utility (`host.js`: start, `ready` within 15 s, restarts after 1 / 5 / 30 s, at most 5 in 10 min), the IPC (`ipc.js`, validators in `validate.js`), lock/sleep (`power.js`), the Windows microphone permission (`mic-access.js`), test clips (`clips.js`), the zh-en download through the voice package (`zhen.js`), keyword and threshold configuration (`config.js`), paths (`paths.js`) |
-| `electron/wake/utility/` | the "Jade wake word" `utilityProcess`: the raw N-API addon (`sherpa.js`), the onset recipe (`recipe.js`) and the level normaliser (`agc.js`). Minimal environment (PATH, SystemRoot, TEMP, `LAWNMOWER_*`), no sockets, no files |
-| `src/wake/` (avatar window) | `machine.js` (the state machine, pure, injected clock), `phrase.js` (veto and command rules), `self-mask.js` (her own sentences), `earcons.js`, `port.js` (the MessagePort), `feature.js` (composition), `ui.js` + `wake.css` (chip, settings block, offer card) |
-| `src/audio/mic.js`, `player.js` | the tap and the 3 s ring; the master gain that ducks her voice, and the chime through the player's AudioContext (so the echo canceller knows it) |
+| `electron/wake/` (main) | `createWake()` (`index.js`): supervises the utility (`host.js`: start, `ready` within 15 s, a ping every 10 s and a kill after 30 s of silence (a frozen utility), restarts after 1 / 5 / 30 s, at most 5 in 10 min, **Retry** for a fresh budget; stopped after the local voice has been unusable for a minute, started again with it), the IPC (`ipc.js`, validators in `validate.js`), lock/sleep (`power.js`: lock and sleep tracked separately, the OS asked again 1 s after waking up), the Windows microphone permission (`mic-access.js`), test clips (`clips.js`; main allows one per 25 s and 20 per run), the zh-en download through the voice package (`zhen.js`), keyword and threshold configuration (`config.js`), paths (`paths.js`), the onset recipe (`recipe.js`), the level normaliser (`agc.js`), the tray's listening dot (`tray-icon.js`) |
+| `electron/wake/utility/` | the "Jade wake word" `utilityProcess` (that is its `serviceName` in `app.getAppMetrics()`; the OS shows it as one more app process): `lockdown.js` first (refuses `net`, `http(s)`, `dgram`, `child_process`, `worker_threads`, … and removes `fetch`/`WebSocket`; an in-process check, not an OS sandbox), the raw N-API addon (`sherpa.js`), the engine (`engine.js`: the strict-mode twin is built ahead while it is quiet), the port protocol (`protocol.js`). Minimal environment (PATH, SystemRoot, TEMP, `LAWNMOWER_*`), no sockets, no files |
+| `src/wake/` (avatar window) | `machine.js` (the state machine, pure, injected clock), `phrase.js` (veto and command rules), `self-mask.js` (her own sentences), `earcons.js`, `port.js` (the MessagePort), `feature.js` (composition), `ui.js` + `wake.css` (chip, the ear badge on the stage, settings block, offer card) |
+| `src/audio/mic.js`, `player.js` | the tap and the 3 s ring (wiped when the tap is removed); the master gain that ducks her voice, and the chime through the player's AudioContext (so the echo canceller knows it) |
 | `src/app/controller.js` | the `wakeWord*` block: captures, silent drops, the follow-up hook |
 | `electron/persona.js` | her name and the wake-word section of her instructions |
 
@@ -335,9 +373,19 @@ blocked · muted · waiting · attention · listening · followup · look · bus
 open when the wake word is on, the local voice's speech recognition is available, the engine is
 ready (or the transcript check is on), the microphone is not blocked, the PC is not locked, and
 the window is shown or *Listen while hidden* is on. The constants (`WAKE` in `src/wake/machine.js`):
-3 s ring, 2.5 s verify timeout on the GPU (8 s on the CPU), 8 s command window, 350 ms tail
-before the follow-up, a face absent for 3 s closes it, −15 dB duck with a 60 ms ramp, a 300 ms
-unduck, 100 ms before and 400 ms after her own sentences, 3 rejects in 60 s → 5 strict minutes.
+3 s ring, a wake segment of 1.2 s before and at most 0.6 s after the end of "Jade" (at least
+0.4 s of it still in the ring), 2.5 s verify timeout on the GPU (8 s on the CPU), 8 s command
+window, 350 ms tail before the follow-up, a face absent for 3 s closes it, −15 dB duck with a
+60 ms ramp, a 300 ms unduck, 100 ms before and 400 ms after her own sentences, 3 rejects that
+sounded like "Hey Jude" or another name in 60 s → 5 strict minutes (a "not a call" or "nothing
+understood" does not count, so retrying in noise cannot make her stricter), and a transcription
+that never answers ends the episode after 30 s.
+
+The microphone is released as soon as the state leaves the ones that need it (the wake word off,
+the PC locked or asleep, the window hidden): a command being captured at that moment is cancelled
+and dropped, and so is a test clip being recorded. No follow-up window opens after one of her own
+`say()` lines (such as a greeting or "Okay, I stopped listening"), only after a reply to
+a spoken question.
 
 ### 10.4 Her own voice
 
@@ -351,7 +399,9 @@ unduck, 100 ms before and 400 ms after her own sentences, 3 rejects in 60 s → 
    last 10 s (word-set Jaccard ≥ 0.8).
 4. The persona never puts "hey", "hi", "okay" or "say" in front of her name. Stage 1 fires on
    such lines almost every time (82 of 84 clean clips), so this rule is not optional. The
-   structural check is in `tests/unit/systems/persona-jade.test.js`.
+   structural check is in `tests/unit/systems/persona-jade.test.js`. On the output side,
+   `wakeSafeSpeech()` (`src/app/speech-text.js`) rewrites "(just) say hey Jade" and "hey/hi/okay
+   Jade" in the text that is spoken (not in the chat) before it reaches the voice.
 5. With the system voice, barge-in only when the track reports `'all'`.
 
 ### 10.5 Persona
@@ -385,30 +435,65 @@ Porcupine or GPL code. Details: `THIRD_PARTY_NOTICES.md`.
 
 ### 10.7 Measured
 
-Synthetic speech (Kokoro, 28 voices), from the wake-word evaluation:
+Synthetic speech (Kokoro, 28 voices; 252 calls per condition), offline through the runtime recipe
+with both models, stage 2 with Whisper large-v3-turbo on the CPU:
 
 | | clean | noise + reverb (after gain) |
 |---|---|---|
-| stage 1 missed, A + B | 1.2 % (3/252) | 23.4 % |
+| stage 1 missed, A + B | 1.2 % (3/252) | 27.4 % (69/252) |
 | stage 1 missed, B alone | 10.3 % | 31.7 % |
-| cascade (stage 1 + veto) missed | 0/56 (sample) | 17/42 (sample) |
-| false wakes, cascade | 0 in 4.4 h | |
-| "Hey Jude" woke the cascade | 0/18 | 0/18 |
+| cascade (stage 1 + veto) accepted | 109 of 115 transcribed calls | 40 of 47 sampled (≈ 62 % of all calls) |
+| false wakes, cascade | 0 in 4.4 h, and 0 in 100 min of continuous prose | "Hey Jay / Jane / Jake …": 5 of 756 clips (before: 8) |
+| "Hey Jude" woke the cascade | 0 | 0 |
 
-In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on shared vCPUs at load 2-9; four
-full passing runs with both models, two with B alone):
+The level normaliser misses its acceptance figure (contract §7.6, at most 3 points under the
+evaluation's reference): with noise and reverb, stage 1 finds 72.6 % of the calls against the
+reference's 76.6 %, 4 points under. This is an accepted deviation for now; the test clips are
+meant to retune it on real recordings.
+
+**A call over other speech** (a TV or people talking, one continuous stream, the same 252 calls):
+
+| speech bed under the caller | stage 1, correct keyword stamp | stamps off by more than 0.4 s | cascade accepted |
+|---|---|---|---|
+| 10 dB, before the fix | 118 | 36 | ≈ 13 % (11 of 38 sampled) |
+| 10 dB, now | 160 | 2 | 119 of 160 (47 % of all calls; 33 of the same 38) |
+| 20 dB, before the fix | 174 | 52 | 40-56 % (the review's estimate) |
+| 20 dB, now | 222 | 3 | 56 of 59 sampled (≈ 84 % of all calls) |
+
+The contract's target (at most 2 of 20 calls missed with a TV on) is **not met**: about half the
+calls under a TV 10 dB down still fail, mostly because Whisper hears the call as something else
+in that noise ("no-call" 24, a rival name 17 of the 41 rejected).
+
+Other cascade results on the same clips, before → now: calls with a lead-in ("I wonder, hey Jade,
+…") 8 → 28 of 28; near names (Jodie, JD, Gage, Jed, Jayden, …) let through 15 → 5 of 27 (the five
+are "Hey Jayden" / "Hey Jaden" alone, which is also how Whisper writes a real "Hey Jade."); "Hey
+Jodie" 13 → 0 of 13; clean "Hey Jay / Jane / Jude" 2 → 0 of 26; clean calls 68 → 67 of 71 (one
+"Say Jade!"). Stream renewal costs CPU in continuous speech: 80 → 97 ms per second of prose
+(+21 %), 87 → 96 ms with a TV bed.
+
+End of "Jade" → stage-1 decision, offline: p50 352 / p90 495 ms clean (A + B), 378 / 530 ms with
+noise and reverb.
+
+In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on 4 shared vCPUs at load 2-6; the
+runs of this version, one positive call each, plus 12 calls measured by the review):
 
 | | both models (A + B) | B alone |
 |---|---|---|
-| end of "Jade" → stage-1 hit in the utility | 216-230 ms | 536-550 ms |
-| end of "Jade" → *attention* shown | 222-268 ms | 593 ms |
-| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 236-247 ms | 247 ms |
-| her voice 10 dB down after a barge-in hit (duck to −15 dB) | 45-54 ms | 53 ms |
-| PC locked → microphone track ended | 8-11 ms | 13 ms |
+| end of "Jade" → stage-1 hit in the utility | 219-503 ms (review: p50 411 / p90 550) | 538 ms |
+| end of "Jade" → *attention* shown | 222-593 ms (review: p50 418 / p90 553) | 547 ms |
+| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 250-251 ms | 245 ms |
+| her voice 10 dB down after a barge-in hit (duck to −15 dB) | 44-45 ms | 25 ms |
+| PC locked → microphone track ended | 13-22 ms | 12 ms |
+| PC locked while she listens for a command → track ended | 11 ms | 12 ms |
 | follow-up window | 6.00 s | 6.00 s |
-| utility CPU in silence (20 s) | 1.95-2.25 % of one core | 2.15 % |
-| utility CPU while people talk without her name | 9.1-9.9 % of one core (107-112 ms per second of speech) | 5.9 % (65 ms) |
-| engine start | 2.9-8.2 s, depending on load | 1.7-1.8 s |
+| strict thresholds built ahead, once, after 1.5 s of quiet | 4.4 s of CPU | 2.1 s |
+| utility CPU in silence (20 s, after that) | 2.05 % of one core | 1.9 % |
+| utility CPU while people talk without her name | 9.1 % of one core (99-101 ms per second of speech) | 5.5 % (60 ms) |
+| engine start | 4.1-4.5 s | 2.5 s |
+
+The latency target (attention ≤ 500 ms p50 after the end of "Jade") is met only in some runs
+here, and Windows' echo cancellation of all apps adds about 170 ms of capture delay (§10.4), so
+on the laptop it is likely missed, more so with B alone. It is on the laptop checklist (§9).
 
 GPU latency of stage 2 on the RTX 5070 is not measured yet; about 0.1-0.2 s for a short segment
 is an estimate.
@@ -416,8 +501,8 @@ is an estimate.
 ### 10.8 Tests and tools
 
 * Unit tests: `tests/unit/wake/` (machine, phrase, self-mask, earcons, port, UI, controller),
-  `tests/unit/wake-engine/` (recipe, AGC, config, paths, host, IPC validation, settings, tray,
-  zh-en download, the fetch script), `tests/unit/systems/persona-jade.test.js`,
+  `tests/unit/wake-engine/` (recipe, AGC, config, paths, host, the utility's engine and lockdown,
+  IPC validation, settings, tray and its icon, zh-en download, the fetch script), `tests/unit/systems/persona-jade.test.js`,
   `voice/tests/test_download_kws.py`, `voice/tests/test_fake_texts.py`.
 * Engine test: `tests/unit/wake-engine/engine-fixtures.test.js` runs the real addon and models over
   the committed Kokoro fixtures (`tests/fixtures/wake/`). It skips without `vendor/wake` unless
@@ -428,9 +513,12 @@ is an estimate.
   resampled to 48 kHz, on a −60 dBFS noise floor), the fake voice server answering `/stt` from
   `LAWNMOWER_VOICE_FAKE_TEXTS`, and the fake Claude CLI. In one launch, each scenario writes a new
   capture file and reopens the microphone. The scenarios are listed in its header: the positive
-  path with the follow-up, a follow-up inside and after the window, "Hey Jude", her own line
-  (masked), barge-in with the duck, the hidden window, lock, a utility crash, CPU budgets, no
-  network, no sockets in the utility, no audio files, a clean quit. `--b-only` runs without model
+  path with the follow-up (and LAT-1: attention ≤ 600 ms after "Jade" with both models, 800 ms
+  with B alone), a call over TV-like speech 10 dB under her (stamp and segment checked), a
+  follow-up inside and after the window, "Hey Jude", her own line (masked), barge-in with the
+  duck, the hidden window, lock (also while she listens for a command, and locked → asleep → woken
+  at the lock screen), a utility crash, CPU budgets, no network, no sockets in the utility, no
+  audio files, a clean quit. `--b-only` runs without model
   A; `--shots <dir>`, `--report <file>`, `--work <dir>`, `--only <steps>`. Without lanes A/B, the
   engine or a build it skips (exit 0) with the reason; `WAKE_ENGINE_REQUIRED=1` makes that exit 2.
 * CI (`.github/workflows/ci.yml`): the unit jobs fetch the engine and require the engine test;

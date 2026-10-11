@@ -731,7 +731,8 @@ A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technic
 ## 10. "Hey Jade" (wake word)
 
 Jade listens for her name hands-free; user guide and measured numbers in [WAKE.md](WAKE.md). Off by
-default (`wake.enabled`); the microphone and the utility process run only while it is on.
+default (`wake.enabled`); the microphone and the utility process run only while it is on (the
+utility also stops once the local voice has been unusable for a minute, and starts with it again).
 
 * **Two stages.** Stage 1 is open-vocabulary keyword spotting with **sherpa-onnx 1.13.8**: two
   tiny models on the same audio, OR-ed — model A `kws-zipformer-zh-en-3M` (when it is on the user's
@@ -744,14 +745,18 @@ default (`wake.enabled`); the microphone and the utility process run only while 
 * **Main** (`electron/wake/`, composed by `createWake()` in `index.js`): `host.js` forks
   `electron/wake/utility/main.js` as `utilityProcess` "Jade wake word" (inside `app.asar` when
   packaged; a minimal environment), sends it the model paths and keywords (`config.js`,
-  `paths.js`), restarts it after 1 / 5 / 30 s (at most 5 in 10 min) and hands the renderer a new
-  port after each restart; `zhen.js` checks and downloads model A through the voice package
+  `paths.js`), pings it every 10 s and kills it after 30 s of silence (a frozen utility), restarts
+  it after 1 / 5 / 30 s (at most 5 in 10 min; `lm:wake:restart` = the drawer's **Retry**, a fresh
+  budget) and hands the renderer a new port after each restart; `zhen.js` checks and downloads model A through the voice package
   (`python -m lawnmower_voice.download --kws-only`, once per run, never while the local voice is
   off) and restarts the utility with it; `power.js` forwards lock / unlock / suspend / resume
-  (`lm:wake:power`: the renderer releases the microphone while the PC is locked); `mic-access.js`
+  (`lm:wake:power` `{ state, seq }`, plus a `power` snapshot in the status: the renderer releases
+  the microphone while the PC is locked or asleep, and a PC woken at the lock screen stays locked); `mic-access.js`
   reads the Windows privacy switch; `clips.js` writes an explicit test clip (the only file the
   feature ever writes). `ipc.js` registers the `lm:wake:*` channels for the avatar window only.
-* **Utility** (`electron/wake/utility/`): loads the raw N-API addon with `createRequire` (no
+* **Utility** (`electron/wake/utility/`): imports `lockdown.js` first (a module-resolve hook
+  refuses `net`, `http(s)`, `dgram`, `child_process`, `worker_threads`, …; `fetch` and `WebSocket`
+  are removed; an in-process check, not an OS sandbox), loads the raw N-API addon with `createRequire` (no
   `node_modules`, no JS wrapper; `sherpa.js`), runs the recipe (`engine.js`, `../recipe.js`,
   `../agc.js`) on the frames from the port, and posts hits (`{ t:'hit', keyword, model, startAt,
   endAt, … }`), VAD edges and stats back. It opens no sockets and writes no files.

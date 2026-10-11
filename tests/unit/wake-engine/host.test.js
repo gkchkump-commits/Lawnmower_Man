@@ -47,6 +47,60 @@ describe('WakeHost (utility supervision, contract §7.2)', () => {
     expect(up.forks).toHaveLength(2);
   });
 
+  it('a utility that reports its stages gets 20 s per stage, at most 60 s in all; the kill says where it was stuck', async () => {
+    const { host, up, clock, logs } = make();
+    host.start(init);
+    const c = up.forks[0].child;
+    clock.advance(10000);
+    c.emit('message', { t: 'stage', s: 'started' });
+    c.emit('message', { t: 'stage', s: 'addon' });
+    clock.advance(12000); // 22 s after the fork: past the old 15 s, still loading
+    c.emit('message', { t: 'stage', s: 'models' });
+    expect(host.stage).toBe('models');
+    clock.advance(19000); // 41 s
+    expect(host.state).toBe('starting');
+    expect(c.killed).toBeFalsy();
+    clock.advance(1000); // 20 s after the last stage
+    expect(host.state).toBe('error');
+    expect(c.killed).toBe(true);
+    expect(logs.join('\n')).toMatch(/stuck in stage 'models' after 42 s/);
+    await tick(); // the exit
+    expect(host.lastExit).toMatchObject({ stage: 'models', timedOut: true });
+    expect(logs.join('\n')).toMatch(/exited \(code .*killed by us in stage 'models'\)/);
+    expect(host.stage).toBe('off');
+    // the cap: a stage every 14 s cannot keep a process alive past 60 s
+    clock.advance(1000);
+    const d = up.forks[1].child;
+    for (let i = 0; i < 4; i++) {
+      clock.advance(14000);
+      d.emit('message', { t: 'stage', s: 'models' });
+    }
+    expect(d.killed).toBeFalsy(); // 56 s
+    clock.advance(4000); // 60 s after this fork
+    expect(d.killed).toBe(true);
+  });
+
+  it('a ready after slow stages is ready; bad stage names are ignored; a crash is logged with its code in hex', async () => {
+    const { host, up, clock, logs } = make();
+    host.start(init);
+    const c = up.forks[0].child;
+    c.emit('message', { t: 'stage', s: 'started' });
+    c.emit('message', { t: 'stage', s: 'x'.repeat(40) });
+    c.emit('message', { t: 'stage', s: 7 });
+    expect(host.stage).toBe('started');
+    clock.advance(18000);
+    c.ready(['giga'], 17000);
+    expect(host.state).toBe('ready');
+    expect(host.stage).toBe('ready');
+    clock.advance(25000); // past every ready deadline (the liveness check, 30 s, is separate)
+    expect(c.killed).toBeFalsy();
+    c.emit('message', { t: 'stage', s: 'models' }); // after ready: ignored
+    expect(host.stage).toBe('ready');
+    c.emit('exit', 3221225477);
+    expect(host.lastExit).toMatchObject({ code: 3221225477, stage: 'ready', timedOut: false });
+    expect(logs.join('\n')).toMatch(/exited \(code 3221225477, 0xc0000005; in stage 'ready'\)/);
+  });
+
   it('restarts after 1 s, 5 s, then 30 s; at most 5 in 10 minutes', async () => {
     const { host, up, clock } = make();
     host.start(init);
@@ -273,5 +327,15 @@ describe('minimalEnv', () => {
   it('keeps PATH, SystemRoot, TEMP/TMP and LAWNMOWER_* without secrets', () => {
     expect(minimalEnv({ Path: 'C:\\x', SYSTEMROOT: 'C:\\Windows', TMP: 't', USERPROFILE: 'u', LAWNMOWER_WAKE_DIR: 'w', LAWNMOWER_MCP_TOKEN: 's', LAWNMOWER_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 'o' }))
       .toEqual({ Path: 'C:\\x', SYSTEMROOT: 'C:\\Windows', TMP: 't', LAWNMOWER_WAKE_DIR: 'w' });
+  });
+
+  it('on Windows also the system variables (folders, CPU facts), still nothing about the user and no secrets', () => {
+    const env = {
+      Path: 'C:\\x', SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', SystemDrive: 'C:', ProgramData: 'C:\\ProgramData', 'ProgramFiles(x86)': 'C:\\P86',
+      NUMBER_OF_PROCESSORS: '4', PROCESSOR_ARCHITECTURE: 'AMD64', DriverData: 'C:\\Windows\\System32\\Drivers\\DriverData', ComSpec: 'C:\\Windows\\system32\\cmd.exe',
+      USERPROFILE: 'C:\\Users\\ada', APPDATA: 'a', LOCALAPPDATA: 'l', USERNAME: 'ada', COMPUTERNAME: 'PC', ANTHROPIC_API_KEY: 'k', LAWNMOWER_MCP_TOKEN: 's',
+    };
+    expect(Object.keys(minimalEnv(env, 'win32')).sort()).toEqual(['ComSpec', 'DriverData', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'Path', 'ProgramData', 'ProgramFiles(x86)', 'SystemDrive', 'SystemRoot', 'windir']);
+    expect(Object.keys(minimalEnv(env, 'linux')).sort()).toEqual(['Path', 'SystemRoot']);
   });
 });

@@ -3,7 +3,9 @@
 // so the tests drive it with fakes.
 //
 // * fork(entry, [], { serviceName: 'Jade wake word', stdio: 'pipe', env: minimal }) + { t:'init' };
-//   `ready` is expected within 15 s, otherwise the status is error ("did not start").
+//   a sign of life ({ t:'stage' }) is expected within 15 s and `ready` within 20 s of the latest
+//   stage (the addon, the models), at most 60 s in all; otherwise the status is error ("did not
+//   start") and the process is killed in the stage it was stuck in (logged with its exit code).
 // * Unexpected exits restart after 1 s, 5 s, then 30 s; at most 5 restarts in 10 minutes, then the
 //   status stays error ("keeps stopping"). A fatal init error (the addon or a model will not
 //   load) is not retried: it would fail the same way.
@@ -21,6 +23,10 @@ import { EventEmitter } from 'node:events';
 
 export const SERVICE_NAME = 'Jade wake word';
 export const READY_TIMEOUT_MS = 15000;
+/** after a stage message: this long for the next one (a slow first load on a busy PC) … */
+export const STAGE_TIMEOUT_MS = 20000;
+/** … but never longer than this from the fork */
+export const READY_CAP_MS = 60000;
 export const STOP_TIMEOUT_MS = 2000;
 export const RESTART_BACKOFF_MS = Object.freeze([1000, 5000, 30000]);
 export const MAX_RESTARTS = 5;
@@ -32,18 +38,30 @@ const LOG_LINES_PER_WINDOW = 40;
 const LOG_WINDOW_MS = 10000;
 
 /**
- * The utility's environment: PATH, SystemRoot, TEMP/TMP and LAWNMOWER_* (no secrets: nothing
- * named like a token, key, secret or password), so no Claude or camera credentials reach it.
+ * Windows' own system variables (system folders and CPU facts, nothing about the user): system
+ * DLLs, the C runtime and ONNX Runtime's device discovery (SetupAPI, DXGI, DXCore) expect them in
+ * every process.
+ */
+const WINDOWS_SYSTEM_VARS = new Set(['WINDIR', 'SYSTEMDRIVE', 'PROGRAMDATA', 'ALLUSERSPROFILE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+  'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)', 'COMMONPROGRAMW6432', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
+  'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'OS', 'PATHEXT', 'COMSPEC', 'DRIVERDATA']);
+
+/**
+ * The utility's environment: PATH, SystemRoot, TEMP/TMP, on Windows its system variables, and
+ * LAWNMOWER_* (no secrets: nothing named like a token, key, secret or password), so no Claude or
+ * camera credentials reach it.
  * @param {Record<string, string|undefined>} env
+ * @param {string} [platform] process.platform
  * @returns {Record<string, string>}
  */
-export function minimalEnv(env) {
+export function minimalEnv(env, platform = process.platform) {
   /** @type {Record<string, string>} */
   const out = {};
   for (const [k, v] of Object.entries(env || {})) {
     if (v === undefined || v === null) continue;
     const K = k.toUpperCase();
     const keep = K === 'PATH' || K === 'SYSTEMROOT' || K === 'TEMP' || K === 'TMP'
+      || (platform === 'win32' && WINDOWS_SYSTEM_VARS.has(K))
       || (K.startsWith('LAWNMOWER_') && !/TOKEN|SECRET|PASSWORD|PASSWD|KEY|CRED/.test(K));
     if (keep) out[k] = String(v);
   }
@@ -63,7 +81,7 @@ export class WakeHost extends EventEmitter {
    * @param {{ utilityProcess: any, MessageChannelMain: any, entry: string, env?: Record<string, string|undefined>,
    *   log?: (level: string, msg: string) => void, now?: () => number, setTimeout?: typeof setTimeout, clearTimeout?: typeof clearTimeout,
    *   readyTimeoutMs?: number, stopTimeoutMs?: number, backoffMs?: readonly number[], maxRestarts?: number, restartWindowMs?: number,
-   *   pingEveryMs?: number, livenessMs?: number, killPid?: (pid: number) => void }} o
+   *   pingEveryMs?: number, livenessMs?: number, killPid?: (pid: number) => void, stageTimeoutMs?: number, readyCapMs?: number, platform?: string }} o
    */
   constructor(o) {
     super();
@@ -104,6 +122,11 @@ export class WakeHost extends EventEmitter {
     this._pingN = 0;
     /** frozen processes killed by the liveness watchdog */
     this.hung = 0;
+    /** how far the running utility got before 'ready': forked, started, addon, models, ready */
+    this.stage = 'off';
+    this._forkAt = 0;
+    /** @type {{ code: number, stage: string, timedOut: boolean, afterMs: number }|null} */
+    this.lastExit = null;
   }
 
   get pid() {
@@ -216,7 +239,7 @@ export class WakeHost extends EventEmitter {
     this._setState('starting', 'The wake-word engine is starting.');
     let child;
     try {
-      child = this._o.utilityProcess.fork(this._o.entry, [], { serviceName: SERVICE_NAME, stdio: 'pipe', env: minimalEnv(this._o.env || {}) });
+      child = this._o.utilityProcess.fork(this._o.entry, [], { serviceName: SERVICE_NAME, stdio: 'pipe', env: minimalEnv(this._o.env || {}, this._o.platform) });
     } catch (err) {
       this._log('error', `[wake] could not start the wake-word process: ${/** @type {Error} */ (err).message}`);
       this._noRestart = true;
@@ -225,27 +248,47 @@ export class WakeHost extends EventEmitter {
     }
     this.child = child;
     this.models = [];
+    this.stage = 'forked';
+    this._forkAt = this._now();
+    child.once?.('spawn', () => this._log('info', `[wake] wake-word process spawned (pid ${child.pid})`));
     child.stdout?.on?.('data', (/** @type {Buffer} */ d) => this._childLog('info', d));
     child.stderr?.on?.('data', (/** @type {Buffer} */ d) => this._childLog('warn', d));
     child.on('message', (/** @type {any} */ m) => this._onMessage(child, m));
     child.on('exit', (/** @type {number} */ code) => this._onExit(child, code));
     child.postMessage({ t: 'init', ...init });
+    this._armReady(child, this._o.readyTimeoutMs ?? READY_TIMEOUT_MS);
+    // the renderer that asked before gets a port to the new process (it queues until loaded)
+    if (this._wc && !this._wc.isDestroyed?.()) this.connect(this._wc);
+  }
+
+  /**
+   * (Re)arm the deadline for the next sign of progress, never past READY_CAP_MS from the fork.
+   * @param {any} child @param {number} ms
+   */
+  _armReady(child, ms) {
+    this._clearTimer();
+    const left = this._forkAt + (this._o.readyCapMs ?? READY_CAP_MS) - this._now();
     this._timer = this._set(() => {
       this._timer = null;
       if (this.child !== child || this.state === 'ready') return;
-      this._log('warn', `[wake] the wake-word process did not report ready within ${Math.round((this._o.readyTimeoutMs ?? READY_TIMEOUT_MS) / 1000)} s`);
+      child.__timedOut = true;
+      this._log('warn', `[wake] the wake-word process did not report ready (stuck in stage '${this.stage}' after ${Math.round((this._now() - this._forkAt) / 1000)} s)`);
       this._setState('error', 'The wake-word engine did not start.');
       try { child.kill(); } catch { /* gone */ } // exit → restart with backoff
-    }, this._o.readyTimeoutMs ?? READY_TIMEOUT_MS);
-    // the renderer that asked before gets a port to the new process (it queues until loaded)
-    if (this._wc && !this._wc.isDestroyed?.()) this.connect(this._wc);
+    }, Math.max(0, Math.min(ms, left)));
   }
 
   /** @param {any} child @param {any} m */
   _onMessage(child, m) {
     if (child !== this.child || !m || typeof m !== 'object') return;
     this._heardAt = this._now();
-    if (m.t === 'ready') {
+    if (m.t === 'stage') {
+      if (this.state === 'ready' || typeof m.s !== 'string' || !/^[a-z]{1,20}$/.test(m.s)) return;
+      this.stage = m.s;
+      this._log('info', `[wake] wake-word process: ${m.s} (+${this._now() - this._forkAt} ms)`);
+      this._armReady(child, this._o.stageTimeoutMs ?? STAGE_TIMEOUT_MS);
+    } else if (m.t === 'ready') {
+      this.stage = 'ready';
       this._clearTimer();
       this._startLiveness(child);
       this.loadMs = Number(m.loadMs) || undefined;
@@ -273,11 +316,17 @@ export class WakeHost extends EventEmitter {
     this.child = null;
     this._clearTimer();
     this._stopLiveness();
+    const stage = this.stage;
+    this.stage = 'off';
     if (this._stopping) {
       this._setState('off');
       return;
     }
-    this._log('warn', `[wake] the wake-word process exited (code ${code})`);
+    const n = Number(code);
+    this.lastExit = { code: n, stage, timedOut: !!child.__timedOut, afterMs: this._now() - this._forkAt };
+    // (Windows exit codes are NTSTATUS values: 0xc0000005 an access violation, 0xc0000409 a fast fail)
+    const hex = Number.isFinite(n) && n !== 0 ? `, 0x${(n >>> 0).toString(16)}` : '';
+    this._log('warn', `[wake] the wake-word process exited (code ${code}${hex}; ${child.__timedOut ? `killed by us in stage '${stage}'` : `in stage '${stage}'`})`);
     if (this._noRestart) {
       if (this.state !== 'error') this._setState('error', 'The wake-word engine could not start; see the log.');
       return;

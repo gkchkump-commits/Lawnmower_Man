@@ -30,6 +30,7 @@
 //
 // Needs the Electron binary (npm install downloads it) and a display (on headless Linux run it
 // under `xvfb-run -a`). Uses a throwaway userData folder; never touches your real settings.
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -70,7 +71,9 @@ const { _electron: electron } = require('@playwright/test');
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-e2e-'));
 fs.writeFileSync(path.join(userData, 'settings.json'), JSON.stringify({ claude: { workdir: path.join(userData, 'work') } }));
 
-const env = { ...process.env, LAWNMOWER_USER_DATA: userData, LAWNMOWER_E2E: '1' };
+// (the wake word's engine waits for the local voice a minute after the start; this run has none,
+// and the engine check below comes later than that on a slow runner)
+const env = { ...process.env, LAWNMOWER_USER_DATA: userData, LAWNMOWER_E2E: '1', LAWNMOWER_WAKE_PARK_MS: '600000' };
 const loginFile = path.join(userData, 'fake-claude-logged-in');
 if (!live) {
   env.LAWNMOWER_CLAUDE_CLI = path.join(root, 'tests/fixtures/fake-claude.mjs');
@@ -468,7 +471,7 @@ async function homeCameraChecks(electronApp, page) {
 async function wakeChecks(electronApp, page) {
   const e2e = () => electronApp.evaluate(() => {
     const w = /** @type {any} */ (globalThis).__lawnmowerE2E?.wake;
-    return w ? { keys: Object.keys(w).sort(), status: w.status(), rows: w.metrics(), pid: w.utilityPid(), wakeDir: w.wakeDir(), addon: w.addonPath(), zhenDir: w.zhenDir(), resources: process.resourcesPath } : null;
+    return w ? { keys: Object.keys(w).sort(), status: w.status(), rows: w.metrics(), pid: w.utilityPid(), host: w.host?.(), wakeDir: w.wakeDir(), addon: w.addonPath(), zhenDir: w.zhenDir(), resources: process.resourcesPath } : null;
   });
   const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
   const dataWake = () => page.evaluate(() => document.body.dataset.wake || '');
@@ -492,12 +495,25 @@ async function wakeChecks(electronApp, page) {
   out.enabledAfterLaunchMs = t0 - launchedAt;
   await page.evaluate(() => /** @type {any} */ (window).lawnmower.settings.set({ wake: { enabled: true, explained: true } }));
   let w = await e2e();
-  for (let i = 0; i < 120 && w && !['ready', 'error', 'missing'].includes(w.status.engine); i++) {
+  // how the utility starts: its CPU time and memory over time, and the stage it reported
+  /** @type {any[]} */
+  const trace = [];
+  out.trace = trace;
+  const sample = () => {
+    const r = w?.rows.find((x) => x.pid === w.pid);
+    trace.push({ ms: Date.now() - t0, pid: w?.pid ?? null, stage: w?.host?.stage, cpuSec: r?.cumulativeCpuSec ?? null, memKB: r?.memoryKB ?? null, engine: w?.status.engine });
+  };
+  sample();
+  // (an engine in 'error' gets one restart after 1 s: wait for that one too)
+  for (let i = 0; i < 150 && w && w.status.engine !== 'ready' && w.status.engine !== 'missing' && !(w.status.engine === 'error' && (w.host?.restarts ?? 0) > 0); i++) {
     await sleep(500);
     w = await e2e();
+    if (i % 2 === 1) sample();
+    if (i === 19 && w?.status.engine !== 'ready' && w?.pid && process.platform === 'win32') out.probe = probeWindowsProcess(w.pid);
   }
   out.readyMs = Date.now() - t0;
   out.status = w?.status;
+  out.host = w?.host;
   // the engine's own lines (the utility's output included): why it did or did not start
   try {
     out.log = fs.readFileSync(path.join(userData, 'logs', 'main.log'), 'utf8').split(/\r?\n/).filter((l) => l.includes('[wake]')).slice(-40);
@@ -533,6 +549,32 @@ async function wakeChecks(electronApp, page) {
     gone = !!x && x.status.engine === 'off' && x.rows.length === 0 && !alive;
   }
   check('turned off: the "Jade wake word" process is gone', gone, st);
+}
+/**
+ * Windows: what a utility that is still starting is doing (priority, threads, CPU, the engine's
+ * DLLs it has loaded, and whether Windows Error Reporting holds it after a crash).
+ * @param {number} pid
+ */
+function probeWindowsProcess(pid) {
+  const ps = `$ErrorActionPreference='SilentlyContinue'
+$p = Get-Process -Id ${Number(pid)}
+$a = [pscustomobject]@{ cpu = $p.CPU; threads = $p.Threads.Count; priority = "$($p.PriorityClass)"; ws = $p.WorkingSet64 }
+Start-Sleep -Seconds 2
+$p.Refresh()
+$waits = $p.Threads | Group-Object { "$($_.ThreadState)/$($_.WaitReason)" } | ForEach-Object { "$($_.Name)=$($_.Count)" }
+[pscustomobject]@{
+  first = $a
+  cpuAfter2s = $p.CPU
+  waits = @($waits)
+  modules = @($p.Modules | Where-Object { $_.ModuleName -match 'onnx|sherpa|dxcore|dxgi|d3d|setupapi|cfgmgr|wer' } | ForEach-Object { $_.FileName })
+  werFault = @(Get-CimInstance Win32_Process -Filter "Name='WerFault.exe'" | ForEach-Object { $_.CommandLine })
+} | ConvertTo-Json -Depth 4 -Compress`;
+  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 30000 });
+  try {
+    return JSON.parse(String(r.stdout || '').trim());
+  } catch {
+    return { error: String(r.stderr || r.error || r.stdout || '').slice(0, 500) };
+  }
 }
 // ---- end "Hey Jade" ----
 

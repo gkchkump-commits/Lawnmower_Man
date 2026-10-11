@@ -88,7 +88,7 @@ export function createWake(o) {
   /** @type {EventEmitter & Record<string, any>} */
   const svc = /** @type {any} */ (new EventEmitter());
 
-  const host = new WakeHost({ utilityProcess, MessageChannelMain, entry, env, log });
+  const host = new WakeHost({ utilityProcess, MessageChannelMain, entry, env, log, platform });
   const zhen = o.zhen || new ZhenManager({
     locate: () => {
       const v = o.voice.getVoiceSettings();
@@ -205,7 +205,7 @@ export function createWake(o) {
       log('info', '[wake] no local voice for a minute; the wake-word engine waits for it');
       stopEngine().catch(() => {});
       emitStatus();
-    }, o.voice.parkMs ?? VOICE_PARK_MS);
+    }, o.voice.parkMs ?? ((env.LAWNMOWER_E2E === '1' && Number(env.LAWNMOWER_WAKE_PARK_MS)) || VOICE_PARK_MS));
     parkTimer.unref?.();
   }
 
@@ -431,6 +431,7 @@ export function createWake(o) {
     e2e: env.LAWNMOWER_E2E === '1' ? {
       status,
       utilityPid: () => host.pid,
+      host: () => ({ state: host.state, stage: host.stage, restarts: host.restarts, lastExit: host.lastExit }),
       metrics: () => {
         const rows = safe(() => app.getAppMetrics(), []);
         return rows.filter((/** @type {any} */ r) => (host.pid && r.pid === host.pid) || r.serviceName === SERVICE_NAME || r.name === SERVICE_NAME)

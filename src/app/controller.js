@@ -25,7 +25,7 @@ import { spokenPermissionPrompt, summarizeToolInput, toolChipLabel, toolCue, cli
 import { SentenceChunker } from './sentence-chunker.js';
 import { withDefaults } from './settings-defaults.js';
 import { SpeechQueue } from './speech-queue.js';
-import { toSpeechText } from './speech-text.js';
+import { toSpeechText, wakeSafeSpeech } from './speech-text.js'; // wake: wakeSafeSpeech
 
 /** @typedef {'idle'|'listening'|'transcribing'|'thinking'|'speaking'} ConversationState */
 export const CONVERSATION_STATES = /** @type {const} */ (['idle', 'listening', 'transcribing', 'thinking', 'speaking']);
@@ -1144,7 +1144,7 @@ export class Controller extends Emitter {
   /** @param {any} t @param {string[]} chunks */
   _enqueue(t, chunks) {
     for (const c of chunks) {
-      const text = toSpeechText(c);
+      const text = wakeSafeSpeech(toSpeechText(c)); // wake: never "hey Jade" in her own voice
       if (!text) continue;
       t.spoke = true;
       this._lastSpokeKind = 'reply'; // wake:

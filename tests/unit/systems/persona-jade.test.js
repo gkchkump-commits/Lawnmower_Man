@@ -125,12 +125,14 @@ describe('Jade never models the words that wake her up', () => {
 
   it('the pattern itself catches the phrases it is meant to (a guard for the structural check)', () => {
     for (const bad of ['Just say hey Jade whenever you need me.', 'Okay, Jade is on it.', 'Say Jade and I\'ll listen.', 'hi, jade', 'OK Jade']) expect(bad).toMatch(FORBIDDEN);
-    for (const fine of ['Hi, I\'m Jade.', 'My name is Jade, and I run on Claude.', 'say hey, then my name', 'the jade necklace']) expect(fine).not.toMatch(FORBIDDEN);
+    for (const fine of ['Hi, I\'m Jade.', 'My name is Jade, and I run on Claude.', 'just call my name', 'the jade necklace']) expect(fine).not.toMatch(FORBIDDEN);
   });
 
-  it('she is told how to explain the wake word without saying it', () => {
-    expect(IDENTITY_RULES).toContain('say hey, then my name');
-    expect(wakeSection({ enabled: true })).toContain('tell them to say "hey" and then your name');
+  it('she is told how to explain the wake word without saying it (the contract\'s words, §10.1)', () => {
+    // (changed on purpose: "say hey, then my name" nudged her toward "just say hey, Jade")
+    expect(IDENTITY_RULES).toContain('(say "just call my name")');
+    expect(IDENTITY_RULES).not.toMatch(/say hey, then my name/);
+    expect(wakeSection({ enabled: true })).toContain('tell them to just call your name the way they would call a person');
     expect(wakeSection({ enabled: true })).toContain('the app\'s settings show the exact words');
   });
 });

@@ -194,8 +194,16 @@ export class Mic extends Emitter {
    * @param {null | ((x: Float32Array, info: { at: number, arrivalPerf: number }) => void)} fn
    */
   setTap(fn) {
+    const had = !!this._tap;
     this._tap = typeof fn === 'function' ? fn : null;
-    if (!this._tap) this._ringStart = this.samplesSeen; // the memory goes with the tap
+    if (!this._tap) {
+      // the memory goes with the tap: wiped, not just marked old
+      this._ring.fill(0);
+      this._ringStart = this.samplesSeen;
+    } else if (!had) {
+      // tapped again: the ring holds nothing of the time without a tap
+      this._ringStart = Math.max(this._ringStart, this.samplesSeen);
+    }
   }
 
   get tapped() {

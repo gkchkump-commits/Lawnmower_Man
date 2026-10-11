@@ -26,6 +26,11 @@ const STATUS_MIN_MS = 250;
 const TRAY_MIN_MS = 500;
 /** How long a start waits for the voice package's "is model A there?" before running on B alone. */
 const ZHEN_CHECK_WAIT_MS = 5000;
+/**
+ * Test clips: main cannot tell whether the user pressed Record, so a renderer bug (or a hostile
+ * page) is bounded: one save per 25 s, 20 per run, the folder opened at most once a minute.
+ */
+export const CLIP_LIMITS = Object.freeze({ minGapMs: 25000, perRun: 20, openGapMs: 60000 });
 
 /**
  * @typedef {object} WakeEngineStatus  (contract §6.4)
@@ -93,6 +98,7 @@ export function createWake(o) {
   /** @type {{ state: string, reason: string }|null} */
   let uiState = null;
   let stopped = false;
+  const clips = { saved: 0, lastAt: -Infinity, openedAt: -Infinity };
 
   // --- the PC itself ---------------------------------------------------------------------------
   // (first: the engine status carries its snapshot)
@@ -274,12 +280,32 @@ export function createWake(o) {
       reportState,
       micAccess: () => micAccessStatus(systemPreferences, platform),
       openMicSettings: () => openMicSettings(shell, platform),
-      saveClip: (/** @type {unknown} */ p) => saveTestClip(p, {
-        documentsDir: documentsDir(),
-        openPath: (d) => shell.openPath(d),
-        appVersion: safe(() => app.getVersion(), ''),
-        log,
-      }),
+      saveClip: async (/** @type {unknown} */ p) => {
+        const now = Date.now();
+        if (clips.saved >= CLIP_LIMITS.perRun) {
+          log('warn', '[wake] a test clip was refused: the limit for this run is reached');
+          return { ok: false, error: `At most ${CLIP_LIMITS.perRun} test clips per run; restart Lawnmower Man for more.` };
+        }
+        if (now - clips.lastAt < CLIP_LIMITS.minGapMs) {
+          log('warn', '[wake] a test clip was refused: one every 25 s at most');
+          return { ok: false, error: 'Another test clip was saved a moment ago; wait a little.' };
+        }
+        const r = await saveTestClip(p, {
+          documentsDir: documentsDir(),
+          openPath: (d) => {
+            if (Date.now() - clips.openedAt < CLIP_LIMITS.openGapMs) return '';
+            clips.openedAt = Date.now();
+            return shell.openPath(d);
+          },
+          appVersion: safe(() => app.getVersion(), ''),
+          log,
+        });
+        if (r.ok) {
+          clips.saved++;
+          clips.lastAt = now;
+        }
+        return r;
+      },
       download: () => {
         const r = zhen.download();
         emitStatus();

@@ -1,4 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
+
+// every temporary folder made here is removed at the end (each holds tens of MB of stand-in files)
+const madeDirs = [];
+afterAll(() => {
+  for (const d of madeDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* gone */ }
+  }
+});
+const mkdtemp = (/** @type {string} */ prefix) => {
+  const d = fs.mkdtempSync(prefix);
+  madeDirs.push(d);
+  return d;
+};
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,7 +51,7 @@ function makeTar(files, { prefixSplit = false } = {}) {
   return Buffer.concat(blocks);
 }
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakefetch-'));
+const tmp = () => mkdtemp(path.join(os.tmpdir(), 'lm-wakefetch-'));
 
 describe('fetch-wake: pins', () => {
   it('pins the contract §5.4 downloads', () => {

@@ -1,4 +1,17 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, describe, it, expect, vi } from 'vitest';
+
+// every temporary folder made here is removed at the end (each holds tens of MB of stand-in files)
+const madeDirs = [];
+afterAll(() => {
+  for (const d of madeDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* gone */ }
+  }
+});
+const mkdtemp = (/** @type {string} */ prefix) => {
+  const d = fs.mkdtempSync(prefix);
+  madeDirs.push(d);
+  return d;
+};
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,7 +23,7 @@ import { fakeChannel, fakeUtilityProcess, fakeWebContents } from './fakes.js';
 
 /** A complete fake wake folder (pinned sizes) for linux-x64, optionally with the dev zh-en model. */
 function wakeDir({ zhen = false, broken = false } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakeidx-'));
+  const dir = mkdtemp(path.join(os.tmpdir(), 'lm-wakeidx-'));
   const put = (rel, size) => {
     const f = path.join(dir, ...rel.split('/'));
     fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -40,7 +53,7 @@ class FakeZhen extends EventEmitter {
 }
 
 function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {} } = {}) {
-  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakeud-'));
+  const userData = mkdtemp(path.join(os.tmpdir(), 'lm-wakeud-'));
   const settings = new SettingsStore({ dir: userData, platform: 'linux' });
   settings.load();
   if (enabled) settings.update({ wake: { enabled: true } });
@@ -119,7 +132,7 @@ describe('createWake (contract §3.2, §7.1)', () => {
     expect(wake.status().models.zhen).toBe('downloading');
     expect(wake.status().detail).toMatch(/basic wake-word model; the extra one is downloading/);
     // the download finished: a model A folder with the pinned sizes
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-zhen-'));
+    const d = mkdtemp(path.join(os.tmpdir(), 'lm-zhen-'));
     for (const f of MODEL_FILES.zhen) fs.writeFileSync(path.join(d, f.name), Buffer.alloc(f.size));
     z.state = 'ok';
     z.emit('ready', d);
@@ -180,6 +193,23 @@ describe('createWake (contract §3.2, §7.1)', () => {
     expect(up.forks).toHaveLength(2);
     settings.update({ wake: { enabled: false } });
     expect(await ipc.handlers.get('lm:wake:restart')({ sender: {} })).toEqual({ ok: false });
+    await wake.stop();
+  });
+
+  it('test clips are bounded: one per 25 s, the folder opened at most once a minute (main cannot see the click)', async () => {
+    const { wake, ipc } = make({ zhen: true });
+    const pcm = new Int16Array(16000);
+    const wav = new ArrayBuffer(44 + pcm.byteLength);
+    const v = new DataView(wav);
+    const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); v.setUint32(4, 36 + pcm.byteLength, true); str(8, 'WAVE'); str(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 16000, true);
+    v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, pcm.byteLength, true);
+    const save = () => ipc.handlers.get('lm:wake:save-clip')({ sender: {} }, { wav, hits: [] });
+    const a = await save();
+    expect(a.ok).toBe(true);
+    const b = await save();
+    expect(b).toMatchObject({ ok: false, error: expect.stringMatching(/a moment ago/) });
     await wake.stop();
   });
 

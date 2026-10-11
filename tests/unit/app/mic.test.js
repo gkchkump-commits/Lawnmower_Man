@@ -239,6 +239,26 @@ describe('Mic: the wake word tap', () => {
     mic.close();
   });
 
+  it('release → untapped blocks → tapped again: the ring is wiped and replays nothing from before', async () => {
+    const env = fakeAudio();
+    const mic = new Mic({ getUserMedia: env.getUserMedia, createContext: env.createContext });
+    mic.setTap(() => {});
+    await mic.open();
+    env.feed(3.0, () => 0.25);
+    const s0 = mic.samplesSeen;
+    mic.setTap(null);
+    expect(Array.from(mic._ring).every((v) => v === 0)).toBe(true); // not just marked old
+    await mic.start('ptt'); // push-to-talk keeps the blocks flowing, untapped
+    env.feed(1.0, () => 0.5);
+    const s1 = mic.samplesSeen;
+    mic.setTap(() => {});
+    expect(mic.ring(s0, s1)).toBeNull(); // the ring never held that time
+    env.feed(0.2, () => 0.75);
+    expect(mic.ring(s1, mic.samplesSeen)).toHaveLength(mic.samplesSeen - s1);
+    expect(mic.ring(s1 - 10, mic.samplesSeen)).toBeNull();
+    mic.close();
+  });
+
   it('start("utterance", { fromSample }) replays the ring from there, then continues live', async () => {
     const env = fakeAudio();
     const mic = new Mic({ getUserMedia: env.getUserMedia, createContext: env.createContext });

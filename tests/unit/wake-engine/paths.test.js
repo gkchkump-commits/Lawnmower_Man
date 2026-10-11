@@ -1,4 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
+
+// every temporary folder made here is removed at the end (each holds tens of MB of stand-in files)
+const madeDirs = [];
+afterAll(() => {
+  for (const d of madeDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* gone */ }
+  }
+});
+const mkdtemp = (/** @type {string} */ prefix) => {
+  const d = fs.mkdtempSync(prefix);
+  madeDirs.push(d);
+  return d;
+};
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +20,7 @@ import { ADDON_FILES, MODEL_FILES } from '../../../electron/wake/config.js';
 
 /** A wake folder with files of the pinned sizes (sparse content). */
 function fakeWakeDir({ key = 'linux-x64', skip = [], zhen = false } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-wakepaths-'));
+  const dir = mkdtemp(path.join(os.tmpdir(), 'lm-wakepaths-'));
   const put = (rel, size) => {
     if (skip.includes(rel)) return;
     const f = path.join(dir, ...rel.split('/'));

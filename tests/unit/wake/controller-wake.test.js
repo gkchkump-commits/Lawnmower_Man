@@ -187,6 +187,32 @@ describe('Controller: the wake capture', () => {
     expect(mic.log.filter((x) => x[0] === 'start').map((x) => x[1])).toEqual(['utterance', 'ptt']);
   });
 
+  it('Esc or push-to-talk while the command is being transcribed: the adapter hears it (never left waiting for a decision)', async () => {
+    for (const how of ['esc', 'ptt']) {
+      const { c, mic, stt, adapter, bridge } = setup({ text: 'what time is it?' });
+      // a slow /stt: the key comes while it transcribes
+      let release;
+      stt.transcribe = (_wav, o) => new Promise((resolve, reject) => {
+        release = () => resolve({ text: 'what time is it?' });
+        o?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+      await c.start();
+      await c.wakeWordCapture({ kind: 'command', noSpeechMs: 8000, show: true, meta: { wakeId: 'w1' } });
+      mic.emit('utterance', mic.result);
+      await tick(5);
+      expect(c.state).toBe('transcribing');
+      expect(adapter.of('captured')).toHaveLength(1);
+      if (how === 'esc') c.cancelListening();
+      else await c.startListening('ptt');
+      await tick(5);
+      expect(adapter.of('cancelled'), how).toEqual([[{ kind: 'command', wakeId: 'w1' }]]);
+      expect(adapter.of('decide'), how).toEqual([]);
+      release?.();
+      await tick(5);
+      expect(sends(bridge), how).toEqual([]);
+    }
+  });
+
   it('typing cancels a wake capture (and tells the adapter)', async () => {
     const { c, bridge, adapter } = setup();
     await c.start();

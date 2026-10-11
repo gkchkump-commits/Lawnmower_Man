@@ -263,6 +263,40 @@ test.describe('Hey Jade (scripted microphone)', () => {
     expect(blocked).toEqual([]);
   });
 
+  test('10b · Esc or Space while her command is being transcribed: she still wakes on her name afterwards', async ({ page }) => {
+    test.setTimeout(120_000);
+    const blocked = await bootWake(page);
+    await wakeIs(page, 'waiting');
+    for (const key of ['Escape', 'Space']) {
+      await queue(page, ['Hey Jade.', 'what time is it?']);
+      await page.evaluate(() => window.__wakeMock.arm());
+      await say(page, 'oneBreath');
+      // the wake segment was accepted; now the command's /stt is slow (a busy CPU)
+      await wakeIs(page, 'listening', 15_000);
+      await page.evaluate(() => window.__app.bridge.__mock.sttDelay(4000));
+      await page.waitForFunction(() => document.body.dataset.state === 'transcribing', null, { timeout: 15_000 });
+      if (key === 'Escape') await page.keyboard.press('Escape');
+      else {
+        await page.keyboard.down('Space');
+        await page.waitForTimeout(300);
+        await page.keyboard.up('Space');
+      }
+      await page.evaluate(() => window.__app.bridge.__mock.sttDelay(0));
+      await wakeIs(page, 'waiting', 10_000);
+      await page.waitForTimeout(600);
+      // she must not be stuck "deciding": the next call wakes her and its command is sent
+      const before = (await userTexts(page)).length;
+      await queue(page, ['Hey Jade.', `and now after ${key}?`]);
+      await page.evaluate(() => window.__wakeMock.arm());
+      await say(page, 'oneBreath');
+      await expect.poll(async () => (await userTexts(page)).slice(before), { timeout: 20_000, message: key }).toEqual([`and now after ${key}?`]);
+      await idleAgain(page);
+      await page.evaluate(() => window.__app.bridge.settings.set({ wake: { followUpSec: 0 } }));
+      await wakeIs(page, 'waiting', 10_000);
+    }
+    expect(blocked).toEqual([]);
+  });
+
   test('11 · the hotkey while waiting: listening now, with the chime (T13)', async ({ page }) => {
     const blocked = await bootWake(page);
     await wakeIs(page, 'waiting');

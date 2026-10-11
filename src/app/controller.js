@@ -1289,11 +1289,16 @@ export class Controller extends Emitter {
     const ctrl = new AbortController();
     this._sttAbort = ctrl;
     let text = '';
+    // wake: Esc, push-to-talk or typing aborted the transcription: the adapter must hear it, or its
+    // episode would wait for a decision forever (and ignore her name meanwhile)
+    const aborted = () => {
+      if (meta && meta.kind !== 'fallback') this._wakeWord?.cancelled?.(meta); // wake:
+    };
     try {
       const r = await this.stt.transcribe(u.wav, { signal: ctrl.signal });
       text = String(r?.text || '').trim();
     } catch (err) {
-      if (ctrl.signal.aborted || isAbortError(err)) return;
+      if (ctrl.signal.aborted || isAbortError(err)) return aborted(); // wake:
       this._sttAbort = null;
       if (meta) return this._wakeDecide('', meta, u, { failed: true }); // wake: no toast
       this._toast(`Speech recognition failed: ${errMsg(err)}`, 'error');
@@ -1302,7 +1307,7 @@ export class Controller extends Emitter {
       this._maybeIdle();
       return;
     }
-    if (ctrl.signal.aborted) return;
+    if (ctrl.signal.aborted) return aborted(); // wake:
     this._sttAbort = null;
     if (meta) return this._wakeDecide(text, meta, u); // wake: empty and hallucinations drop silently there
     if (!text || (HALLUCINATION.test(text) && (u.speechMs || 0) < 1500)) {

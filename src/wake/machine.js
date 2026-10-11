@@ -50,6 +50,10 @@ export const WAKE = Object.freeze({
   // a watchdog: a capture whose window ended this long ago with no word and no end from the
   // controller is over all the same (so a lost event never leaves her stuck "listening")
   captureGraceMs: 2500,
+  // …and an utterance being transcribed that never comes back with a text (an aborted /stt): the
+  // episode ends this long after the capture ended, so her name works again (a long command on
+  // the CPU takes seconds; this bounds a lost answer, not a slow one)
+  decideMaxMs: 30000,
 });
 
 /** @typedef {'off'|'unavailable'|'starting'|'paused'|'locked'|'blocked'|'muted'|'waiting'|'attention'|'listening'|'followup'|'look'|'busy'|'barge'} WakeUiState */
@@ -249,6 +253,7 @@ export class WakeMachine {
     const a = this.active;
     if (a && a.verdict === 'pending') t = Math.min(t, a.verifyDeadline);
     if (a && a.phase === 'capture' && !a.speechStarted && Number.isFinite(a.windowEnd)) t = Math.min(t, a.windowEnd + WAKE.captureGraceMs);
+    if (a && a.phase === 'deciding' && Number.isFinite(a.decidingSince)) t = Math.min(t, a.decidingSince + WAKE.decideMaxMs);
     if (this._strictOn) t = Math.min(t, this.strictUntil);
     if (this.mic === 'blocked' && this._base.state === 'blocked') t = Math.min(t, this.micRetryAt);
     if (this.dimAt < Infinity && !this.dimOn) t = Math.min(t, this.dimAt);
@@ -288,7 +293,10 @@ export class WakeMachine {
         break;
       case 'captured':
         // our capture's utterance ended: the controller transcribes it now ('busy')
-        if (this.active && this.active.id === String(input.meta?.wakeId) && this.active.phase === 'capture') this.active.phase = 'deciding';
+        if (this.active && this.active.id === String(input.meta?.wakeId) && this.active.phase === 'capture') {
+          this.active.phase = 'deciding';
+          this.active.decidingSince = now;
+        }
         break;
       case 'conversation': this._conversation(input); break;
       case 'turnDone': this._turnDone(input, out, now); break;
@@ -532,6 +540,7 @@ export class WakeMachine {
       out.push({ type: 'decision', id: meta.wakeId, decision: { action: 'drop', reason: 'stale' } });
       return;
     }
+    if (a.phase !== 'deciding') a.decidingSince = now;
     a.phase = 'deciding';
     if (a.verdict === 'pending') {
       // held until the wake segment's verdict (T6)
@@ -633,9 +642,10 @@ export class WakeMachine {
     const a = this.active;
     const meta = input.meta || {};
     if (!a || a.id !== String(meta.wakeId)) return;
-    // push-to-talk or typing took over (T14): silently
+    // push-to-talk, typing or Esc took over (T14), also while it was being transcribed: silently
     this.active = null;
     if (a.kind === 'barge') out.push({ type: 'unduck', rampMs: WAKE.unduckMs });
+    if (a.held) out.push({ type: 'decision', id: a.id, decision: { action: 'drop', reason: 'cancelled' } });
   }
 
   _conversation(input) {
@@ -707,6 +717,11 @@ export class WakeMachine {
     if (w && w.phase === 'capture' && !w.speechStarted && now >= w.windowEnd + WAKE.captureGraceMs) {
       // the controller never said how the capture ended: end it here
       if (w.kind === 'listening') this._log(now, 'no command', 'no-command');
+      this._endEpisode(out, 'watchdog');
+    }
+    const d = this.active;
+    if (d && d.phase === 'deciding' && Number.isFinite(d.decidingSince) && now >= d.decidingSince + WAKE.decideMaxMs) {
+      // its transcript never came (the answer was lost): her name must work again
       this._endEpisode(out, 'watchdog');
     }
     const p = this.presence;

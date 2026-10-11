@@ -637,6 +637,34 @@ describe('T13 manual, T14 push-to-talk', () => {
     expect(h.m.state).toBe('listening');
   });
 
+  it('an utterance being transcribed is cancelled (Esc, push-to-talk): the episode ends and her name works again', () => {
+    const h = harness();
+    h.ready();
+    h.hit();
+    h.step({ type: 'verified', id: 'w1', ok: true });
+    h.step({ type: 'captured', meta: { wakeId: 'w1' } });
+    expect(h.m.active?.phase).toBe('deciding');
+    h.step({ type: 'captureCancelled', meta: { wakeId: 'w1' } });
+    expect(h.m.active).toBeNull();
+    expect(h.m.state).toBe('waiting');
+    expect(one(h.hit({ id: 'w2' }), 'capture')).toBeTruthy();
+  });
+
+  it('a watchdog ends an episode whose transcript never comes back (deciding for 30 s)', () => {
+    const h = harness();
+    h.ready();
+    h.hit();
+    h.step({ type: 'verified', id: 'w1', ok: true });
+    h.step({ type: 'captured', meta: { wakeId: 'w1' } });
+    expect(h.m.nextDeadline() - h.t).toBe(WAKE.decideMaxMs);
+    h.advance(WAKE.decideMaxMs - 10);
+    expect(h.m.active).not.toBeNull(); // a slow CPU transcription is not cut off early
+    h.advance(20);
+    expect(h.m.active).toBeNull();
+    expect(h.m.state).toBe('waiting');
+    expect(one(h.hit({ id: 'w2' }), 'capture')).toBeTruthy();
+  });
+
   it('T14: push-to-talk cancels our capture silently', () => {
     const h = harness();
     h.ready();

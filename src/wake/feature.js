@@ -590,8 +590,12 @@ export class WakeFeature extends Emitter {
     const m = meta?.kind === 'fallback' ? { ...meta, wakeId: `fb${++this._fb}` } : meta;
     const id = String(m?.wakeId ?? '');
     return new Promise((resolve) => {
-      // a decision held for the verdict comes later (the verify timeout bounds that); never hang
-      const safety = setTimeout(() => this._resolve(id, { action: 'drop', reason: 'timeout' }), WAKE.verifyTimeoutMs.cpu + 4000);
+      // a decision held for the verdict comes later (the verify timeout bounds that); never hang,
+      // and never leave the machine's episode waiting either
+      const safety = setTimeout(() => {
+        this._resolve(id, { action: 'drop', reason: 'timeout' });
+        if (m?.kind !== 'fallback') this._step({ type: 'captureCancelled', meta: m });
+      }, WAKE.verifyTimeoutMs.cpu + 4000);
       this._decisions.set(id, (/** @type {any} */ d) => {
         clearTimeout(safety);
         resolve(d);

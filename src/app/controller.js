@@ -177,6 +177,10 @@ export class Controller extends Emitter {
     this._lastTurnId = /** @type {string|null} */ (null);
     this._lastTurnVoice = false;
     this._localTurns = 0;
+    /** what she said last: 'say' (her own line: the camera's hello, an alert), 'confirm' (a local
+     * command's say() confirmation), 'reply'; a say() line never opens a follow-up (FUP-1) */
+    this._lastSpokeKind = /** @type {null|'say'|'confirm'|'reply'} */ (null);
+    this._wakeConfirmPending = false;
     // ---- end "Hey Jade" ----
   }
 
@@ -311,6 +315,7 @@ export class Controller extends Emitter {
     if (!hidden) this.noteActivity();
     if (this.listen) this._cancelListening();
     this._lastTurnVoice = source === 'voice' && !hidden; // wake: only a spoken turn opens a follow-up window
+    this._lastSpokeKind = null; // wake:
     // a local command ("camera left"): the user's bubble, no Claude turn
     if (!hidden && this._interceptor && this._intercepted(clean, source)) {
       this._lastTurnId = `local-${++this._localTurns}`; // wake: its confirmation may open a follow-up
@@ -584,12 +589,16 @@ export class Controller extends Emitter {
   /** @param {string} text @param {string} source @returns {boolean} handled */
   _intercepted(text, source) {
     let handled = false;
+    this._wakeConfirmPending = true; // wake: a say() from the command is its confirmation
     try {
       handled = /** @type {CommandInterceptor} */ (this._interceptor)(text, { source }) === true;
     } catch (err) {
       console.warn('[controller] command interceptor failed', err);
     }
-    if (!handled) return false;
+    if (!handled) {
+      this._wakeConfirmPending = false; // wake:
+      return false;
+    }
     // newer input wins, as for a message to Claude; the command confirms itself with say()
     if (this.activeTurnId || this.pendingSends > 0 || this.speech.busy || this.claudeStatus.busy) this._preempt();
     this.view.addUserMessage?.(text, { source });
@@ -604,7 +613,7 @@ export class Controller extends Emitter {
    * @property {() => boolean} active      wake mode is on and running (the name is required: no "listen to everything")
    * @property {() => boolean} [fallback]  the transcript check runs (no engine): the hands-free VAD hands every utterance to decide()
    * @property {(o: { from: 'hotkey'|'mic-button'|'barge' }) => void} manual
-   * @property {(info: { turnId: string|null, voiceTurn: boolean, spoke: boolean, permissionPending: boolean }) => void} idle
+   * @property {(info: { turnId: string|null, voiceTurn: boolean, spoke: boolean, permissionPending: boolean, say: boolean }) => void} idle
    * @property {(s: ConversationState) => void} state
    * @property {(text: string, meta: object, o: { speechMs: number, failed?: boolean }) => Promise<import('../wake/phrase.js').WakeDecision>} decide
    * @property {(meta: object) => void} noSpeech
@@ -726,10 +735,15 @@ export class Controller extends Emitter {
     this._wakeIdleTimer = this._setTimeout(() => {
       this._wakeIdleTimer = null;
       if (this.state !== 'idle' || this.listen || this.speech.busy || this.activeTurnId || this.pendingSends > 0) return;
-      if (!this.wakeWordActive) return;
       const t = this._lastTurnId ? this.turns.get(this._lastTurnId) : null;
+      const info = { turnId: this._lastTurnId, voiceTurn: this._lastTurnVoice, spoke: !!t?.spoke, permissionPending: !!this.permissions.size, say: this._lastSpokeKind === 'say' };
+      // the turn's one chance at a follow-up window is used now, whether it opens or not (the PC
+      // was locked, the camera saw nobody…): a later say() line can never open it for that turn
+      this._lastTurnVoice = false;
+      this._wakeConfirmPending = false;
+      if (!this.wakeWordActive) return;
       try {
-        this._wakeWord?.idle({ turnId: this._lastTurnId, voiceTurn: this._lastTurnVoice, spoke: !!t?.spoke, permissionPending: !!this.permissions.size });
+        this._wakeWord?.idle(info);
       } catch (err) {
         console.warn('[controller] the wake word idle hook failed', err);
       }
@@ -769,6 +783,8 @@ export class Controller extends Emitter {
     const clean = String(text ?? '').trim();
     if (!clean || !this.isIdle()) return false;
     const id = `say-${++this._sayCounter}`;
+    this._lastSpokeKind = this._wakeConfirmPending ? 'confirm' : 'say'; // wake: her own line opens no follow-up
+    this._wakeConfirmPending = false; // wake:
     this.view.assistantStart?.(id);
     this.view.assistantDelta?.(id, clean);
     this.view.assistantEnd?.(id, {});
@@ -1131,6 +1147,7 @@ export class Controller extends Emitter {
       const text = toSpeechText(c);
       if (!text) continue;
       t.spoke = true;
+      this._lastSpokeKind = 'reply'; // wake:
       this.speech.push(text, { turnId: t.id, kind: 'reply' });
     }
   }

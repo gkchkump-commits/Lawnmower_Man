@@ -247,7 +247,45 @@ describe('Controller: the idle hook (the follow-up window)', () => {
     await tick(200);
     expect(adapter.of('idle')).toEqual([]);
     await waitFor(() => adapter.of('idle').length, { timeout: 1000 });
-    expect(adapter.of('idle')[0][0]).toEqual({ turnId: 't1', voiceTurn: true, spoke: false, permissionPending: false });
+    // (changed on purpose: the hook also says whether her last line was a say() line)
+    expect(adapter.of('idle')[0][0]).toEqual({ turnId: 't1', voiceTurn: true, spoke: false, permissionPending: false, say: false });
+  });
+
+  it('FUP-1: a voice turn whose reply ended while she was not running (PC locked) cannot open a window at her next say() line', async () => {
+    const { c, bridge, adapter, mic } = setup({ text: 'what time is it?', tts: true });
+    await c.start();
+    await c.wakeWordCapture({ kind: 'command', noSpeechMs: 8000, show: true, meta: { wakeId: 'w1' } });
+    mic.emit('utterance', mic.result);
+    await waitFor(() => sends(bridge).length);
+    await tick(5);
+    adapter.isActive = false; // locked while she answers
+    bridge.emit({ type: 'turn_start', turnId: 't1' });
+    bridge.emit({ type: 'text_delta', turnId: 't1', text: 'It is noon.' });
+    bridge.emit({ type: 'turn_end', turnId: 't1', result: 'It is noon.' });
+    await waitFor(() => c.state === 'idle' && !c.speech.busy, { timeout: 3000 });
+    await tick(450);
+    expect(adapter.of('idle')).toEqual([]);
+    adapter.isActive = true; // unlocked
+    expect(c.say('Welcome back!')).toBe(true);
+    await waitFor(() => adapter.of('idle').length > 0, { timeout: 3000 });
+    const last = adapter.of('idle').at(-1)?.[0];
+    expect(last).toMatchObject({ voiceTurn: false, say: true });
+  });
+
+  it('a say() line after a voice turn is marked as hers (say: true); a local command\'s spoken confirmation is not', async () => {
+    const { c, adapter } = setup({ tts: true });
+    await c.start();
+    c.setCommandInterceptor((text) => {
+      if (!/camera left/.test(text)) return false;
+      c.say('Turning the camera left.');
+      return true;
+    });
+    c.sendText('camera left', { source: 'voice' });
+    await waitFor(() => adapter.of('idle').length === 1, { timeout: 3000 });
+    expect(adapter.of('idle')[0][0]).toMatchObject({ voiceTurn: true, say: false });
+    expect(c.say('Hello again!')).toBe(true);
+    await waitFor(() => adapter.of('idle').length === 2, { timeout: 3000 });
+    expect(adapter.of('idle')[1][0]).toMatchObject({ voiceTurn: false, say: true });
   });
 
   it('a typed turn reports voiceTurn: false', async () => {

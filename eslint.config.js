@@ -1,6 +1,6 @@
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'voice/**', 'release/**', 'public/**'],
+    ignores: ['dist/**', 'node_modules/**', 'voice/**', 'release/**', 'public/**', '.claude/**'],
   },
   {
     files: ['**/*.js', '**/*.mjs', '**/*.cjs'],

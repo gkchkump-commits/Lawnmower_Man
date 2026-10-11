@@ -3,14 +3,39 @@
 // Clips are played strictly in the order they were enqueued:
 //   { kind: 'audio', audioB64 | wav | samples+sampleRate, visemes?, text? }  → Web Audio
 //   { kind: 'speech', text, rate? }                                         → Web Speech (fallback)
-// Audio clips go through a per-clip gain (click-free stop) into an AnalyserNode, which the
-// lip-sync reads for level/spectrum; `current.time` is the playback clock of the clip (output
-// latency compensated) used to sample viseme timelines.
 //
-// Events: 'start' (clip), 'end' (clip, { stopped }), 'idle', 'boundary' ({ word, clip }), 'error' (err, clip)
+// Audio clips (the local voice):
+//
+//   source → clip gain ─┬→ analyser → mute → destination      the DRY voice, for the lip-sync
+//                       └→ voice character (AudioWorklet) → master → destination
+//                          (or straight to the master for 'natural' / without the worklet)
+//
+// The master gain ducks her voice while "Hey Jade" is checked during a reply (duck/unduck,
+// src/wake/). Earcons (playCue) are their own sources in this AudioContext, so Chromium's echo
+// canceller has them in its reference; they bypass the queue, the events and the master.
+//
+// The analyser always sees the unprocessed voice, so loudness and spectrum lip-sync do not
+// depend on the effect, and `current.time` is the playback clock of the dry clip (output latency
+// compensated) used to sample viseme timelines. The voice character (src/audio/voicefx.js) runs
+// on the audio thread with no added latency; its tail rings out in the shared worklet node after
+// a clip has ended, so it neither cuts the end of a clip nor delays the next one. The system
+// voice (Web Speech) cannot be processed.
+//
+// Events: 'start' (clip), 'end' (clip, { stopped }), 'idle', 'error' (err, clip), and for speech
+// clips 'speechstart' (clip: the voice really started) and 'boundary' ({ word, charIndex,
+// charLength, clip }: a word starts; charIndex into clip.text when the voice reports it).
+// playCue() emits none of them.
+/* global AudioWorkletNode */
 
 import { Emitter } from '../app/emitter.js';
+import { normalizeFx } from './voicefx.js';
 import { base64ToBytes, decodeWav } from './wav.js';
+// Bundled by Vite into its own same-origin module (voicefx.js inlined): the app's CSP only
+// allows worklet scripts from 'self' (no blob: or data: URLs).
+import FX_WORKLET_URL from './voicefx-worklet.js?worker&url';
+
+/** How long the first clip may wait for the effect to load before it plays without it. */
+export const FX_WAIT_MS = 30;
 
 /**
  * @typedef {object} AudioClip
@@ -29,6 +54,15 @@ import { base64ToBytes, decodeWav } from './wav.js';
  * @property {number} [rate]
  */
 /** @typedef {AudioClip|SpeechClip} Clip */
+/** @typedef {import('./voicefx.js').VoiceCharacter} VoiceCharacter */
+/**
+ * State of the voice character effect:
+ *  'off'         'natural' was chosen and the effect was never needed (nothing loaded)
+ *  'loading'     the worklet module is loading
+ *  'ready'       the effect is running on the audio thread
+ *  'unavailable' no AudioWorklet in this environment, or it failed: the voice plays unprocessed
+ * @typedef {'off'|'loading'|'ready'|'unavailable'} FxState
+ */
 
 export class AudioPlayer extends Emitter {
   /**
@@ -36,27 +70,51 @@ export class AudioPlayer extends Emitter {
    * @param {() => AudioContext} [deps.createContext]   lazily creates the AudioContext
    * @param {{ speak: Function, cancel: Function, available?: boolean }|null} [deps.speech]  Web Speech wrapper
    * @param {() => number} [deps.now]                    seconds clock for speech clips
+   * @param {string} [deps.fxModuleUrl]                  the voice character worklet module
+   * @param {{ character?: VoiceCharacter, amount?: number }} [deps.voiceFx] initial character
    */
   constructor(deps = {}) {
     super();
     this._createContext = deps.createContext || defaultContextFactory;
     this.speech = deps.speech || null;
     this._now = deps.now || (() => (globalThis.performance?.now?.() ?? Date.now()) / 1000);
+    this._fxUrl = deps.fxModuleUrl || moduleUrl(FX_WORKLET_URL);
     /** @type {AudioContext|null} */
     this.ctx = null;
     /** @type {AnalyserNode|null} */
     this.analyser = null;
     /** @type {Array<{ clip: Clip, resolve: (r: { stopped: boolean, error?: Error }) => void }>} */
     this._queue = [];
-    /** @type {null | { clip: Clip, kind: 'audio'|'speech', resolve: Function, source?: AudioBufferSourceNode, gain?: GainNode, startAt: number, duration: number }} */
+    /** @type {null | { clip: Clip, kind: 'audio'|'speech', resolve: Function, source?: AudioBufferSourceNode, gain?: GainNode, startAt: number, duration: number, buffer?: AudioBuffer, fx?: boolean }} */
     this._playing = null;
     this._timeBuf = null;
     this._disposed = false;
+    /** the wanted character (applies to audio clips; 'natural' = unprocessed) */
+    this._fx = normalizeFx({ character: 'natural', amount: 0, ...(deps.voiceFx || {}) });
+    /** @type {FxState} */
+    this.fxState = 'off';
+    /** @type {AudioWorkletNode|null} */
+    this._fxNode = null;
+    /** @type {Promise<boolean>|null} */
+    this._fxLoading = null;
+    this._fxStats = new Map();
+    this._fxStatsId = 0;
+    /** @type {null | { clip: AudioClip, resolve: Function }} a clip waiting for the effect to load */
+    this._pendingStart = null;
+    // ---- "Hey Jade" (wake word; contract-wake §9.3) ----
+    /** @type {GainNode|null} her voice → master → destination (ducked during a barge-in check) */
+    this.master = null;
+    /** the master's target level in dB (0 = not ducked) */
+    this.duckDb = 0;
+    /** earcons played (a test counter) */
+    this.cues = 0;
+    // ---- end "Hey Jade" ----
+    if (this._fxWanted()) this._prepareFx();
   }
 
   /** Something is playing or queued. */
   get busy() {
-    return !!this._playing || this._queue.length > 0;
+    return !!this._playing || this._queue.length > 0 || !!this._pendingStart;
   }
 
   /** Sample rate of the output (for spectrum bin mapping). */
@@ -64,18 +122,109 @@ export class AudioPlayer extends Emitter {
     return this.ctx ? this.ctx.sampleRate : 48000;
   }
 
-  /** The clip being played and its playback time in seconds, or null. */
+  /**
+   * The clip being played and its playback time in seconds, or null. For audio clips, `buffer`
+   * is the dry (unprocessed) decoded AudioBuffer.
+   */
   get current() {
     const p = this._playing;
     if (!p) return null;
     let time;
     if (p.kind === 'audio' && this.ctx) {
-      const latency = (this.ctx.outputLatency || 0) + (this.ctx.baseLatency || 0);
-      time = Math.max(0, this.ctx.currentTime - p.startAt - latency);
+      time = Math.max(0, this._heardTime() - p.startAt);
     } else {
       time = Math.max(0, this._now() - p.startAt);
     }
-    return { clip: p.clip, kind: p.kind, time };
+    /** @type {{ clip: Clip, kind: 'audio'|'speech', time: number, buffer?: AudioBuffer }} */
+    const cur = { clip: p.clip, kind: p.kind, time };
+    if (p.buffer) cur.buffer = p.buffer;
+    return cur;
+  }
+
+  /**
+   * The context time being heard right now. getOutputTimestamp() says which context time the
+   * device was playing at which performance.now(); extrapolated to now, that is free of the
+   * audio-callback blocks currentTime advances in (~10 ms on Windows) and already includes the
+   * output latency. Without it: currentTime minus the latency, smoothed (the browser re-estimates
+   * outputLatency at run time; a median over ~1 s keeps that from jolting the mouth).
+   */
+  _heardTime() {
+    const ctx = /** @type {AudioContext} */ (this.ctx);
+    const now = globalThis.performance?.now?.();
+    if (typeof ctx.getOutputTimestamp === 'function' && Number.isFinite(now)) {
+      try {
+        const ts = ctx.getOutputTimestamp();
+        if (ts && ts.performanceTime > 0 && ts.contextTime > 0) {
+          const heard = ts.contextTime + Math.max(0, now - ts.performanceTime) / 1000;
+          // (a device that reports nonsense falls back to currentTime)
+          if (heard <= ctx.currentTime + 0.05 && heard >= ctx.currentTime - 1) return heard;
+        }
+      } catch { /* fall back */ }
+    }
+    return ctx.currentTime - this._latency(ctx);
+  }
+
+  /** Output + base latency, a running median of the last ~16 readings (one per 64 ms). @param {AudioContext} ctx */
+  _latency(ctx) {
+    const raw = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+    const L = this._lat || (this._lat = { v: [], at: -Infinity, med: raw });
+    const t = ctx.currentTime;
+    if (t - L.at >= 0.064 || t < L.at) {
+      L.at = t;
+      L.v.push(raw);
+      if (L.v.length > 16) L.v.shift();
+      const sorted = [...L.v].sort((a, b) => a - b);
+      L.med = sorted[sorted.length >> 1];
+    }
+    return L.med;
+  }
+
+  /**
+   * The voice character: what is wanted and whether the effect is running.
+   * `active`: audio clips are processed right now (false for 'natural', or while unavailable).
+   */
+  get voiceFx() {
+    const { character, amount } = this._fx;
+    return { character, amount, state: this.fxState, active: this._fxWanted() && this.fxState === 'ready' };
+  }
+
+  /**
+   * Choose the voice character for the local voice (settings voice.character / voice.fxAmount).
+   * Takes effect immediately, ramped (no clicks), also in the middle of a clip that is already
+   * going through the effect. Loads the effect the first time a character other than 'natural'
+   * is chosen.
+   * @param {{ character?: VoiceCharacter|string, amount?: number }} o
+   */
+  setVoiceFx(o = {}) {
+    const next = normalizeFx({ character: o.character ?? this._fx.character, amount: o.amount ?? this._fx.amount });
+    // every settings change passes through here (window moves, other toggles): only real
+    // changes go to the audio thread
+    const changed = next.character !== this._fx.character || next.amount !== this._fx.amount;
+    this._fx = next;
+    if (changed && this._fxNode) this._fxNode.port.postMessage({ type: 'set', ...next });
+    if (this._fxWanted()) this._prepareFx();
+  }
+
+  /**
+   * What the effect has done so far, asked from the audio thread (tests, diagnostics); null when
+   * it is not running.
+   * @returns {Promise<null | { character: string, amount: number, blocks: number, inSq: number, outSq: number, diffSq: number, pitchSource: string, failed: boolean }>}
+   */
+  fxStats() {
+    const node = this._fxNode;
+    if (!node) return Promise.resolve(null);
+    const id = ++this._fxStatsId;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this._fxStats.delete(id);
+        resolve(null);
+      }, 1000);
+      this._fxStats.set(id, (/** @type {any} */ s) => {
+        clearTimeout(timer);
+        resolve(s);
+      });
+      node.port.postMessage({ type: 'stats', id });
+    });
   }
 
   /** Create/resume the AudioContext (call from a user gesture in browsers). */
@@ -99,7 +248,7 @@ export class AudioPlayer extends Emitter {
         return;
       }
       this._queue.push({ clip, resolve });
-      if (!this._playing) this._next();
+      if (!this._playing && !this._pendingStart) this._next();
     });
   }
 
@@ -107,6 +256,9 @@ export class AudioPlayer extends Emitter {
   stop() {
     const queued = this._queue;
     this._queue = [];
+    const pending = this._pendingStart;
+    this._pendingStart = null;
+    if (pending) queued.push(pending);
     for (const q of queued) q.resolve({ stopped: true });
     const p = this._playing;
     if (p) {
@@ -121,7 +273,86 @@ export class AudioPlayer extends Emitter {
     if (p || queued.length) this.emit('idle');
   }
 
-  /** Linear RMS of the current output (0 when silent / unavailable). */
+  // ---- "Hey Jade" (wake word; contract-wake §9.3) ----
+
+  /** The kind of the clip playing now ('audio' = the local voice, 'speech' = the system voice), or null. */
+  get kind() {
+    return this._playing ? this._playing.kind : null;
+  }
+
+  /** The master gain right now, in dB (its automation's current value). */
+  get masterGainDb() {
+    const g = this.master?.gain?.value;
+    return typeof g === 'number' && g > 0 ? 20 * Math.log10(g) : g === 0 ? -Infinity : 0;
+  }
+
+  /**
+   * Lower her voice (the local voice; the system voice cannot be ducked).
+   * @param {number} [db] @param {number} [rampMs]
+   */
+  duck(db = -15, rampMs = 60) {
+    this.duckDb = db;
+    this._rampMaster(10 ** (db / 20), rampMs, 0);
+  }
+
+  /**
+   * Back to full level. @param {number} [rampMs] @param {number} [afterMs] start the ramp this much later
+   */
+  unduck(rampMs = 300, afterMs = 0) {
+    this.duckDb = 0;
+    this._rampMaster(1, rampMs, afterMs);
+  }
+
+  /** @param {number} target @param {number} rampMs @param {number} afterMs */
+  _rampMaster(target, rampMs, afterMs) {
+    const ctx = this.ctx;
+    const g = this.master?.gain;
+    if (!ctx || !g) return;
+    try {
+      const t = ctx.currentTime + Math.max(0, afterMs) / 1000;
+      g.cancelScheduledValues(ctx.currentTime);
+      g.setValueAtTime(g.value, ctx.currentTime);
+      if (afterMs > 0) g.setValueAtTime(g.value, t);
+      if (rampMs > 0) g.linearRampToValueAtTime(target, t + rampMs / 1000);
+      else g.setValueAtTime(target, t);
+    } catch {
+      try { g.value = target; } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Play a short cue (an earcon) right away, next to whatever plays: no queue, no events, not
+   * ducked. In this AudioContext, so the echo canceller has it in its reference (ux.md ACK-6).
+   * @param {Float32Array} samples @param {number} rate
+   * @returns {{ startPerf: number, endPerf: number }|null} when it is heard (performance.now() ms)
+   */
+  playCue(samples, rate) {
+    const ctx = this._ensureContext();
+    if (!ctx || !samples?.length) return null;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    try {
+      const buf = ctx.createBuffer(1, samples.length, rate);
+      buf.copyToChannel(/** @type {Float32Array<ArrayBuffer>} */ (samples), 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      const lead = 0.005;
+      src.start(ctx.currentTime + lead);
+      src.onended = () => {
+        try { src.disconnect(); } catch { /* ignore */ }
+      };
+      this.cues++;
+      const now = globalThis.performance?.now?.() ?? Date.now();
+      const startPerf = now + (lead + (ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000;
+      return { startPerf, endPerf: startPerf + (samples.length / rate) * 1000 };
+    } catch (err) {
+      console.warn('[player] the cue could not be played', err);
+      return null;
+    }
+  }
+  // ---- end "Hey Jade" ----
+
+  /** Linear RMS of the current (dry) output (0 when silent / unavailable). */
   level() {
     const a = this.analyser;
     if (!a || !this._playing || this._playing.kind !== 'audio') return 0;
@@ -133,7 +364,7 @@ export class AudioPlayer extends Emitter {
   }
 
   /**
-   * Fill `out` with the current spectrum in dB (AnalyserNode.getFloatFrequencyData).
+   * Fill `out` with the current (dry) spectrum in dB (AnalyserNode.getFloatFrequencyData).
    * @param {Float32Array} out @returns {boolean} false when no audio is playing
    */
   spectrum(out) {
@@ -147,9 +378,12 @@ export class AudioPlayer extends Emitter {
   dispose() {
     this._disposed = true;
     this.stop();
+    try { this._fxNode?.disconnect(); } catch { /* ignore */ }
+    this._fxNode = null;
     try { this.ctx?.close(); } catch { /* ignore */ }
     this.ctx = null;
     this.analyser = null;
+    this.master = null; // wake:
     this.removeAllListeners();
   }
 
@@ -168,13 +402,97 @@ export class AudioPlayer extends Emitter {
     const a = this.ctx.createAnalyser();
     a.fftSize = 2048;
     a.smoothingTimeConstant = 0.55;
-    a.connect(this.ctx.destination);
+    // The analyser is a tap on the dry voice; a muted path to the destination keeps it pulled
+    // in every browser without making the dry voice audible next to the processed one.
+    const mute = this.ctx.createGain();
+    mute.gain.value = 0;
+    a.connect(mute);
+    mute.connect(this.ctx.destination);
     this.analyser = a;
+    // wake: her voice (dry or through the effect) goes through the master gain (duck/unduck)
+    const master = this.ctx.createGain();
+    master.gain.value = 1;
+    master.connect(this.ctx.destination);
+    this.master = master;
     return this.ctx;
   }
 
+  /** A character other than natural is wanted. */
+  _fxWanted() {
+    return this._fx.character !== 'natural' && this._fx.amount > 0;
+  }
+
+  /**
+   * Load the effect worklet once (in the background; nothing waits for it except a first clip,
+   * for at most FX_WAIT_MS). @returns {Promise<boolean>} ready
+   */
+  _prepareFx() {
+    if (this._fxNode) return Promise.resolve(true);
+    if (this._fxLoading) return this._fxLoading;
+    if (this.fxState === 'unavailable') return Promise.resolve(false);
+    const ctx = this._ensureContext();
+    if (!ctx || !ctx.audioWorklet || typeof AudioWorkletNode !== 'function') {
+      this.fxState = 'unavailable';
+      return Promise.resolve(false);
+    }
+    this.fxState = 'loading';
+    this._fxLoading = ctx.audioWorklet.addModule(this._fxUrl).then(() => {
+      if (this._disposed || this.ctx !== ctx) return false;
+      const node = new AudioWorkletNode(ctx, 'lawnmower-voicefx', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        processorOptions: { ...this._fx },
+      });
+      node.port.onmessage = (e) => this._onFxMessage(e.data);
+      // a processor that throws outputs silence: send the voice around it from then on
+      node.onprocessorerror = () => this._fxFailed('the voice effect stopped');
+      node.connect(this.master || ctx.destination); // wake: through the master
+      this._fxNode = node;
+      this.fxState = 'ready';
+      return true;
+    }).catch((err) => {
+      this.fxState = 'unavailable';
+      console.warn(`[player] the voice character effect is unavailable (${err?.message || err}); the local voice plays unprocessed`);
+      return false;
+    }).finally(() => {
+      this._fxLoading = null;
+    });
+    return this._fxLoading;
+  }
+
+  /** @param {any} m */
+  _onFxMessage(m) {
+    if (!m || typeof m !== 'object') return;
+    if (m.type === 'stats') {
+      const cb = this._fxStats.get(m.id);
+      this._fxStats.delete(m.id);
+      cb?.(m);
+    } else if (m.type === 'error') {
+      console.warn(`[player] the voice effect failed (${m.message}); it now passes the voice through`);
+    }
+  }
+
+  /** @param {string} why */
+  _fxFailed(why) {
+    console.warn(`[player] ${why}; the local voice plays unprocessed`);
+    const node = this._fxNode;
+    this._fxNode = null;
+    this.fxState = 'unavailable';
+    // the clip now playing through the node: route it straight to the destination
+    const p = this._playing;
+    if (p && p.fx && p.gain && this.ctx) {
+      try { p.gain.disconnect(node); } catch { /* ignore */ }
+      try { p.gain.connect(this.master || this.ctx.destination); } catch { /* ignore */ } // wake: master
+      p.fx = false;
+    }
+    try { node?.disconnect(); } catch { /* ignore */ }
+  }
+
   _next() {
-    if (this._playing || this._disposed) return;
+    if (this._playing || this._pendingStart || this._disposed) return;
     const item = this._queue.shift();
     if (!item) {
       this.emit('idle');
@@ -182,7 +500,7 @@ export class AudioPlayer extends Emitter {
     }
     const { clip, resolve } = item;
     if (clip && clip.kind === 'speech') this._playSpeech(clip, resolve);
-    else this._playAudio(/** @type {AudioClip} */ (clip), resolve);
+    else this._startAudio(/** @type {AudioClip} */ (clip), resolve);
   }
 
   /** @param {Clip} clip @param {Function} resolve @param {Error} err */
@@ -193,6 +511,29 @@ export class AudioPlayer extends Emitter {
     queueMicrotask(() => this._next());
   }
 
+  /**
+   * Play an audio clip; when the effect is wanted but still loading (only before the very first
+   * processed clip), wait for it for at most FX_WAIT_MS.
+   * @param {AudioClip} clip @param {Function} resolve
+   */
+  _startAudio(clip, resolve) {
+    const loading = this._fxWanted() ? this._fxLoading : null;
+    if (!loading) {
+      this._playAudio(clip, resolve);
+      return;
+    }
+    const item = { clip, resolve };
+    this._pendingStart = item;
+    const go = () => {
+      // stop() resolved it meanwhile (or it already started)
+      if (this._pendingStart !== item) return;
+      this._pendingStart = null;
+      this._playAudio(clip, resolve);
+    };
+    loading.then(go, go);
+    setTimeout(go, FX_WAIT_MS);
+  }
+
   /** @param {AudioClip} clip @param {Function} resolve */
   _playAudio(clip, resolve) {
     const ctx = this._ensureContext();
@@ -201,8 +542,9 @@ export class AudioPlayer extends Emitter {
       return;
     }
     let buffer;
+    let samples;
     try {
-      buffer = toAudioBuffer(ctx, clip);
+      ({ buffer, samples } = toAudioBuffer(ctx, clip, true));
     } catch (err) {
       this._fail(clip, resolve, /** @type {Error} */ (err));
       return;
@@ -213,9 +555,17 @@ export class AudioPlayer extends Emitter {
     const gain = ctx.createGain();
     source.connect(gain);
     gain.connect(this.analyser);
+    const fxNode = this._fxWanted() ? this._fxNode : null;
+    gain.connect(fxNode || this.master || ctx.destination); // wake: through the master
     const startAt = ctx.currentTime + 0.01;
-    const entry = { clip, kind: /** @type {const} */ ('audio'), resolve, source, gain, startAt, duration: buffer.duration };
+    const entry = { clip, kind: /** @type {const} */ ('audio'), resolve, source, gain, startAt, duration: buffer.duration, buffer, fx: !!fxNode };
     this._playing = entry;
+    if (fxNode && samples) {
+      // the effect analyses the clip's pitch ahead of the playhead (transferred: no copy)
+      try {
+        fxNode.port.postMessage({ type: 'clip', samples, rate: buffer.sampleRate, startTime: startAt }, [samples.buffer]);
+      } catch { /* the live pitch tracker takes over */ }
+    }
     source.onended = () => {
       if (this._playing !== entry) return;
       this._playing = null;
@@ -248,8 +598,14 @@ export class AudioPlayer extends Emitter {
     Promise.resolve()
       .then(() => speech.speak(clip.text, {
         rate: clip.rate,
-        onStart: () => { if (this._playing === entry) entry.startAt = this._now(); },
-        onBoundary: (/** @type {string} */ word) => { if (this._playing === entry) this.emit('boundary', { word, clip }); },
+        onStart: () => {
+          if (this._playing !== entry) return;
+          entry.startAt = this._now();
+          this.emit('speechstart', clip);
+        },
+        onBoundary: (/** @type {string} */ word, /** @type {{ charIndex?: number, charLength?: number }} */ info) => {
+          if (this._playing === entry) this.emit('boundary', { word, charIndex: info?.charIndex, charLength: info?.charLength, clip });
+        },
       }))
       .catch((err) => {
         if (this._playing === entry) this.emit('error', err, clip);
@@ -293,10 +649,13 @@ export class AudioPlayer extends Emitter {
 /**
  * Build an AudioBuffer from a clip (base64 WAV, WAV bytes or raw samples).
  * @param {BaseAudioContext} ctx @param {AudioClip} clip
+ * @param {boolean} [withSamples]  also return a private copy of the mono samples
+ * @returns {any} the AudioBuffer, or { buffer, samples } with `withSamples`
  */
-export function toAudioBuffer(ctx, clip) {
+export function toAudioBuffer(ctx, clip, withSamples = false) {
   let samples;
   let rate;
+  let own = false;
   if (clip.samples && clip.sampleRate) {
     samples = clip.samples;
     rate = clip.sampleRate;
@@ -306,11 +665,23 @@ export function toAudioBuffer(ctx, clip) {
     const d = decodeWav(bytes);
     samples = d.samples;
     rate = d.sampleRate;
+    own = true;
   }
   if (!samples.length) throw new Error('clip is empty');
   const buf = ctx.createBuffer(1, samples.length, rate);
   buf.copyToChannel(/** @type {Float32Array<ArrayBuffer>} */ (samples), 0);
-  return buf;
+  if (!withSamples) return buf;
+  // decoded samples are ours to hand over; a caller's array is copied, never detached
+  return { buffer: buf, samples: own ? samples : new Float32Array(samples) };
+}
+
+/** Resolve a bundled module path against the page (the app is served from app://lawnmower/). @param {string} u */
+function moduleUrl(u) {
+  try {
+    return new URL(u, globalThis.document?.baseURI || globalThis.location?.href).href;
+  } catch {
+    return u;
+  }
 }
 
 function defaultContextFactory() {

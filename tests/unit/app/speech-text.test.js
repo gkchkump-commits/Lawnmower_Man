@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SPEECH_PHRASES, toSpeechText } from '../../../src/app/speech-text.js';
+import { SPEECH_PHRASES, toSpeechText, wakeSafeSpeech } from '../../../src/app/speech-text.js';
 
 const t = toSpeechText;
 
@@ -74,5 +74,20 @@ describe('toSpeechText', () => {
     expect(t('🎉🎉')).toBe('');
     expect(t('***')).toBe('');
     expect(t(/** @type {any} */ (null))).toBe('');
+  });
+});
+
+describe('wakeSafeSpeech ("Hey Jade": her own voice never says the wake phrase)', () => {
+  it('rewords a greeting or "say" right before her name; the chat keeps the original', () => {
+    expect(wakeSafeSpeech('Just say hey Jade whenever you need me.')).toBe('Just call my name whenever you need me.');
+    expect(wakeSafeSpeech('Say "Hey Jade" and I will listen.')).toBe('call my name and I will listen.');
+    expect(wakeSafeSpeech('You can say Jade, then ask.')).toBe('You can call my name, then ask.');
+    expect(wakeSafeSpeech('OK Jade, noted.')).toBe('OK there, noted.');
+    expect(wakeSafeSpeech('Hi, Jade here.')).toBe('Hi there here.');
+    expect(wakeSafeSpeech('you said hey, jade!')).toBe('you call my name!');
+  });
+
+  it('leaves her name alone otherwise', () => {
+    for (const ok of ["Hi, I'm Jade.", 'My name is Jade, and I run on Claude.', 'The jade plant needs light.', 'They said it was fine.', 'Okay, done.']) expect(wakeSafeSpeech(ok)).toBe(ok);
   });
 });

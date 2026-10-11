@@ -1,7 +1,7 @@
 // Input validation for IPC arguments coming from the renderer. Every validator either returns
 // a clean value or throws an Error with a short, user-presentable message.
 
-import { MAX_TURN_CHARS } from './claude-session.js';
+import { IMAGE_MEDIA_TYPES, MAX_IMAGE_BASE64, MAX_TURN_CHARS, MAX_TURN_IMAGES } from './claude-session.js';
 
 /** @param {unknown} v @returns {v is Record<string, any>} */
 export function isPlainObject(v) {
@@ -29,6 +29,49 @@ export function validateTurnText(text) {
   if (!text.trim()) throw new Error('Message is empty');
   if (text.length > MAX_TURN_CHARS) throw new Error(`Message is too long (max ${MAX_TURN_CHARS} characters)`);
   return text;
+}
+
+/** The first bytes of each image type we accept (the CLI rejects a type/content mismatch). */
+const MAGIC = /** @type {Record<string, (b: Buffer) => boolean>} */ ({
+  'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  'image/png': (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  'image/webp': (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
+});
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Options of claude.send(text, options) from the renderer: `images` (webcam snapshots,
+ * docs/CAMERA.md) — at most MAX_TURN_IMAGES of { mediaType: image/jpeg|png|webp, data: base64
+ * without a data: prefix, ≤ MAX_IMAGE_BASE64 characters }, whose bytes really are that type.
+ * Unknown option keys are ignored.
+ * @param {unknown} v
+ * @returns {{ images?: Array<{ mediaType: 'image/jpeg'|'image/png'|'image/webp', data: string }> }}
+ */
+export function validateTurnOptions(v) {
+  if (v === undefined || v === null) return {};
+  if (!isPlainObject(v)) throw new Error('Message options must be an object');
+  /** @type {{ images?: Array<{ mediaType: any, data: string }> }} */
+  const out = {};
+  if (v.images !== undefined && v.images !== null) {
+    if (!Array.isArray(v.images)) throw new Error('Message images must be a list');
+    if (v.images.length > MAX_TURN_IMAGES) throw new Error(`A message can carry at most ${MAX_TURN_IMAGES} images`);
+    const images = v.images.map((img, i) => validateImage(img, v.images.length > 1 ? `Image ${i + 1}` : 'The image'));
+    if (images.length) out.images = images;
+  }
+  return out;
+}
+
+/** @param {unknown} img @param {string} what */
+function validateImage(img, what) {
+  if (!isPlainObject(img)) throw new Error(`${what} must be an object`);
+  const { mediaType, data } = img;
+  if (typeof mediaType !== 'string' || !IMAGE_MEDIA_TYPES.includes(mediaType)) throw new Error(`${what} must be a JPEG, PNG or WebP image`);
+  if (typeof data !== 'string' || !data) throw new Error(`${what} has no data`);
+  if (/^data:/i.test(data)) throw new Error(`${what} must be plain base64 (without a data: prefix)`);
+  if (data.length > MAX_IMAGE_BASE64) throw new Error(`${what} is too large (max ${Math.round(MAX_IMAGE_BASE64 / 1024)} KB of base64)`);
+  if (data.length % 4 !== 0 || !BASE64.test(data)) throw new Error(`${what} is not valid base64`);
+  if (!MAGIC[mediaType](Buffer.from(data.slice(0, 24), 'base64'))) throw new Error(`${what} is not really ${mediaType}`);
+  return { mediaType: /** @type {'image/jpeg'|'image/png'|'image/webp'} */ (mediaType), data };
 }
 
 /** @param {unknown} turnId a turn id returned by claude.send() */
@@ -76,6 +119,18 @@ export function validateBoolean(v, what = 'value') {
 /** @param {unknown} v @returns {'small'|'medium'|'large'} */
 export function validateSizePreset(v) {
   if (v !== 'small' && v !== 'medium' && v !== 'large') throw new Error('Size preset must be small, medium or large');
+  return v;
+}
+
+/** A resize grip from the renderer. @param {unknown} v @returns {'tl'|'tr'|'bl'|'br'} */
+export function validateCorner(v) {
+  if (v !== 'tl' && v !== 'tr' && v !== 'bl' && v !== 'br') throw new Error('Corner must be tl, tr, bl or br');
+  return v;
+}
+
+/** A free avatar width in px (Ctrl + wheel); the settings schema clamps it. @param {unknown} v */
+export function validateAvatarWidth(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('Avatar width must be a number of pixels');
   return v;
 }
 

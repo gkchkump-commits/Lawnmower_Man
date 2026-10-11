@@ -321,13 +321,30 @@ def visemes_from_phonemes(
     return normalize_timeline(out, duration)
 
 
-def visemes_from_timings(timings: Sequence, duration: float, gap_sil: float = 0.12) -> list[dict]:
+#: Kokoro's audio runs ahead of the times its predicted durations give. Measured on real clips
+#: (af_heart and am_michael, six sentences each, speeds 0.8 / 1.0 / 1.35): acoustic onsets after a
+#: pause, the level dip of m / b / p between vowels and the cross-correlation of the timeline's
+#: openness with the level envelope all come 47-62 ms early, about one 25 ms frame plus one frame
+#: scaled by 1 / speed. :func:`kokoro_audio_lead` is that offset; the TTS backends shift their
+#: timelines by it, so a timeline describes the audio (the renderer adds its own visual lead).
+KOKORO_LEAD_FIXED = 0.025
+KOKORO_LEAD_PER_SPEED = 0.025
+
+
+def kokoro_audio_lead(speed: float | None = 1.0) -> float:
+    """Seconds by which Kokoro's audio precedes its duration-derived phoneme times."""
+    sp = float(speed) if speed else 1.0
+    return KOKORO_LEAD_FIXED + KOKORO_LEAD_PER_SPEED / min(2.0, max(0.5, sp))
+
+
+def visemes_from_timings(timings: Sequence, duration: float, gap_sil: float = 0.12, shift: float = 0.0) -> list[dict]:
     """Convert per-phoneme timings into a viseme timeline.
 
     ``timings`` items are ``(phoneme, start, end)`` tuples, dicts with those keys, or objects
     with ``phoneme/start/end`` attributes (kokoro-onnx ``Timing``). Stress marks lend their time
     to the next phoneme, length marks to the previous one, word gaps shorter than ``gap_sil``
-    keep the previous shape, punctuation is ``sil``.
+    keep the previous shape, punctuation is ``sil``. ``shift`` (seconds) moves every timing, e.g.
+    ``-kokoro_audio_lead(speed)`` to line Kokoro's durations up with its audio.
     """
     items: list[tuple[str, float, float]] = []
     for t in timings or ():
@@ -343,7 +360,7 @@ def visemes_from_timings(timings: Sequence, duration: float, gap_sil: float = 0.
             continue
         if e < s:
             s, e = e, s
-        items.append((str(ph), s, e))
+        items.append((str(ph), s + shift, e + shift))
     if not items:
         return normalize_timeline([], duration)
 

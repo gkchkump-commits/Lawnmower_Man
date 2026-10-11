@@ -1,0 +1,31 @@
+id	class	text	voice	speed	jadeEndSec
+pos_hey_af_heart	pos	Hey Jade.	af_heart	1.0	1.07
+pos_hey_am_michael	pos	Hey Jade.	am_michael	1.0	1.2
+pos_hey_bf_emma	pos	Hey Jade.	bf_emma	1.0	1.19
+pos_hey_bm_george	pos	Hey Jade.	bm_george	1.0	1.29
+pos_cmd_af_bella	pos	Hey Jade, what time is it?	af_bella	1.0	0.96
+pos_cmd_am_adam	pos	Hey Jade, what time is it?	am_adam	1.0	0.97
+pos_cmd_bf_lily	pos	Hey Jade, what time is it?	bf_lily	1.0	1.11
+pos_cmd_bm_lewis	pos	Hey Jade, what time is it?	bm_lewis	1.0	1.0
+pos_comma_af_heart	pos	Hey, Jade!	af_heart	1.0	1.1
+pos_comma_am_michael	pos	Hey, Jade!	am_michael	1.0	1.17
+jude_af_heart	jude	Hey Jude.	af_heart	1.0	-1.0
+jude_am_michael	jude	Hey Jude.	am_michael	1.0	-1.0
+jude_bf_emma	jude	Hey Jude.	bf_emma	1.0	-1.0
+judesong_af_heart	jude	Hey Jude, don't make it bad.	af_heart	1.0	-1.0
+judesong_am_michael	jude	Hey Jude, don't make it bad.	am_michael	1.0	-1.0
+judesong_bf_emma	jude	Hey Jude, don't make it bad.	bf_emma	1.0	-1.0
+self_name	self	My name is Jade, and I run on Claude.	af_heart	1.0	1.3
+self_here	self	Jade here. What can I do for you?	af_heart	1.0	0.65
+self_call	self	You can call me Jade.	af_heart	1.0	1.51
+self_sure	self	Sure, Jade can help with that.	af_heart	1.0	1.02
+selfbad_1.0	selfbad	Just say hey Jade whenever you need me.	af_heart	1.0	1.41
+selfbad_0.9	selfbad	Just say hey Jade whenever you need me.	af_heart	0.9	1.48
+neg_siri	neg	Hey Siri, set a timer.	am_adam	1.0	-1.0
+neg_necklace	neg	She wore the jade necklace.	bf_lily	1.0	1.46
+neg_commits	neg	Please read me the last three commits.	am_michael	1.0	-1.0
+neg_meeting	neg	The meeting has been moved to Thursday afternoon.	bf_emma	1.0	-1.0
+neg_ship	neg	Okay, that looks good, ship it.	bm_george	1.0	-1.0
+name_am_michael	name	Jade, what's on my calendar today?	am_michael	1.0	0.85
+name_bf_emma	name	Jade, what's on my calendar today?	bf_emma	1.0	0.75
+pause_am_adam	pause	Hey Jade. … What's the weather tomorrow?	am_adam	1.0	1.08

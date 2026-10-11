@@ -25,6 +25,7 @@ uniform vec2 uBlink;
 uniform vec2 uGaze;
 uniform float uJaw;
 uniform float uSmile;
+uniform vec3 uLipShape;   // wide, round, press
 uniform vec3 uGrid;
 uniform vec3 uRim;
 uniform vec3 uEye;
@@ -61,12 +62,14 @@ void main() {
     float ring = exp(-pow(length(d / vec2(1.0, open)) - 0.035, 2.0) * 3000.0) * open;
     col += uEye * (e * (1.2 + 1.2 * uEnergy) + ring) * step(0.0, p.z);
   }
-  // mouth: gold line that opens into a dark gap with the jaw
+  // mouth: gold line that opens into a dark gap with the jaw (pressed lips: closed and thin;
+  // spread lips: wider; rounded: narrower and a little taller)
   float my = -0.42 + 0.03 * uSmile * p.x * p.x * 30.0;
-  float halfH = 0.02 + 0.07 * uJaw;
-  float inMouth = step(abs(p.x), 0.22 + 0.04 * uSmile) * step(0.0, p.z);
+  float halfH = (0.02 + 0.07 * uJaw + 0.02 * uLipShape.y) * (1.0 - 0.6 * uLipShape.z);
+  float halfW = (0.22 + 0.04 * uSmile + 0.05 * uLipShape.x) * (1.0 - 0.35 * uLipShape.y);
+  float inMouth = step(abs(p.x), halfW) * step(0.0, p.z);
   float edge = lineAA(abs(p.y - my) - halfH, 0.006) * inMouth;
-  float gap = (1.0 - smoothstep(halfH - 0.01, halfH, abs(p.y - my))) * inMouth * smoothstep(0.0, 0.2, uJaw);
+  float gap = (1.0 - smoothstep(halfH - 0.01, halfH, abs(p.y - my))) * inMouth * smoothstep(0.0, 0.2, uJaw) * (1.0 - uLipShape.z);
   col = mix(col, vec3(0.02, 0.01, 0.01), gap * 0.9);
   col += uLine * edge * 1.1;
   col *= uDim;
@@ -88,6 +91,7 @@ export default class PlaceholderHead {
     this.uniforms = {
       uTime: { value: 0 }, uEnergy: { value: 0.5 }, uBlink: { value: new THREE.Vector2() },
       uGaze: { value: new THREE.Vector2() }, uJaw: { value: 0 }, uSmile: { value: 0 }, uDim: { value: 1 },
+      uLipShape: { value: new THREE.Vector3() },
       uGrid: { value: palette.grid.clone() }, uRim: { value: palette.rim.clone() },
       uEye: { value: palette.eye.clone() }, uLine: { value: palette.line.clone() },
     };
@@ -112,8 +116,9 @@ export default class PlaceholderHead {
     u.uEnergy.value = a.energy;
     u.uBlink.value.set(a.blinkL, a.blinkR);
     u.uGaze.value.set(a.gazeX, a.gazeY);
-    u.uJaw.value = a.jawOpen;
+    u.uJaw.value = a.jawOpen * (1 - (a.mouthPress ?? 0));
     u.uSmile.value = a.smile;
+    u.uLipShape.value.set(a.mouthWide, a.mouthRound, a.mouthPress ?? 0);
     u.uDim.value = (1 - 0.45 * a.sleep) * (1 - 0.3 * a.error);
     this.group.rotation.set(-a.headPitch, a.headYaw, a.headRoll, 'ZYX');
     this.group.position.y = 0.08 + (a.breath - 0.5) * 0.003;

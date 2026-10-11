@@ -43,8 +43,8 @@ export function fakeBridge() {
     emit: (ev) => em.emit('ev', ev),
     sendImpl: null,
     claude: {
-      send: async (text) => {
-        calls.push(['send', text]);
+      send: async (text, options) => {
+        calls.push(options === undefined ? ['send', text] : ['send', text, options]);
         if (bridge.sendImpl) return bridge.sendImpl(text);
         return { turnId: `t${++n}` };
       },
@@ -177,8 +177,9 @@ export function fakeMic() {
 }
 
 export function fakeAvatar() {
-  const a = { states: [], mouths: [], levels: [], blinks: 0 };
+  const a = { states: [], mouths: [], levels: [], users: [], blinks: 0 };
   a.setState = (s) => a.states.push(s);
+  a.setUser = (u) => a.users.push(u);
   a.setMouth = (m) => a.mouths.push(m);
   a.setSpeechLevel = (l) => a.levels.push(l);
   a.blink = () => { a.blinks++; };

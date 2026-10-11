@@ -47,11 +47,66 @@ mean absolute RGB error.
 | `renderer=relief\|procedural\|placeholder` | head (falls back relief → procedural → placeholder) |
 | `fixedTime=<s>` | freeze the clock (deterministic frames) |
 | `seed`, `quality=low\|medium\|high`, `particles`, `bloom`, `fx` (living effects 0..1.5), `idle` (idle motion), `zoom` | render options |
-| `transparent=0\|1`, `bg=black\|checker\|desk\|white` | output mode / backdrop |
+| `transparent=0\|1`, `bg=black\|checker\|desk\|white\|dark\|bright\|busy` | output mode / backdrop (`dark`, `bright`, `busy`: desktops painted behind the transparent canvas, src/dev/backdrops.js) |
+| `sim=1&t=<s>` | a live run (the behaviour layer) on a scripted 60 Hz clock: `window.__seek(t)` steps it |
+| `life=<0..2>`, `projector=1` | liveliness of the spontaneous behaviour, the projector light |
 | `compare=1&ref=neutral\|blink\|teeth\|open` | show the pack's reference frame next to the render |
 | `state=idle\|listening\|thinking\|speaking\|error\|sleep`, `speech=<0..1>` | director inputs |
 | `jaw wide round smile browUp blink blinkL blinkR gazeX gazeY yaw pitch roll energy` | AnimState overrides |
 | `w`, `h` | canvas size (CSS px); `ui=0` hides the controls; `stats=1` shows fps/draw calls |
 | `follow=1` | eyes follow the mouse |
+| `press tuck teeth tongue asym` | the speech mouth channels (AnimState `mouthPress` …) |
+| `cheek chin nostril` | the face moving with the mouth (AnimState `cheekRaise`, `chinRaise`, `nostrilFlare`) |
+| `expr=<0..2>` | expressiveness of the speech motion (settings `avatar.expressiveness`) |
+| `vis=<sil\|PP\|FF\|TH\|DD\|kk\|CH\|SS\|RR\|aa\|E\|I\|O\|U>` | one viseme's mouth shape (explicit sliders still win) |
+| `say=<text>&t=<s>` | the system-voice lip-sync path run deterministically to `t` seconds (a scripted voice with word boundaries); `bounds=0`, `rate`, `voiceTempo` (1.1), `jitter` (0.15), `latency` (0.06), `caption=1` (shows the word being said) |
 
-`window.__avatar` is the avatar API; `window.__ready` turns true after the first frames.
+| `clip=<url>[,<url>...]&t=<s>` | the local-voice path on REAL voice-server clips (the `/tts` JSON: `text`, `visemes`, `audioB64` or `wav=<url>`), played back to back through the real LipSync, director and head at 60 Hz; `gap` (s between clips, 0.06), `latency` (analyser lead, 0.02), `pre` (s of thinking first, 0.8), `caption=1` |
+
+`window.__avatar` is the avatar API; `window.__ready` turns true after the first frames. In `say`
+and `clip` mode `window.__seek(t)` steps the simulation to `t` and renders (`window.__schedule`
+lists the clips' start / end times).
+
+## film.mjs — speech videos
+
+```bash
+# system voice (scripted word boundaries)
+node tools/visual/film.mjs --url "http://127.0.0.1:5173/dev/avatar.html?ui=0&idle=0&caption=1" \
+     --say "Hello! I'm Claude. How are you feeling today?" --fps 30 --dur 4 --out out/film
+ffmpeg -framerate 30 -i out/film/%04d.png -pix_fmt yuv420p out/film.mp4
+
+# local voice: real Kokoro clips (name.json = the /tts response, name.wav next to it), with sound
+node tools/visual/film.mjs --url "http://127.0.0.1:5173/dev/avatar.html?ui=0&caption=1" \
+     --clip out/hello.json,out/maybe.json --fps 30 --t0 -0.6 --out out/film --mp4 out/film.mp4
+```
+
+Loads the harness once and saves one PNG per `__seek` step (`--t0`, `--w`, `--h`, `--selector`;
+`--dur` defaults to the clips' length). `--clip` hands the files to the page itself (nothing is
+copied into `public/`); `--mp4` encodes the frames with the clips' audio muxed in at the times the
+harness played them (ffmpeg).
+
+## lipsync-align.mjs — lip-sync timing on real speech
+
+```bash
+node tools/visual/lipsync-align.mjs out/clips [--latency 0.02] [--offset ms] [--json out.json] [--late]
+```
+
+Plays every clip of a folder (`name.wav` + `name.json`) through the real LipSync (with its
+acoustic analysis and fusion, run synchronously in Node) and Director at 60 Hz and compares the
+mouth with the sound: the fullest closure of m / b / p between vowels vs the level dip in the
+audio; when the relief head's lips are sealed (rendered aperture under 1 px, the reference pack's
+real rig) vs the acoustic closure (the dip below half its depth), at its start and its end, and
+how many closures seal at all; the jaw opening after a pause vs the acoustic onset; and the lag of
+the best jaw / level correlation (negative = the mouth leads). `--offset` applies *Settings →
+Voice → Lip-sync timing* (`voice.lipSyncOffsetMs`). Use it after changing the timeline, the
+leads, the fusion or the smoothing; the seal is the number to watch (the lips meet and part in a
+frame or two, so their "fullest" closure is a plateau and its time says little).
+
+It also scores **every** release of an m / b / p into a vowel (or r, w, y), not only the closures
+between vowels with a level dip: when the lips part vs the steepest rise of the 0.8-5 kHz band out
+of the closure (its own zero-phase band-pass and 10 ms Hann power, independent of the app's
+analysis), split by what precedes it — a vowel, a consonant ("and Pam", "it back") or a pause —
+with the share more than 20 ms late (`--late` lists them); and every vowel of 60 ms or more on
+the timeline (40 ms early to 10 ms late) is checked to open the rendered lips at least 5 px. A
+stop before an m ("made muffins") can read late: there the band's steepest rise is the stop's
+burst into the m's murmur.

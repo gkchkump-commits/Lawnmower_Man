@@ -75,6 +75,42 @@ describe('wav', () => {
     expect(Array.from(base64ToBytes(b64))).toEqual(Array.from(bytes));
     expect(Array.from(base64ToBytes(b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')))).toEqual(Array.from(bytes));
   });
+
+  it('uses the native base64 decoder when there is one, and falls back for input it rejects', () => {
+    const had = Object.prototype.hasOwnProperty.call(Uint8Array, 'fromBase64');
+    const saved = /** @type {any} */ (Uint8Array).fromBase64;
+    const calls = [];
+    // a strict stand-in for Uint8Array.fromBase64 (standard alphabet only)
+    /** @type {any} */ (Uint8Array).fromBase64 = (s, o) => {
+      calls.push(o);
+      if (/[^A-Za-z0-9+/=\s]/.test(s)) throw new SyntaxError('bad base64');
+      return new Uint8Array(Buffer.from(s, 'base64'));
+    };
+    try {
+      const bytes = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+      const b64 = bytesToBase64(bytes);
+      expect(Array.from(base64ToBytes(b64))).toEqual(Array.from(bytes));
+      expect(calls).toEqual([{ lastChunkHandling: 'loose' }]);
+      expect(Array.from(base64ToBytes(b64.replace(/\+/g, '-').replace(/\//g, '_')))).toEqual(Array.from(bytes));
+      expect(calls).toHaveLength(2);
+    } finally {
+      if (had) /** @type {any} */ (Uint8Array).fromBase64 = saved;
+      else delete /** @type {any} */ (Uint8Array).fromBase64;
+    }
+  });
+
+  it('16-bit mono (what the voice server sends) decodes through a typed view to the very same values', () => {
+    const x = noise(4801, 0.9, 11);
+    const wav = new Uint8Array(encodeWav(x, 24000));
+    const fast = decodeWav(wav).samples;
+    // the same file at an odd byte offset cannot use the Int16 view: the generic reader
+    const shifted = new Uint8Array(wav.length + 1);
+    shifted.set(wav, 1);
+    const slow = decodeWav(shifted.subarray(1)).samples;
+    expect(fast.length).toBe(4801);
+    expect(Buffer.from(fast.buffer).equals(Buffer.from(slow.buffer))).toBe(true);
+    expect(fast[100]).toBeCloseTo(x[100], 3);
+  });
 });
 
 describe('dsp', () => {

@@ -5,6 +5,7 @@
 // reference video are used. Two draw calls: the head (skin + mouth cavity share the mesh) and,
 // on medium / high, an additive halo shell over the silhouette triangles (shared buffers).
 
+import { lowerTeeth, upperTeeth } from '../teeth.js';
 import { decodeModel, packCurveTexture, validateMeta } from './format.js';
 import { buildProcRig, procRigUniforms } from './rig.js';
 import { DEFAULT_DEFINES, HALO_FRAG, HALO_VERT, HEAD_FRAG, HEAD_VERT } from './shaders.js';
@@ -175,12 +176,19 @@ export default class ProceduralHead {
       uJawPivot: { value: v3(meta.rig.jawPivot) },
       uHeadRot: { value: new THREE.Matrix3() },
       uHeadPivot: { value: v3(meta.rig.headPivot) },
+      uHeadXform: { value: new THREE.Vector3(0, 0, 1) },
       uCornerL: { value: new THREE.Vector3() },
       uCornerR: { value: new THREE.Vector3() },
       uLips: { value: new THREE.Vector4() },
+      uMouthX: { value: new THREE.Vector4() },
+      uTeethVis: { value: new THREE.Vector2() },
       uBrow: { value: new THREE.Vector2() },
       uBreathY: { value: 0 },
       uNeckRot: { value: new THREE.Vector2(meta.neck.fadeBottom - 0.02, meta.neck.fadeTop + 0.06) },
+      // the face moving with the mouth: chin boss, nostril wings (rest geometry; amounts per frame)
+      uFace: { value: new THREE.Vector2() },
+      uChinP: { value: new THREE.Vector4(...this.rig.chin) },
+      uAlaP: { value: new THREE.Vector4(...this.rig.ala) },
       uTime: { value: 0 }, uEnergy: { value: 0.5 }, uSpeech: { value: 0 }, uListen: { value: 0 },
       uThink: { value: 0 }, uSpeak: { value: 0 }, uError: { value: 0 }, uSleep: { value: 0 }, uFx: { value: this.fx },
       uColLine: { value: palette.line.clone() }, uColRim: { value: palette.rim.clone() },
@@ -225,11 +233,15 @@ export default class ProceduralHead {
     const f = this.uniforms;
     f.uJawRot.value.fromArray(u.jawRot);
     f.uHeadRot.value.fromArray(u.headRot);
+    f.uHeadXform.value.fromArray(u.headXform);
     f.uCornerL.value.fromArray(u.cornerL);
     f.uCornerR.value.fromArray(u.cornerR);
     f.uLips.value.fromArray(u.lips);
+    f.uMouthX.value.fromArray(u.mouthX);
+    f.uTeethVis.value.set(upperTeeth(a), lowerTeeth(a));
     f.uBrow.value.fromArray(u.brow);
     f.uBreathY.value = u.breathY;
+    f.uFace.value.set(u.face[0], u.face[1]);
     f.uBlink.value.fromArray(u.blink);
     f.uSquint.value = u.squint;
     f.uGaze.value[0].fromArray(u.gaze, 0);
@@ -253,7 +265,8 @@ export default class ProceduralHead {
   /** @returns {import('../../fx/particles.js').ParticleAnchors} */
   particleAnchors() {
     const p = this.model.meta.particleAnchors;
-    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon() };
+    const pv = this.model.meta.rig?.headPivot;
+    return { ...p, center: [...p.center], radius: [...p.radius], outline: this.hitPolygon(), ...(pv ? { pivot: [pv[0], pv[1], pv[2]] } : {}) };
   }
 
   /** Silhouette (world, rest pose, screen plane) for hitTest. */

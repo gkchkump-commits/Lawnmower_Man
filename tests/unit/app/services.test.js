@@ -204,6 +204,11 @@ describe('speech services', () => {
     expect(stt.available()).toBe(true);
     const clip = await tts.synthesize('hello');
     expect(clip).toMatchObject({ kind: 'audio', audioB64: 'UklGRg==', visemes: [{ viseme: 'aa' }] });
+    // the clip says which voice spoke it (the lip-sync learns each voice's pitch separately)
+    expect(clip.voice).toBe(DEFAULT_SETTINGS.voice.ttsVoice || '');
+    const michael = createSpeechServices({ voiceClient: serverClient({}), webSpeech: null,
+      getSettings: () => ({ ...DEFAULT_SETTINGS, voice: { ...DEFAULT_SETTINGS.voice, ttsVoice: 'am_michael' } }) });
+    expect((await michael.tts.synthesize('hello')).voice).toBe('am_michael');
 
     const off = createSpeechServices({ voiceClient: new VoiceClient(), webSpeech: /** @type {any} */ (web), getSettings: settings });
     expect(off.tts.mode()).toBe('browser');
@@ -289,8 +294,10 @@ describe('Web Speech', () => {
     expect(await ws.init()).toBe(true);
     expect(ws.voice.name).toMatch(/Aria/);
     const words = [];
-    await ws.speak('hello world', { rate: 1.3, onBoundary: (w) => words.push(w) });
+    const infos = [];
+    await ws.speak('hello world', { rate: 1.3, onBoundary: (w, info) => { words.push(w); infos.push(info); } });
     expect(words).toEqual(['hello', 'world']);
+    expect(infos).toEqual([{ charIndex: 0, charLength: 5 }, { charIndex: 6, charLength: 5 }]);
     expect(synth.spoken[0].rate).toBe(1.3);
   });
 

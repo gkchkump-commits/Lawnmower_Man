@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FAR_GAZE, gazeFromPoint } from '../../../src/app/gaze.js';
+import { gazeFromPoint } from '../../../src/app/gaze.js';
 import { ARM_MS, createDecisionGate } from '../../../src/ui/permission-cards.js';
 import { parseMarkdown } from '../../../src/ui/markdown.js';
 
@@ -12,22 +12,39 @@ describe('gazeFromPoint (global cursor follow)', () => {
     expect(gazeFromPoint(100, 450, stage)).toEqual([-0.5, -0.5]);
   });
 
-  it('outside it keeps the direction and eases off with distance (continuous at the edge)', () => {
-    const edge = gazeFromPoint(400, 300, stage); // right edge
-    const near = gazeFromPoint(420, 300, stage);
-    expect(edge).toEqual([1, 0]);
-    expect(near[0]).toBeGreaterThan(0.98);
-    const mid = gazeFromPoint(1400, 300, stage); // 5 stage half-widths away
-    const far = gazeFromPoint(200 + 200 * 1000, 300, stage);
-    expect(mid[0]).toBeLessThan(near[0]);
-    expect(mid[0]).toBeGreaterThan(far[0]);
-    expect(far[0]).toBeGreaterThan(FAR_GAZE - 0.01);
-    expect(Math.abs(mid[1])).toBeLessThan(1e-9);
-    // above-left of the window: looks up-left, gently
+  it('outside it points toward the cursor (continuous at the edge)', () => {
+    expect(gazeFromPoint(400, 300, stage)).toEqual([1, 0]); // right edge
+    expect(gazeFromPoint(1400, 300, stage)).toEqual([1, 0]); // 5 stage half-widths away
+    // above-left of the window: looks up-left
     const ul = gazeFromPoint(-800, -1200, stage);
     expect(ul[0]).toBeLessThan(0);
     expect(ul[1]).toBeGreaterThan(0);
-    expect(Math.max(Math.abs(ul[0]), Math.abs(ul[1]))).toBeLessThan(1);
+    expect(Math.max(Math.abs(ul[0]), Math.abs(ul[1]))).toBeCloseTo(1, 9);
+    const above = gazeFromPoint(300, -900, stage); // high above, a little right: mostly up
+    expect(above[1]).toBeCloseTo(1, 9);
+    expect(above[0]).toBeGreaterThan(0);
+    expect(above[0]).toBeLessThan(0.2);
+  });
+
+  it('never turns the eyes against the cursor: a cursor coming in from far away moves them its way (D15)', () => {
+    // sweeps toward the window from far right, far left, far above, and diagonally from below-right
+    const paths = [
+      (k) => [6000 - 60 * k, 420], (k) => [-6000 + 60 * k, 120],
+      (k) => [260, -6000 + 60 * k], (k) => [6000 - 60 * k, 6000 - 60 * k],
+    ];
+    for (const at of paths) {
+      let prev = null;
+      for (let k = 0; k <= 100; k++) {
+        const [x, y] = at(k), [px, py] = k ? at(k - 1) : [x, y];
+        const g = gazeFromPoint(x, y, stage);
+        if (prev) {
+          // each gaze component moves with the cursor's motion along that axis, or not at all
+          expect((g[0] - prev[0]) * Math.sign(x - px)).toBeGreaterThanOrEqual(-1e-12);
+          expect((g[1] - prev[1]) * Math.sign(py - y)).toBeGreaterThanOrEqual(-1e-12);
+        }
+        prev = g;
+      }
+    }
   });
 
   it('rejects unusable input', () => {

@@ -56,6 +56,8 @@ export function createSpeechServices(deps) {
             visemes: normalizeVisemes(r.visemes),
             text,
             durationSec: r.durationSec,
+            // the voice that spoke it: the lip-sync learns each voice's usual pitch separately
+            voice: v.ttsVoice || '',
           };
         } catch (err) {
           if (isAbortError(err)) throw err;
@@ -99,6 +101,14 @@ export function createSpeechServices(deps) {
       if (!s.loaded) return 'Speech recognition loads on first use (this can take a minute the first time).';
       return '';
     },
+    // ---- "Hey Jade" (contract-wake §9.9): how long a check of the wake segment may take ----
+    /** Where speech recognition runs: 'cuda' | 'cpu', or null when unknown / unavailable. @returns {'cuda'|'cpu'|null} */
+    device() {
+      const d = voiceClient.health?.stt?.device;
+      if (!serverOk('stt')) return null;
+      return d === 'cuda' || d === 'cpu' ? d : null;
+    },
+    // ---- end "Hey Jade" ----
     /**
      * @param {ArrayBuffer} wav @param {{ signal?: AbortSignal }} [o]
      */

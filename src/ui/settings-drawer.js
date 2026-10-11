@@ -7,6 +7,7 @@
 /* global Node */
 
 import { patchFor, getPath } from '../app/settings-defaults.js';
+import { MAX_AVATAR_WIDTH, MIN_AVATAR_WIDTH, PRESET_WIDTHS } from '../app/window-drag.js';
 import { acceleratorFromEvent, formatAccelerator } from './accelerator.js';
 import { clear, h, icon } from './dom.js';
 
@@ -25,7 +26,26 @@ import { clear, h, icon } from './dom.js';
  * @property {string} [action]
  * @property {string} [id]
  * @property {string} [variant]
+ * @property {(settings: any) => any} [value]  what the control shows, when not simply the value at `path`
  */
+
+/** How the lip-sync offset reads: "0 ms", "+40 ms (mouth later)", "-40 ms (mouth earlier)". @param {number} v */
+export function lipSyncLabel(v) {
+  const ms = Math.round(Number(v) || 0);
+  return ms === 0 ? '0 ms' : ms > 0 ? `+${ms} ms (mouth later)` : `\u2212${-ms} ms (mouth earlier)`;
+}
+const LIPSYNC_HINT = 'Mouth before the voice (e.g. Bluetooth headphones)? Move it right. Test lip-sync says a line with many m, b and p.';
+
+// ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+/** The wake word's hint (what leaves the PC, said plainly: after her name, the words go to Claude). */
+export const WAKE_HINT = 'Say “Hey Jade” to talk. The microphone stays on; nothing is recorded or sent until you say her name (then your words go to Claude)';
+// ---- end "Hey Jade" ----
+
+/** The voice character's hint: what it applies to, with the voice that is speaking now. */
+export const VOICE_FX_HINT = Object.freeze({
+  server: 'Applies to the local voice',
+  system: 'Applies to the local voice, not the system voice speaking now',
+});
 
 /** @type {Array<{ id: string, title: string, fields: Field[] }>} */
 export const SECTIONS = [
@@ -48,11 +68,30 @@ export const SECTIONS = [
       { type: 'info', id: 'voiceInfo' },
       { type: 'toggle', path: 'voice.enabled', label: 'Local voice (GPU)', hint: 'Speech recognition and natural speech on your GPU' },
       { type: 'toggle', path: 'voice.speakReplies', label: 'Speak replies' },
-      { type: 'toggle', path: 'voice.handsFree', label: 'Hands-free', hint: 'Listen whenever idle; pauses while speaking' },
+      { type: 'toggle', path: 'voice.handsFree', label: 'Hands-free', hint: 'Listen whenever idle; pauses while speaking. Off while “Hey Jade” is on' },
+      // ---- "Hey Jade" (wake word; docs/WAKE.md) ----
+      { type: 'info', id: 'wakeInfo' }, // state line + last wake events + action buttons (filled by src/wake/ui.js)
+      { type: 'toggle', path: 'wake.enabled', label: 'Hey Jade', hint: WAKE_HINT },
+      { type: 'segmented', path: 'wake.phrase', label: 'Wake phrase', options: [['hey-jade', '“Hey Jade”'], ['jade', '“Hey Jade” or “Jade”']] },
+      { type: 'segmented', path: 'wake.sensitivity', label: 'Sensitivity', options: [['low', 'Less'], ['normal', 'Normal'], ['high', 'More']], hint: 'More hears you better in noise and wakes by mistake more often' },
+      { type: 'segmented', path: 'wake.followUpSec', label: 'Follow-up', options: [[0, 'Off'], [6, '6 s'], [10, '10 s']], hint: 'After she answers, keep talking without her name' },
+      { type: 'toggle', path: 'wake.bargeIn', label: 'Interrupt with her name', hint: '“Hey Jade” while she talks stops her' },
+      { type: 'segmented', path: 'wake.sounds', label: 'Sounds', options: [['off', 'Off'], ['start', 'Start'], ['start-end', 'Start + end']] },
+      { type: 'toggle', path: 'wake.whileHidden', label: 'Listen while hidden', hint: 'Keep listening when the window is in the tray; “Hey Jade” brings her back' },
+      { type: 'toggle', path: 'wake.transcriptFallback', label: 'Transcript check', hint: 'Only when the wake-word engine cannot run: Whisper listens for her name on the GPU' },
+      { type: 'button', label: 'Test my echo', action: 'wakeEchoTest', variant: 'ghost' },
+      { type: 'button', label: 'Record a test clip (30 s)…', action: 'wakeRecord', variant: 'ghost' },
+      // ---- end "Hey Jade" ----
       { type: 'select', path: 'voice.ttsVoice', label: 'Voice', options: [] },
       // shown instead of the Kokoro list while the local voice is not running (Web Speech voices)
       { type: 'select', path: 'voice.systemVoice', label: 'Voice', options: [['', 'Automatic (most natural voice)']] },
       { type: 'range', path: 'voice.ttsSpeed', label: 'Speed', min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
+      // the local voice's character (src/audio/voicefx.js); the system voice cannot be processed
+      { type: 'select', path: 'voice.character', label: 'Character', hint: VOICE_FX_HINT.server, options: [['synth', 'Synth — hologram AI'], ['vocoder', 'Vocoder — fully synthetic'], ['robot', 'Robot — monotone, metallic'], ['natural', 'Natural — unprocessed']] },
+      { type: 'range', path: 'voice.fxAmount', label: 'Intensity', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      // the mouth's timing against the voice (src/audio/lipsync.js setOffset), both voices
+      { type: 'range', path: 'voice.lipSyncOffsetMs', label: 'Lip-sync timing', min: -200, max: 200, step: 5, format: lipSyncLabel, hint: LIPSYNC_HINT },
+      { type: 'button', label: 'Test lip-sync', action: 'testLipSync', variant: 'ghost' },
       { type: 'select', path: 'voice.device', label: 'Device', options: [['auto', 'Auto'], ['cuda', 'GPU (CUDA)'], ['cpu', 'CPU']] },
       { type: 'text', path: 'voice.sttModel', label: 'Speech model', suggestions: ['large-v3-turbo', 'distil-large-v3', 'medium.en', 'small.en', 'base.en'] },
       { type: 'button', label: 'Restart voice server', action: 'restartVoice', variant: 'ghost' },
@@ -69,16 +108,60 @@ export const SECTIONS = [
       { type: 'range', path: 'avatar.particles', label: 'Particles', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'range', path: 'avatar.bloom', label: 'Glow', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
       { type: 'toggle', path: 'avatar.followCursor', label: 'Eyes follow the cursor' },
+      // how much the voice moves the head, brows and face (nods, glances, brows on questions)
+      { type: 'range', path: 'avatar.expressiveness', label: 'Expressiveness', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      // how much it moves on its own: looks around, shifts its posture, small gestures (src/avatar/behavior.js)
+      { type: 'range', path: 'avatar.liveliness', label: 'Liveliness', hint: 'How much it moves on its own: looks around, shifts, small gestures', min: 0, max: 2, step: 0.05, format: (v) => `${Math.round(v * 100)}%` },
+      { type: 'toggle', path: 'avatar.projector', label: 'Projector light', hint: 'A cone of light under the bust, as if projected' },
     ],
   },
+  {
+    // the avatar can see you (docs/CAMERA.md); everything but a snapshot for Claude stays on this PC
+    id: 'camera',
+    title: 'Camera',
+    fields: [
+      { type: 'info', id: 'cameraInfo' },
+      { type: 'toggle', path: 'camera.enabled', label: 'Camera', hint: 'Face tracking runs on this PC only' },
+      { type: 'select', path: 'camera.deviceId', label: 'Device', options: [['', 'Default camera']] },
+      { type: 'toggle', path: 'camera.followFace', label: 'Eye contact', hint: 'Looks at you; a moving cursor still wins' },
+      { type: 'toggle', path: 'camera.presence', label: 'Notice when I leave', hint: 'Dozes off when you are away, wakes up when you are back' },
+      { type: 'toggle', path: 'camera.mirrorExpressions', label: 'Smile back' },
+      { type: 'toggle', path: 'camera.shareWithClaude', label: 'Let Jade see me', hint: 'A snapshot goes to Claude with every message you send' },
+      { type: 'segmented', path: 'camera.greeting', label: 'Greet me', options: [['off', 'Off'], ['hello', 'Hello'], ['claude', 'Jade']], hint: 'When it first sees you and when you are back. Jade = a personal hello from Jade (a short reply)' },
+      { type: 'toggle', path: 'camera.lookToTalk', label: 'Listen only when I look', hint: 'Hands-free: listen only while you look at the screen. With “Hey Jade”: while you look at her, no name needed' },
+    ],
+  },
+  // ---- Home camera (a Tapo pan/tilt camera as home security; src/tapo/, docs/TAPO.md) --------
+  {
+    id: 'tapo',
+    title: 'Home camera',
+    fields: [
+      { type: 'info', id: 'tapoInfo' },
+      { type: 'toggle', path: 'tapo.enabled', label: 'Home camera', hint: 'A Tapo pan/tilt camera on your network' },
+      // armed goes through bridge.tapo.arm (src/main.js), so the exit delay applies
+      { type: 'segmented', path: 'security.armed', label: 'Security', options: [[false, 'Disarmed'], [true, 'Armed']] },
+      { type: 'toggle', path: 'security.announce', label: 'Say when someone is there', hint: '“Someone is at the camera.”' },
+      { type: 'toggle', path: 'security.describe', label: 'Claude describes alerts', hint: 'Sends the alert picture to Claude for one sentence about it (asks first)' },
+      { type: 'button', label: 'Open camera window…', action: 'openTapo' },
+      { type: 'button', label: 'Open clips folder', action: 'openTapoClips', variant: 'ghost' },
+    ],
+  },
+  // ---- end Home camera -----------------------------------------------------------------------
   {
     id: 'window',
     title: 'Window',
     fields: [
-      { type: 'segmented', path: 'window.sizePreset', label: 'Size', options: [['small', 'S'], ['medium', 'M'], ['large', 'L']] },
-      { type: 'toggle', path: 'window.showChat', label: 'Chat panel', hint: 'Off = minimal mode (panel appears when needed)' },
+      // a free size (from a corner grip, Ctrl + wheel or the slider) selects no preset
+      { type: 'segmented', path: 'window.sizePreset', label: 'Size', options: [['small', 'S'], ['medium', 'M'], ['large', 'L']], value: (s) => (s.window.avatarWidth == null ? s.window.sizePreset : '') },
+      { type: 'range', path: 'window.avatarWidth', label: 'Width', min: MIN_AVATAR_WIDTH, max: MAX_AVATAR_WIDTH, step: 10, format: (v) => `${Math.round(v)} px`,
+        value: (s) => s.window.avatarWidth ?? PRESET_WIDTHS[/** @type {'small'|'medium'|'large'} */ (s.window.sizePreset)] ?? PRESET_WIDTHS.medium,
+        hint: 'Or drag a corner of the window, or Ctrl + mouse wheel over the head' },
+      { type: 'toggle', path: 'window.showChat', label: 'Chat panel', hint: 'Off = the panel drops down below the face only when needed' },
       { type: 'toggle', path: 'window.alwaysOnTop', label: 'Always on top' },
       { type: 'toggle', path: 'window.clickThrough', label: 'Click-through', hint: 'Clicks on empty space reach the desktop' },
+      { type: 'toggle', path: 'window.lockPosition', label: 'Lock position', hint: 'Off = drag the head to move the avatar, a corner to resize it' },
+      { type: 'toggle', path: 'window.snapToEdges', label: 'Snap to screen edges', hint: 'Locks flush against edges and corners while you drag' },
+      { type: 'button', label: 'Reset position', action: 'resetPosition', variant: 'ghost' },
     ],
   },
   {
@@ -113,7 +196,7 @@ export class SettingsDrawer {
     this.onAction = o.onAction;
     this.onToggle = o.onToggle || (() => {});
     this.platform = o.platform || 'win32';
-    /** @type {Map<string, { set: (v: any) => void, el: HTMLElement, row: HTMLElement }>} */
+    /** @type {Map<string, { set: (v: any) => void, el: HTMLElement, row: HTMLElement, value?: (settings: any) => any }>} */
     this.controls = new Map();
     /** @type {Map<string, HTMLElement>} */
     this.infos = new Map();
@@ -153,8 +236,25 @@ export class SettingsDrawer {
   update(settings) {
     this.settings = settings;
     for (const [path, c] of this.controls) {
-      const v = getPath(settings, path);
+      const v = c.value ? c.value(settings) : getPath(settings, path);
       if (v !== undefined) c.set(v);
+    }
+    // ---- "Hey Jade": hands-free waits for her name while the wake word is on (contract-wake §4.1) ----
+    const hands = this.controls.get('voice.handsFree');
+    if (hands) {
+      const wake = !!getPath(settings, 'wake.enabled');
+      hands.row.classList.toggle('disabled', wake);
+      /** @type {HTMLButtonElement} */ (hands.el).disabled = wake;
+      hands.row.title = wake ? 'Off while “Hey Jade” is on: say her name instead' : '';
+    }
+    // ---- end "Hey Jade" ----
+    // the intensity of 'natural' means nothing
+    const amount = this.controls.get('voice.fxAmount');
+    if (amount) {
+      const off = getPath(settings, 'voice.character') === 'natural';
+      amount.row.classList.toggle('disabled', off);
+      /** @type {HTMLInputElement} */ (amount.el).disabled = off;
+      amount.row.title = off ? 'Natural plays the voice unprocessed' : '';
     }
   }
 
@@ -206,6 +306,25 @@ export class SettingsDrawer {
   }
 
   /**
+   * Cameras for the camera picker ('' = the system default). A saved camera that is not in the
+   * list stays listed: "(not connected)" when the list can be trusted, plain "Saved camera"
+   * while the camera is off (the page sees no device ids then).
+   * @param {Array<{ id: string, label: string }>} cams @param {{ known?: boolean }} [o]
+   */
+  setCameraOptions(cams, o = {}) {
+    const sel = /** @type {HTMLSelectElement|undefined} */ (this.controls.get('camera.deviceId')?.el);
+    if (!sel) return;
+    const current = this.settings ? String(getPath(this.settings, 'camera.deviceId') ?? '') : sel.value;
+    const list = Array.isArray(cams) ? cams : [];
+    clear(sel);
+    sel.append(h('option', { value: '' }, 'Default camera'));
+    for (const c of list) sel.append(h('option', { value: c.id }, c.label));
+    if (current && !list.some((c) => c.id === current)) sel.append(h('option', { value: current }, o.known === false ? 'Saved camera' : 'Saved camera (not connected)'));
+    sel.value = current;
+    sel.title = list.length ? '' : 'Cameras are listed once the camera has been turned on';
+  }
+
+  /**
    * Which voice list applies right now: the local voice server's (Kokoro) or the system's.
    * @param {'server'|'system'} source
    */
@@ -214,6 +333,8 @@ export class SettingsDrawer {
     const system = this.controls.get('voice.systemVoice');
     if (server) server.row.hidden = source !== 'server';
     if (system) system.row.hidden = source === 'server';
+    const hint = this.controls.get('voice.character')?.row.querySelector('.field-hint');
+    if (hint) hint.textContent = source === 'server' ? VOICE_FX_HINT.server : VOICE_FX_HINT.system;
   }
 
   /** Relabel / hide / disable an action button. @param {string} action @param {{ label?: string, hidden?: boolean, disabled?: boolean, title?: string }} o */
@@ -276,6 +397,8 @@ export class SettingsDrawer {
     const path = /** @type {string} */ (f.path);
     const id = `set-${path.replace(/\./g, '-')}`;
     const label = h('label', { class: 'field-label', for: id }, f.label);
+    // a select or slider with a hint stacks the hint under its label (like a toggle)
+    const labelled = () => (f.hint ? h('div', { class: 'field-text' }, label, h('div', { class: 'field-hint' }, f.hint)) : label);
     const row = h('div', { class: `field field-${f.type}`, dataset: { path } });
     const commit = (v) => this.onChange(patchFor(path, v), path, v);
     let el;
@@ -290,7 +413,7 @@ export class SettingsDrawer {
           if ([...sel.options].every((o) => o.value !== String(v))) sel.append(h('option', { value: v }, String(v)));
           sel.value = String(v);
         };
-        row.append(label, el);
+        row.append(labelled(), el);
         break;
       }
       case 'segmented': {
@@ -306,7 +429,9 @@ export class SettingsDrawer {
         set = (v) => {
           for (const b of buttons) b.setAttribute('aria-checked', String(b.dataset.value === String(v)));
         };
-        row.append(h('span', { class: 'field-label' }, f.label), el);
+        // wake: a hint under the label (like a toggle's)
+        const name = h('span', { class: 'field-label' }, f.label);
+        row.append(f.hint ? h('div', { class: 'field-text' }, name, h('div', { class: 'field-hint' }, f.hint)) : name, el);
         break;
       }
       case 'toggle': {
@@ -345,7 +470,7 @@ export class SettingsDrawer {
           if (document.activeElement !== el) /** @type {HTMLInputElement} */ (el).value = String(v);
           out.textContent = fmt(Number(v));
         };
-        row.append(label, h('div', { class: 'range-wrap' }, el, out));
+        row.append(labelled(), h('div', { class: 'range-wrap' }, el, out));
         break;
       }
       case 'text': {
@@ -378,7 +503,7 @@ export class SettingsDrawer {
         el = h('span');
         set = () => {};
     }
-    this.controls.set(path, { set, el, row });
+    this.controls.set(path, { set, el, row, value: f.value });
     return row;
   }
 

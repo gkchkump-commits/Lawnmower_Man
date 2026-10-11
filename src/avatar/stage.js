@@ -1,7 +1,7 @@
 // Stage: WebGL renderer, camera framing, resize handling and the render loop.
 
 import * as THREE from 'three';
-import { QUALITY, normalizeQuality } from './quality.js';
+import { DPR_STEP, QUALITY, normalizeQuality } from './quality.js';
 
 /**
  * Camera framing requested by a head.
@@ -99,6 +99,8 @@ export class Stage {
     this.width = 1;
     this.height = 1;
     this.pixelRatio = 1;
+    /** the tier's pixel ratio cap x this (the auto quality's first step down: DPR_STEP) */
+    this.dprScale = 1;
     this.time = this.fixedTime ?? 0;
     this.frame = 0;
     this._raf = 0;
@@ -106,6 +108,8 @@ export class Stage {
     this._dirty = true;
     this._last = -1;
     this._fps = 0;
+    /** the shortest frame interval lately (ms): the display's refresh (frames come no faster) */
+    this._vsyncMs = Infinity;
     this._frameMs = 0;
     this._lostContext = false;
     this._info = { calls: 0, triangles: 0, points: 0, lines: 0 };
@@ -155,7 +159,30 @@ export class Stage {
   setQuality(q) {
     this.quality = normalizeQuality(q);
     this.tier = QUALITY[this.quality];
+    this.dprScale = 1;
     this.resize(true);
+  }
+
+  /** The device pixel ratio the tier allows (x dprScale). @param {number} [scale] */
+  _ratioFor(scale = this.dprScale) {
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    return Math.min(dpr, this.tier.dprCap * scale);
+  }
+
+  /** The auto quality can still lower this tier's resolution (by at least a tenth). */
+  canStepDpr() {
+    return this.dprScale === 1 && this._ratioFor(DPR_STEP) < 0.9 * this._ratioFor(1);
+  }
+
+  /** Render at the tier's pixel ratio cap x `k` (1 = the tier's own). @param {number} k */
+  setDprScale(k) {
+    this.dprScale = Math.min(1, Math.max(0.25, Number(k) || 1));
+    this.resize(true);
+  }
+
+  /** The display's refresh rate as the frame loop sees it (Hz; 60 before it knows). */
+  get refreshHz() {
+    return Number.isFinite(this._vsyncMs) && this._vsyncMs > 0 ? 1000 / this._vsyncMs : 60;
   }
 
   setZoom(z) {
@@ -169,8 +196,7 @@ export class Stage {
     const c = this.canvas;
     let w = c.clientWidth, h = c.clientHeight;
     if (!w || !h) { w = c.width || 300; h = c.height || 450; }
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const pr = Math.min(dpr, this.tier.dprCap);
+    const pr = this._ratioFor();
     if (!force && w === this.width && h === this.height && pr === this.pixelRatio) return;
     this.width = w; this.height = h; this.pixelRatio = pr;
     this.renderer.setPixelRatio(pr);
@@ -259,8 +285,11 @@ export class Stage {
     } else {
       const dt = this._last < 0 ? 1 / 60 : Math.min(MAX_DT, Math.max(0, (now - this._last) / 1000));
       if (this._last >= 0) {
-        const inst = (now - this._last) > 0 ? 1000 / (now - this._last) : 60;
+        const ms = now - this._last;
+        const inst = ms > 0 ? 1000 / ms : 60;
         this._fps = this._fps ? this._fps * 0.92 + inst * 0.08 : inst;
+        // (forgets slowly: a few seconds without a fast frame and it trusts the slower ones)
+        if (ms > 3 && ms < 100) this._vsyncMs = Math.min(this._vsyncMs * 1.002, ms);
       }
       this._last = now;
       this.time += dt;

@@ -3,7 +3,10 @@
 A holographic desktop avatar for Claude. The "brain" is the user's locally installed
 **Claude CLI** (`claude -p` in persistent stream-json mode, using their existing login);
 the face is a real-time WebGL hologram rendered on the GPU; voice is local on the GPU
-(faster-whisper speech-to-text, Kokoro text-to-speech) via a Python sidecar.
+(faster-whisper speech-to-text, Kokoro text-to-speech) via a Python sidecar. The avatar is
+**Jade** (she runs on Claude; "Lawnmower Man" is the app), and **"Hey Jade"** wakes her
+hands-free: a keyword spotter in its own utility process plus a Whisper check (§10,
+[WAKE.md](WAKE.md)).
 
 Target machine: Windows 11 (primary) or Linux, NVIDIA RTX 5070 **Laptop** GPU with 8 GB
 VRAM (Blackwell, compute capability sm_120 → needs CUDA 12.8+ builds). Everything must
@@ -28,31 +31,57 @@ Vite root is `src/`, `publicDir` is `public/` (served at `./`), build output `di
 `npm start` = `vite build` then Electron, which serves `dist/` through a privileged custom
 protocol `app://lawnmower/` (`protocol.handle`, standard+secure+supportFetchAPI) — **not**
 `file://`, because three.js loaders use `fetch()`, which Chromium does not allow on `file:`.
-Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice server.
+Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice server. `app://`
+sends the CSP with HTML and with scripts (a worker takes its policy from its script's response),
+and the session cancels every network request that does not go to a loopback host
+(`isAllowedRequestUrl`, `electron/security.js`): the window talks to no server on the internet
+(the Claude CLI is a child process with its own connection). The same holds for the Home camera
+window (§9): all camera traffic is in main and its loopback-only video sidecar.
 
 ## 1. Processes
 
 ```
-┌─────────────────────────── Electron main (Node 22, ESM) ───────────────────────────┐
+┌─────────────────────────── Electron main (Node 22, ESM) ────────────────────────────┐
 │ electron/main.js          app lifecycle, BrowserWindow (transparent, frameless,     │
 │                           always-on-top), tray, global shortcuts, IPC wiring        │
 │ electron/claude-session.js ClaudeSession: spawns `claude -p` persistent stream-json │
+│                           (+ the app's in-process MCP servers: the camera tools)    │
 │ electron/voice-sidecar.js  VoiceSidecar: spawns/monitors the Python voice server    │
 │ electron/settings.js       Settings store (JSON in app.getPath('userData'))         │
 │ electron/preload.cjs       contextBridge → window.lawnmower (see §3)                │
-└──────────────┬───────────────────────────────────────────────┬─────────────────────┘
-               │ IPC (contextIsolation, sandbox)                │ spawn + stdio
-┌──────────────▼──────────── Renderer (Chromium, WebGL2) ──┐   ┌▼──────────────────────┐
-│ src/avatar/*   hologram renderer (three.js)              │   │ claude -p (user's CLI) │
-│ src/app/*      conversation controller & text pipeline   │   └───────────────────────┘
-│ src/audio/*    mic capture/VAD, playback, lip-sync        │
-│ src/speech/*   voice-server client + Web Speech fallback  │──HTTP──┐
-│ src/ui/*       chat panel, settings, permission cards     │        │ 127.0.0.1, bearer token
-└───────────────────────────────────────────────────────────┘   ┌────▼──────────────────┐
-                                                                 │ voice/ (Python 3.12)  │
-                                                                 │ FastAPI: /stt /tts …  │
-                                                                 │ faster-whisper, Kokoro│
-                                                                 └───────────────────────┘
+│ electron/tapo/*            the Home camera (§9): ONVIF, PTZ, events, go2rtc, clips, │
+│                           security engine, notifications, camera MCP server         │
+│ electron/wake/*            "Hey Jade" (§10): supervises the "Jade wake word" utility│
+│                           process, lm:wake:* IPC, lock/sleep, the zh-en download    │
+└─────┬─────────────────────────────────────┬───────────────────────────────┬────────┬┘
+      │ IPC (contextIsolation,              │ IPC + MessagePort             │ spawn, │ spawn;
+      │ sandbox)                            │ (video frames)                │ stdio  │ HTTP 127.0.0.1
+┌─────▼─── avatar window ────────────┐ ┌────▼── Home camera window ─┐ ┌─────▼─────┐ ┌▼─────────────┐
+│ src/avatar/*  hologram (three.js)  │ │ src/tapo/*  live view,     │ │ claude -p │ │ go2rtc       │
+│ src/app/*     conversation         │ │ controls, events, setup    │ │ (user's   │ │ RTSP → fMP4  │
+│ src/audio/*   mic, VAD, lip-sync   │ │ worker: WebCodecs decode,  │ │  CLI)     │ │ on 127.0.0.1 │
+│ src/speech/*  voice client         │ │ motion, person detector    │ └───────────┘ └──────┬───────┘
+│ src/ui/*      chat, settings, cards│ │ preload-camera.cjs         │                      │ RTSP :554
+│ src/vision/*  webcam face tracking │ └────────────────────────────┘                      │
+│ src/tapo/avatar-link.js  alerts    │                                              ┌──────▼───────┐
+└─────┬──────────────────────────────┘                       main ── ONVIF :2020 ──►│ Tapo C211    │
+      │ HTTP 127.0.0.1, bearer token                                                │ (home LAN)   │
+┌─────▼─────────────────┐                                                           └──────────────┘
+│ voice/ (Python 3.12)  │
+│ FastAPI: /stt /tts …  │
+│ faster-whisper, Kokoro│
+└───────────────────────┘
+```
+
+"Hey Jade" adds one process, only while `wake.enabled` is on (§10):
+
+```
+ avatar window (src/audio/mic.js tap, 16 kHz) ──MessagePort (direct; main is not in the path)──┐
+        ▲  hits                                                                                 ▼
+        └──────────────────────────── utilityProcess "Jade wake word" (electron/wake/utility/main.js):
+                                       Silero VAD → onset recipe → sherpa-onnx keyword spotters
+                                       (resources/wake/sherpa-onnx/<platform>/sherpa-onnx.node)
+ main (electron/wake/host.js): fork, init (model paths), settings, restarts; parentPort only
 ```
 
 ## 2. Repository layout (and which build lane owns it)
@@ -67,6 +96,13 @@ Renderer CSP must allow `connect-src 'self' http://127.0.0.1:*` for the voice se
 | `public/assets/avatars/reference/` | **avatar-core** | the baked pack generated from the user's video (committed; served at `./assets/avatars/reference/`) |
 | `public/assets/models/` | **procedural** | head mesh(es) for the procedural renderer + LICENSE notes (served at `./assets/models/`) |
 | `src/app/`, `src/audio/`, `src/speech/`, `src/ui/`, `src/bridge/`, `src/main.js`, `src/index.html`, `src/styles/` | **renderer-app** | conversation pipeline, audio, UI, mock bridge |
+| `src/vision/`, `public/assets/vision/`, `scripts/vite-vision-wasm.mjs` | **camera** | webcam capture, MediaPipe face tracking in a worker, attention/presence/gaze logic, snapshots for Claude ([CAMERA.md](CAMERA.md)) |
+| `electron/tapo/`, `electron/preload-camera.cjs`, `scripts/fetch-go2rtc.mjs`, `tools/tapo-probe.mjs`, `tests/unit/tapo/` | **tapo-main** | the Home camera's main-process side (§9) |
+| `src/tapo/`, `src/bridge/mock-tapo.js`, `public/assets/security/`, `tests/unit/security/`, `tests/e2e/tapo-window.spec.js` | **tapo-renderer** | the Home camera window, its security worker, the avatar's side (§9) |
+| `tools/tapo-sim/`, `tests/fixtures/tapo/`, `tests/unit/tapo-sim/`, `scripts/tapo-e2e.mjs`, `docs/TAPO.md` | **tapo-sim** | camera simulator, integration and Electron end-to-end tests, the user guide; also the camera tools in `electron/claude-session.js` / `persona.js` |
+| `electron/wake/`, `scripts/fetch-wake.mjs`, `scripts/wake-smoke.mjs`, `tools/wake/`, `tests/fixtures/wake/`, `tests/unit/wake-engine/`, the `wake` blocks of `electron/settings.js` and `electron/tray-menu.js`, `voice/lawnmower_voice/download.py` (`--kws`) | **wake-engine** | "Hey Jade" in main: the utility process, the engine, shipping (§10) |
+| `src/wake/`, `src/bridge/mock-wake.js`, `tests/unit/wake/`, `tests/e2e/wake.spec.js`, and delimited blocks / `// wake:` lines in `src/audio/mic.js`, `player.js`, `src/app/controller.js`, the drawer, the status line, `src/main.js` | **wake-renderer** | "Hey Jade" in the renderer: the state machine, the check, the chip and the drawer (§10) |
+| `electron/persona.js`, `scripts/wake-e2e.mjs`, `docs/WAKE.md`, the Jade UI strings | **wake-jade** | Jade's persona, the real-app e2e, the user guide |
 | `voice/` | **voice** | Python package `lawnmower_voice`, pyproject, tests |
 | `scripts/` | **voice** (setup-voice.*) / **systems** (others) | setup scripts |
 | `src/dev/` | each lane its own file(s): `src/dev/avatar.html` (avatar-core), `src/dev/procedural.html` (procedural) | dev/visual harness pages served by Vite at `/dev/*.html` (add them to `build.rollupOptions.input` in vite.config.js if tests need them in `vite preview`) |
@@ -89,7 +125,9 @@ The mock is also selected when the URL has `?mock=1`.
 ```js
 lawnmower = {
   claude: {
-    send(text: string): Promise<{ turnId: string }>,   // queue a user turn
+    send(text: string, options?: { images?: Array<{ mediaType: 'image/jpeg'|'image/png'|'image/webp', data: string }> }): Promise<{ turnId: string }>,
+                                                         // queue a user turn; images (webcam snapshots, ≤ 2, base64 without
+                                                         // a data: prefix, ≤ 1.5 MB each) are validated in main (ipc-validate)
     cancel(turnId: string): Promise<{ cancelled: boolean, interrupted: boolean }>,
                                                          // drop a turn that has not started (→ turn_cancelled);
                                                          // a running one is interrupted instead
@@ -124,9 +162,19 @@ lawnmower = {
   },
   window: {
     setIgnoreMouse(ignore: boolean): void,  // click-through for transparent pixels (forward:true)
-    setSizePreset(preset: 'small'|'medium'|'large'): void,
+    setSizePreset(preset: 'small'|'medium'|'large'): void,   // clears a free size (avatarWidth)
+    setAvatarWidth(px: number): void,       // a free size (Ctrl + wheel); clamped 200..1200, even
     setAlwaysOnTop(on: boolean): void,
+    dragStart(): void,     // primary button pressed on the head / status bar / settings header
+    dragEnd(): void,       // released (or blur / hidden): settle on the display, save the position
+    resizeStart(corner: 'tl'|'tr'|'bl'|'br'): void,   // primary button pressed on a corner grip
+    resizeEnd(): void,     // released: keep the size as window.avatarWidth
+    resetPosition(): void, // default corner of the current display
     minimize(): void, hide(): void, quit(): void,
+    onVisibility(cb: (v: { visible: boolean }) => void): () => void,
+                                            // shown / hidden / minimized / restored (the camera pauses while hidden;
+                                            // with backgroundThrottling off, document.visibilityState always says visible)
+    show(): void,                           // "Hey Jade" while hidden in the tray: show the window without the focus
   },
   onHotkey(cb: (name: 'toggleListen'|'stopSpeaking'|'toggleChat') => void): () => void,
   onCursor(cb: (p: { x: number, y: number }) => void): () => void,
@@ -134,8 +182,81 @@ lawnmower = {
                           // (may be outside the window); ~30 Hz, only while the window is visible,
                           // avatar.followCursor is on and the cursor moved. Absent in the mock bridge.
   app: { info(): Promise<{ version: string, platform: string, electron: string, chrome: string }> },
+  tapo: {                                  // the Home camera (§9); invoke/subscribe wrappers only
+    status(): Promise<TapoStatus>,
+    arm(armed: boolean): Promise<{ armed, arming, armingEndsAt? }>,    // always with the exit delay from here
+    ptz(cmd: PtzCommand): Promise<PtzResult>,  // { op: 'nudge'|'hold'|'heartbeat'|'release'|'stop'|'center'|'preset'|'preset-name'|'home', … }
+    presets(o?: { refresh?: boolean }): Promise<Preset[]>,
+    events(q?: { beforeMs?, sinceMs?, kinds?, limit? }): Promise<{ events: EventSummary[], total: number }>,
+    openWindow(o?: { eventId?: string }): Promise<{ ok: true }>,     // show the camera window (and an event's clip)
+    openClips(): Promise<{ ok: boolean, path?: string, error?: string }>,
+    onStatus(cb: (st: TapoStatus) => void): () => void,             // on change, ≤ 4/s
+    onAlert(cb: (a: AvatarAlert) => void): () => void,              // { id, kind, at, cameraName, line, quiet, describe, snapshot? }
+    onLook(cb: (p: { x: number, y: number, holdMs: number }) => void): () => void,   // the camera window's centre (CSS px)
+  },
+  wake: {                                  // "Hey Jade" (§10); the avatar window only, never the camera window
+    status(): Promise<WakeEngineStatus>,   // { engine: 'off'|'starting'|'ready'|'missing'|'error', detail,
+                                           //   models: { giga, zhen, vad }, version, platform, loadMs?, restarts, portGen }
+    onStatus(cb: (st: WakeEngineStatus) => void): () => void,       // on change, ≤ 4/s
+    requestPort(): Promise<{ ok: boolean, gen: number }>,            // the port itself arrives as a window message:
+                                           // { type: 'lm:wake:port', gen } + ports[0] (the preload forwards it)
+    report(st: { state: WakeUiState, reason?: string }): void,      // the listening state → the tray (≤ 2/s)
+    onPower(cb: (p: { state: 'locked'|'unlocked'|'suspended'|'resumed' }) => void): () => void,
+    micAccess(): Promise<'granted'|'denied'|'restricted'|'not-determined'|'unknown'>,   // Windows privacy switch
+    openMicSettings(): Promise<{ ok: boolean }>,                     // ms-settings:privacy-microphone (Windows)
+    saveClip(o: { wav: ArrayBuffer, hits: Array<{ atSec, keyword, outcome }> }): Promise<{ ok, path?, error? }>,
+                                           // "Record a test clip": PCM16 mono 16 kHz ≤ 60 s → Documents/Lawnmower Man/Hey Jade tests/
+    download(): Promise<{ ok: boolean, started: boolean }>,          // the zh-en model (through the voice package)
+  },
 }
 ```
+
+The wake word's audio port works like the camera's: main creates a `MessageChannelMain` per
+`requestPort()`, sends `port1` to the avatar window (`lm:wake:port` with `{ gen }`; the preload
+re-posts it with `window.postMessage({ type: 'lm:wake:port', gen }, '*', ports)`) and `port2` to the
+utility process. `src/wake/port.js` accepts it only from its own window and with a newer `gen`.
+Frames are posted as copies, never with a transfer list (a transferred ArrayBuffer arrives as
+`null` on a `MessagePortMain`). Channels and validators: `electron/wake/ipc.js`, `validate.js`.
+
+The Home camera window has its own preload, `electron/preload-camera.cjs`, which exposes exactly
+`window.lawnmowerCamera = { settings: { get, set, onChange }, tapo: { status, onStatus, onEvent,
+onOpenEvent, onCalibration, setCredentials, clearCredentials, test, discover, ptz, presets,
+savePreset, removePreset, arm, calibrate, events: { list, remove, ack, openFolder },
+setViewVisible, requestPort }, app: { info } }` — no Claude API. Its `settings.set` may change only
+the `tapo` and `security` groups (main checks with `validateCameraSettingsPatch`). The frame
+MessagePort cannot cross `contextBridge`: the preload forwards it with
+`window.postMessage({ type: 'lm:tapo:port' }, '*', ports)`. Main decides who may call a channel with
+`assertSender(event, kinds)` (`'avatar'` = the avatar window, `'camera'` = the camera window; the
+frame must show our own page); `lm:settings:get/set` and `lm:app:info` accept both, the camera's
+setup channels only the camera window. The channel table and payload types are in
+`electron/tapo/ipc.js` / `validate.js` and [TAPO.md §10](TAPO.md#10-how-it-works-technical).
+
+Moving the window: there are no CSS drag regions (`-webkit-app-region: drag`). On Windows they fight
+click-through: entering one reads as the pointer leaving the page, the click-through gate makes the
+window transparent to clicks and the press lands on the desktop. Instead the renderer
+(`src/app/window-drag.js`) calls `dragStart()` on a primary press over the head's silhouette, the
+status bar or the settings header, holds the gate interactive and captures the pointer; main follows
+`screen.getCursorScreenPoint()` at ~60 Hz (`dragBounds` in `electron/window-manager.js`: nothing moves
+until the cursor travelled 3 DIP, so a click stays a click; `setBounds` keeps the size exact on
+fractional display scaling) and refuses click-through until `dragEnd()`, which settles the window
+fully onto the display it was dropped on and saves the position. A drag also ends when the window
+hides, minimizes or its renderer dies, and after 2 minutes at most. `window.lockPosition` disables it.
+Like a normal window, the avatar snaps to screen edges while it is dragged (`snapToEdges` in
+`electron/window-manager.js`): within 24 DIP of an edge of the work area it locks flush against it
+(two edges: a corner) and lets go once the cursor pulls it further away; `window.snapToEdges: false`
+turns this off.
+
+Resizing works the same way, because transparent windows cannot use the native resize border on
+Windows: the renderer draws a grip (a bracket) at each corner, shown on hover like the toolbar, and
+calls `resizeStart(corner)` on a press; main follows the cursor (`resizeBounds` in
+`electron/window-manager.js`) with the opposite corner fixed. The avatar area stays 2:3 and the chat
+strip follows the width (`chatHeightFor`: through the presets' 200 / 240 / 280 px, 140..340 px), so a
+corner changes just the width: the cursor axis that asks for the bigger change wins, and the window
+never grows past the work area on the dragged side. On release the width is saved as
+`window.avatarWidth` (200..1200 px, even); `windowLayout` then gives the same size, so nothing moves.
+Ctrl + wheel over the head steps it by 8 % (`setAvatarWidth`), the drawer has a *Width* slider, and a
+size preset (drawer S/M/L, tray *Size*) clears it again (`applyPatch`). `window.lockPosition` hides
+the grips and refuses resizing too.
 
 Renderer use of `onCursor`: the eyes follow the cursor anywhere on the desktop (`src/app/gaze.js`:
 inside the avatar stage exactly like pointer tracking, outside it the gaze keeps the direction but
@@ -197,7 +318,9 @@ without one the CLI allows reads inside the working folder and asks (an approval
 stdin lines (JSON, newline-terminated):
 
 * `{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — send first; reply arrives as `control_response`.
-* `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}` — one turn.
+* `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}` — one turn. Webcam
+  snapshots follow the text block as `{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"…"}}`
+  (verified with Claude Code 2.1.294: the model sees the image).
 * `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}` — interrupt.
 * Reply to a permission prompt: `{"type":"control_response","response":{"subtype":"success","request_id":"<their id>","response":{"behavior":"allow","updatedInput":{…original input…}}}}`
   or `{"behavior":"deny","message":"User denied"}`.
@@ -242,6 +365,8 @@ command line — user text only ever travels over stdin; long prompts go in file
     device: 'auto',              // 'auto' | 'cuda' | 'cpu'
     handsFree: false,            // continuous VAD listening (half-duplex)
     speakReplies: true,
+    character: 'synth',          // the local voice's character: 'synth' | 'vocoder' | 'robot' | 'natural' (VOICE.md §2.4)
+    fxAmount: 0.6,               // its intensity 0..1
   },
   avatar: {
     renderer: 'relief',          // 'relief' (from the reference video) | 'procedural'
@@ -250,21 +375,87 @@ command line — user text only ever travels over stdin; long prompts go in file
     particles: 1.0,              // density multiplier 0..2
     bloom: 1.0,                  // strength multiplier 0..2
     followCursor: true,
+    expressiveness: 1.0,         // 0..2: how much speech moves the head, brows and face (nods, glances, brows)
+    liveliness: 1.0,             // 0..2: spontaneous behaviour (look-arounds, posture, small gestures; 0 = none)
+    projector: false,            // a projector's cone of light under the bust
   },
   window: {
     sizePreset: 'medium',        // small 300x450, medium 400x600, large 560x840 (avatar area; chat panel extra)
+    avatarWidth: null,           // a free size from resizing (px, 200..1200; height 1.5x + strip); null = the preset
     alwaysOnTop: true,
     clickThrough: true,          // transparent pixels pass clicks to the desktop
     position: null,              // {x,y} remembered
     showChat: true,
+    lockPosition: false,         // true: pressing on the head does not move the window (nor a grip resize it)
+    snapToEdges: true,           // a dragged window locks flush against screen edges and corners
   },
   hotkeys: {                     // Linux/macOS defaults
     toggleListen: 'CommandOrControl+Alt+Space',
     toggleChat: 'CommandOrControl+Alt+C',
     stopSpeaking: 'CommandOrControl+Alt+X',
   },                             // Windows: Control+Shift+Space / Control+Shift+F9 / Control+Shift+F10
+  camera: {                      // docs/CAMERA.md; main allows media/video only while enabled
+    enabled: false,              // off by default; the first use shows a privacy card
+    deviceId: '',                // '' = the default camera
+    followFace: true,            // eye contact (a moving cursor wins for ~1.5 s)
+    presence: true,              // away > 2 min while idle → sleep; back → wake + greeting expression
+    mirrorExpressions: true,     // smile back
+    shareWithClaude: false,      // a snapshot (JPEG ≤ 640 px) with every message
+    greeting: 'hello',           // first sight / back after ≥ 2 min: 'hello' (quick spoken line,
+                                 // controller.say), 'claude' (hidden prompt), 'off'
+    lookToTalk: false,           // hands-free only listens while the user looks at the screen
+  },
+  tapo: {                        // the Home camera (§9, TAPO.md); the camera password is NOT a setting
+    enabled: false,              // the whole feature: camera window, ONVIF, the go2rtc sidecar
+    name: 'camera',              // spoken/display name ("front door camera")
+    host: '',                    // '' or a home-network address (private IPv4, fc00::/7, .local/.lan/…); never a URL
+    onvifPort: 2020, rtspPort: 554,
+    username: '',                // the Tapo Camera Account user (not secret)
+    stream: 'stream1',           // 'stream1' | 'stream2'
+    ptz: 'auto',                 // 'auto' | 'relative' | 'continuous' | 'off'
+    invertPan: false, invertTilt: false,                 // set by calibration (or the user)
+    stepSmall: 0.15, stepMedium: 0.35, stepLarge: 0.75,  // nudges, as fractions of the view
+    viewUnitsX: 0.5, viewUnitsY: 1.4,                    // ONVIF units per view width / height (calibration)
+    minStep: 0.05, holdSpeed: 0.5, msPerUnit: 6000,
+    homePreset: '', localPresets: [], calibratedAt: '',
+    windowBounds: null, windowOnTop: false, showDetections: false,
+  },
+  security: {
+    armed: false,                // persisted: an armed app re-arms right after a restart
+    armDelaySec: 30,             // exit delay after arming in the app
+    people: true, motion: true,
+    notify: 'person', record: 'person',                  // 'person' | 'motion' | 'off'
+    preRollSec: 5, postRollSec: 10, maxClipSec: 120,
+    retentionDays: 7, maxStorageGB: 5, clipsDir: '',     // '' = <Videos>/Lawnmower Man/Security
+    sensitivity: 'medium', cameraEvents: true, confirmLocally: true,
+    cooldownSec: 60, quietHours: '',                     // '' | 'HH:MM-HH:MM'
+    announce: true, showOnAlert: true,
+    describe: false,             // the alert picture goes to Claude for a one-sentence description
+    claudeSee: 'ask', claudeMove: 'ask',                 // 'ask' | 'always' | 'never': camera_snapshot / camera_look
+    voiceCommands: true,         // "camera left", "arm the camera" … run locally, without a Claude turn
+  },
 }
 ```
+The `tapo` and `security` groups need no migration (new groups get their defaults); the renderer
+mirrors them in `src/app/settings-defaults.js` and the mock camera bridge validates like main
+(`tests/unit/tapo/settings-tapo.test.js` checks both). The `wake` group ("Hey Jade", §10; also
+mirrored, `tests/unit/wake-engine/settings-wake.test.js`) needs no migration either:
+
+```js
+  wake: {
+    enabled: false,              // listen for "Hey Jade" (the microphone stays open while the app runs)
+    phrase: 'hey-jade',          // 'hey-jade' | 'jade' ("Jade, …" at the very start of an utterance too)
+    sensitivity: 'normal',       // 'low' | 'normal' | 'high' (thresholds and the check's rule)
+    followUpSec: 6,              // 0 (off) or 4..15: talk again without her name after she answers
+    bargeIn: true,               // "Hey Jade" while she talks stops her
+    sounds: 'start',             // 'off' | 'start' | 'start-end'
+    whileHidden: true,           // keep listening while the window is hidden in the tray
+    transcriptFallback: false,   // only without the engine: Whisper checks speech for her name (GPU)
+    explained: false,            // the one-time card was shown (set by the renderer)
+  },
+```
+While `wake.enabled` is on and able to run, it takes precedence over `voice.handsFree`, and
+`camera.lookToTalk` means "look and talk" (looking at her replaces the name).
 Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt+<key> global shortcut would swallow AltGr characters
 (Polish ć/ź, Hungarian/Czech & and #, …). settings.json carries a top-level `"version"`; loading a v1
 file on Windows moves hotkeys that still hold the old Ctrl+Alt defaults to the new ones (once).
@@ -283,14 +474,31 @@ const avatar = await createAvatar(canvas, {
   transparent: true,       // premultiplied black→alpha output for the desktop overlay
 });
 avatar.setState(s)               // 'idle'|'listening'|'thinking'|'speaking'|'error'|'sleep'
-avatar.setMouth({ jaw, wide, round })   // 0..1 each; lip-sync target, director smooths
+avatar.setMouth({ jaw, wide, round, press, tuck, teeth, tongue })
+                                 // 0..1 each, missing fields = 0; lip-sync target, director smooths.
+                                 // press: lips pressed / rolled in (m b p); tuck: lower lip under the
+                                 // upper teeth (f v); teeth: upper lip raised, teeth show (s z ee);
+                                 // tongue: tongue tip at the teeth (th l)
 avatar.setSpeechLevel(level)     // 0..1 loudness envelope (drives glow/energy)
-avatar.setExpression({ smile, browUp }) // 0..1
+avatar.setProsody(cue | cue[])   // speech prosody from the lip-sync: { type: 'accent'|'emphasis'|
+                                 // 'phrase-start'|'phrase-end'|'inhale', strength?, punct?, friendly?,
+                                 // fall?, rise? (final pitch movement, semitones), pause? (s), lead? (s) } →
+                                 // small nods, brow raises (emphasis, questions), final lowering,
+                                 // phrase-end blinks, glances, breaths, micro-smiles after friendly sentences
+avatar.setIntonation({ pitch, voiced }) // the local voice's pitch, semitones re the speaker's usual
+                                 // one (src/audio/prosody.js): the head and brows follow it a little
+avatar.setExpression({ smile, browUp }) // 0..1 (the camera: smile back, wake-up greeting)
+avatar.setUser({ typing?, present?, looking?, roll?, voice? }) // what the app knows about the user,
+                                 // for the spontaneous behaviour (src/avatar/behavior.js): a key typed
+                                 // now; the camera's view (present null = no camera; roll = head tilt in
+                                 // the selfie view, rad, + counter-clockwise on screen); voice = the mic
+                                 // meter's level now, 0..1, while it listens (nods at the pauses)
 avatar.blink()
-avatar.lookAt(x, y)              // -1..1 in canvas space (cursor follow); lookAt(null) releases
-avatar.setOptions(partial)       // quality/particles/bloom/colors at runtime
+avatar.lookAt(x, y, kind?)       // -1..1 in canvas space (cursor follow, camera eye contact via src/vision/gaze.js); kind 'cursor' | 'face' | 'glance' (the head goes along with a cursor or a face); lookAt(null) releases
+avatar.setOptions(partial)       // quality/particles/bloom/colors/expressiveness/liveliness (0..2)/projector at runtime
 avatar.hitTest(clientX, clientY) // true if the pointer is over visible avatar pixels
 avatar.renderOnce(time)          // render a single frame at time (tests)
+avatar.advance(dt, { render })   // tests / harness: step a scripted clock with live dynamics
 avatar.dispose()
 ```
 `createAvatar` falls back renderer: relief → procedural → placeholder if loading fails, and
@@ -311,9 +519,15 @@ export default class Head {
 }
 ```
 `AnimState` (produced by `src/avatar/director.js`, all numbers, smoothed):
-`jawOpen, mouthWide, mouthRound, smile, blinkL, blinkR (0 open → 1 closed), gazeX, gazeY (-1..1),
+`jawOpen, mouthWide, mouthRound, mouthPress, mouthTuck, mouthTeeth, mouthTongue, mouthAsym (-1..1, lips a
+little lopsided while talking), smile, blinkL, blinkR (0 open → 1 closed), gazeX, gazeY (-1..1),
 browUp, headYaw, headPitch, headRoll (radians, small), breath (0..1 cycle), speech (0..1 loudness),
-energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights)`.
+energy (0..1 overall glow), listen, think, speak, error, sleep (0..1 state weights), cheekRaise,
+chinRaise, nostrilFlare (0..1, the face moving with the mouth: cheeks with spread vowels and
+smiles, the chin under pressed lips, the nostrils on a breath in; 0 at rest), lean, shiftX (-1..1,
+posture: toward the viewer, sideways), squint (0..1, both lids), pulse (0..1, an energy wave on an
+emphasis; the behaviour layer, 0 at rest and in settled renders)`. A head that does not know a
+channel ignores it.
 
 ## 6. Voice server — `voice/` (Python 3.12, FastAPI + uvicorn)
 
@@ -334,7 +548,7 @@ Errors, including unexpected 500s, are JSON `{error, code}` and carry the CORS h
 |---|---|---|
 | `GET /health` | — | `{ ok, version, device: { cuda: bool, name, capability: "12.0", vramTotalMB, vramFreeMB }, stt: { backend, model, device, loaded, error? }, tts: { backend, device, loaded, voices: [..], error? } }` |
 | `POST /stt` | body = WAV (PCM16 mono, any rate) — or raw little-endian float32 mono with header `X-Sample-Rate`; query `language` optional | `{ text, language, durationSec, processingMs }` |
-| `POST /tts` | JSON `{ text, voice?, speed? }` | `{ sampleRate, audioB64 /* WAV PCM16 mono */, durationSec, processingMs, visemes: [{ start, end, viseme }] or null }` |
+| `POST /tts` | JSON `{ text, voice?, speed? }` | `{ sampleRate, audioB64 /* WAV PCM16 mono */, durationSec, processingMs, visemes: [{ start, end, viseme }] or null }` — viseme times are seconds of the returned audio, aligned with the sound (Kokoro's duration-derived times are shifted by its measured lead, docs/VOICE.md §2.1) |
 | `GET /voices` | — | `[{ id, name, lang, gender }]` |
 | `POST /warmup` | — | `{ ok }` (loads models) |
 
@@ -344,11 +558,26 @@ Viseme ids (shared with the renderer's lip-sync): `sil, PP (m b p), FF (f v), TH
 
 `idle → listening (mic, VAD) → transcribing (/stt) → thinking (claude turn, no text yet) →
 speaking (text streams → sentence chunker → /tts per sentence → ordered playback queue →
-lip-sync) → idle`. Barge-in: hotkey/click while speaking stops playback, interrupts the
+voice character (AudioWorklet; the lip-sync reads the dry voice) → lip-sync) → idle`. Lip-sync (`src/audio/lipsync.js`): the voice server's viseme timeline, or for the
+system voice the utterance's own words (`g2p.js` → an `articulation.js` plan, anchored by the voice's
+word-boundary events), blended by a coarticulation model into the `setMouth` channels, plus
+prosody cues for `setProsody`. Barge-in: hotkey/click while speaking stops playback, interrupts the
 Claude turn and starts listening. Text typed in the chat panel enters at `thinking`.
 Markdown and code are stripped for speech (`src/app/speech-text.js`); code blocks are shown
 in the chat panel and replaced in speech by a short phrase. Permission requests (agent
 mode) show an approval card and the avatar says a short prompt; nothing is auto-approved.
+
+**Wake mode** ("Hey Jade", §10): the microphone stays open and its 16 kHz blocks go to the wake-word
+utility through a tap (nothing is transcribed while she waits). A stage-1 hit puts her in
+`attention` (listening pose, no sound) and starts the capture from the keyword's end; the wake
+segment from a 3 s ring goes to `/stt` and `src/wake/phrase.js` vetoes rivals ("Hey Jude"), her
+own voice and non-calls. Accepted: the chime, `listening`, and the command (the audio after the
+cut) goes through `_transcribe` → `sendText` like any voice turn (so the Home camera's local
+commands still work). After a voice reply a follow-up window (`wake.followUpSec`, 6 s) takes one
+more utterance without her name. While she speaks, "Hey Jade" ducks her voice by 15 dB, and after
+the check she stops speaking (barge-in); "Hey Jade, stop" interrupts the turn locally. The state
+machine (`src/wake/machine.js`) is pure; the controller has one delimited block plus `// wake:`
+hooks. With the wake word off, everything above behaves as before.
 
 ## 8. Testing
 
@@ -363,16 +592,214 @@ mode) show an approval card and the avatar says a short prompt; nothing is auto-
   `tools/visual/` has the screenshot and compare tools (URL parameters in its README).
 * Real app: `ELECTRON_PATH=<electron binary> xvfb-run -a node scripts/electron-e2e.mjs [--live]`
   launches `electron/main.js` with Playwright's Electron driver (fake or real Claude CLI) and checks
-  app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, voice
-  status and a clean boot without console errors.
+  app://, CSP, the bridge, settings IPC, the "not logged in" card + Retry, a streamed turn, an image
+  block the fake CLI acknowledges, the camera (refused while camera.enabled is off; with it on, the
+  privacy card and face tracking loading its wasm + model over app:// in a worker, on Chromium's
+  fake camera; the worker runs under the CSP and no request leaves the PC, also when the camera is
+  turned off), voice status and a clean boot without console errors.
+  It also checks the Home camera window without a camera: none while the feature is off; turned on,
+  a hidden, sandboxed window at `app://lawnmower/tapo/index.html` whose preload exposes exactly
+  `window.lawnmowerCamera`, which boots without errors, may change only its own settings groups and
+  sends no request off the PC; turned off, it is gone.
+* Camera in the browser: `tests/e2e/camera.spec.js` runs with Chromium's fake camera playing a frame
+  of `docs/reference/neutral.jpg` (MediaPipe detects that face); see [CAMERA.md](CAMERA.md).
+* Home camera: `tests/unit/tapo/` (main-process modules with in-test fakes, a fake ONVIF camera and a
+  mini RTSP server; with `vendor/go2rtc/` also the real go2rtc), `tests/unit/tapo-sim/` (those modules
+  against the camera simulator `tools/tapo-sim/`), `tests/unit/security/` (the window's pure logic and
+  worker pipeline), `tests/e2e/tapo-window.spec.js` (the camera window and the avatar's side in
+  Chromium with the mock camera bridge), and `xvfb-run -a node scripts/tapo-e2e.mjs`: the real app
+  against the simulator with the real go2rtc (`npm run fetch:go2rtc`) — setup through the form,
+  calibration, PTZ, an armed person event with notification, avatar line and clip, Claude's camera
+  tools through the fake CLI, privacy mode, offline recovery and a clean quit
+  ([TAPO.md §10](TAPO.md#10-how-it-works-technical)). CI job `tapo-e2e-linux` runs it.
+* "Hey Jade": `tests/unit/wake-engine/` (main-process modules with a fake `utilityProcess`, and the
+  real engine over the committed Kokoro fixtures in `tests/fixtures/wake/`: it skips without
+  `npm run fetch:wake -- --with-zhen` unless `WAKE_ENGINE_REQUIRED=1`, as in CI), `tests/unit/wake/`
+  (the renderer's pure state machine, transcript rules, self mask, earcons, port, feature),
+  `tests/e2e/wake.spec.js` (the browser with the mock engine, a scripted microphone and Chromium's
+  fake capture device), `node scripts/wake-smoke.mjs` (the addon under plain Node over the fixtures;
+  the Windows CI job's real DLL load) and `xvfb-run -a node scripts/wake-e2e.mjs`: the real app with
+  the real utility, addon and both models, Chromium's fake microphone playing the fixtures, the fake
+  voice server's scripted `/stt` (`LAWNMOWER_VOICE_FAKE_TEXTS`) and the fake CLI — the cascade, the
+  follow-up, "Hey Jude", her own voice, barge-in, a hidden window, the lock screen, a utility crash,
+  CPU in silence and in speech, no socket in the utility (CI job `wake-e2e-linux`, also `--b-only`).
+  `scripts/electron-e2e.mjs` checks the bridge's `wake` namespace and that the utility starts (ready
+  with model B and the VAD) and stops with the setting.
 * Packaged app: `ELECTRON_PATH=<installed "Lawnmower Man.exe" | release/linux-unpacked/lawnmower-man>
   node scripts/electron-e2e.mjs --packaged` (no app path) also checks `app.isPackaged`, the
   resources an installer must deliver, the per-user voice folder and — through the real launcher in
   `-CheckOnly` mode — that the bundled setup script reports that same folder. The fake CLI reaches
   the packaged app through `LAWNMOWER_CLAUDE_CLI` (honoured when packaged on purpose; threat model in
   `electron/main.js`), `LAWNMOWER_E2E=1` exposes a few main-process helpers to `app.evaluate()`.
-  `.github/workflows/release.yml` runs it against the silently installed NSIS build on windows-latest
+  With the Home camera it also checks `resources/tapo/go2rtc(.exe)` (it runs and reports 1.9.14), its
+  license, the camera page, preload and the person detector model inside `app.asar`. With "Hey
+  Jade" it checks `resources/wake/` against the pinned SHA-256 with an allowlist (this platform's
+  addon, model B, the VAD, the licences; no zh-en model, no other platform's addon), the utility's
+  entry in `app.asar`, and that the engine starts from the installed app (model B alone).
+  `release.yml` fetches the engine (`npm run fetch:wake -- --platform win32-x64`, never
+  `--with-zhen`) and runs `node scripts/wake-smoke.mjs --no-zhen` before `dist:win`.
+  `.github/workflows/release.yml` fetches go2rtc (`npm run fetch:go2rtc -- --platform win32-x64`)
+  before `dist:win`, checks the installed `go2rtc.exe` against the pinned SHA-256, and runs it against the silently installed NSIS build on windows-latest
   (`--software-webgl`: the runner has no GPU), then installs the same build over itself (the update
   path: the previous version's uninstaller runs with `/S --updated`) and checks that the per-user voice
   folder and the settings folder survive the update and a silent uninstall. An interactive uninstall
   asks before deleting those two folders (default No; `electron/assets/installer.nsh`).
+
+## 9. Home camera (Tapo C211)
+
+A TP-Link Tapo pan/tilt camera as a home security camera; user guide and technical details in
+[TAPO.md](TAPO.md). Off by default (`tapo.enabled`).
+
+* **Main** (`electron/tapo/`, composed by `createTapo()` in `index.js`): ONVIF Profile S over plain
+  HTTP on port 2020 with hand-written SOAP and WS-Security PasswordDigest (`onvif-soap.js`,
+  `onvif-client.js`), pan/tilt with motor watchdogs, press-and-hold heartbeats and calibration
+  (`ptz.js`, `calibration.js`), the camera's PullPoint events (`events.js`), the bundled **go2rtc**
+  1.9.14 as a supervised sidecar on `127.0.0.1` (random port, random Basic credentials; `go2rtc.js`)
+  that pulls the camera's RTSP through an auth proxy in main (`rtsp-auth-proxy.js`: loopback,
+  a random path token, Digest only, never Basic, TEARDOWN on stop), so go2rtc never has the
+  Camera Account; its fMP4 parsed in main (`fmp4.js`,
+  `stream-relay.js`) and fanned out to the clip recorder (`recorder.js`, `retention.js`,
+  `event-store.js`) and to the camera window's worker over a `MessagePortMain`, the pure security
+  engine (`security-engine.js`), Windows notifications (`alerts.js`), the password store
+  (`credentials.js`, `safeStorage` async / DPAPI) and the camera window (`camera-window.js`).
+  A wrong password is tried once and then not again until it or the address changes (camera
+  lockouts); go2rtc starts only after the ONVIF sign-in worked. A health check (every 2 s) finds a
+  camera that dropped off mid-session (unauthenticated `GetSystemDateAndTime` after a 10 s video
+  stall or failing events) and shows an armed camera that is not watching
+  (`status.security.watching`, the tray's *Armed · camera offline*); armed, a `powerSaveBlocker`
+  keeps the PC awake and `powerMonitor` *resume* reconnects; quitting while armed asks first;
+  `security.startAtLogin` sets the login item (packaged Windows/macOS builds). The camera window
+  has two more invoke channels, `lm:tapo:retry` and `lm:tapo:diagnostics` (the redacted report,
+  `diagnostics.js`).
+* **Windows:** the Home camera window (`src/tapo/`, `app://lawnmower/tapo/index.html`) is a normal
+  framed, sandboxed window with its own preload (§3). Closing it hides it: its security worker
+  (WebCodecs decoding, 64×36 motion, the MediaPipe EfficientDet-Lite0 int8 person detector,
+  snapshots, the calibration's shift estimate) keeps running while the camera is armed. The avatar
+  window gets `window.lawnmower.tapo` (§3): alerts make the avatar wake, look toward the camera
+  window (`onLook`) and speak (`src/tapo/avatar-link.js`); short commands such as "camera left" run
+  locally (`src/tapo/intents.js`, through `controller.setCommandInterceptor`).
+* **Clips** are served to both windows by the `app://lawnmower/__clips/` mount of
+  `electron/app-protocol.js` (our file names only, Range requests for seeking); event `.json` files
+  are not served.
+* **Claude:** `createTapo().mcpServers()` is the in-process MCP server `lawnmower-camera`
+  (`camera-mcp.js`: `camera_status`, `camera_look`, `camera_snapshot`, `camera_events`,
+  `security_arm`; Claude can arm but never disarm). `ClaudeSession` offers it over the stream-json
+  control channel (`initialize.sdkMcpServers` + `control_request{subtype:'mcp_message'}`, "G1").
+  If a CLI's `system/init` then lacks the server's tools, the session switches for the rest of the
+  app session (chat and assistant modes only: in agent mode Claude's Bash tool could read the
+  token from the CLI's environment and skip the approval card, so agent mode stays on G1) to the
+  server's loopback Streamable-HTTP endpoint ("G2", `mcp-http.js`):
+  `startHttp(): Promise<{ url: 'http://127.0.0.1:<port>/mcp', token }>` (idempotent while running)
+  and `stopHttp(): Promise<void>`; the CLI gets `--mcp-config <userData>/mcp/lawnmower-camera.json`
+  (with `--strict-mcp-config`), whose `Authorization: Bearer ${LM_MCP_TOKEN}` header names an
+  environment variable set only in the CLI's environment; the endpoint refuses requests without the
+  token, with an `Origin` header or with another `Host`. `toolPermissions()` maps
+  `security.claudeSee` / `claudeMove` to `--allowedTools` / `--disallowedTools` (`camera_status` and
+  `camera_events` are always pre-approved, `security_arm` never, `camera_look` not while armed;
+  the tools' texts never carry the camera's address), and `personaContext()` adds the
+  camera paragraph to the persona. Main hands both to the session again whenever they change
+  (a settings change or a status change, e.g. a password saved), which restarts the CLI after the
+  running turn and resumes the conversation.
+* **main.js wiring:** `createTapo()` runs after the settings are loaded, in the same synchronous
+  block as `protocol.handle` (whose `mounts` array then receives the clip mount; the camera window
+  opens on the next tick); `onSettingsChanged` calls `tapo.applySettings(next, prev)` and forwards
+  `lm:settings:changed` to the camera window; the tray gets a *Home camera* submenu
+  (`tapo.trayState()`, `tapo.trayActions`); `shutdown()` waits for `tapo.stop()` (bounded at about
+  4 s: Stop the motor, Unsubscribe, finish the clip, kill go2rtc); closing the avatar window quits
+  the app (the hidden camera window would otherwise keep it running); with `LAWNMOWER_E2E=1`,
+  `globalThis.__lawnmowerE2E.tapo` exposes the camera's test hooks.
+* **Packaging:** `npm run fetch:go2rtc` downloads the pinned go2rtc release (SHA-256 checked) into
+  `vendor/go2rtc/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy it
+  to `resources/tapo/go2rtc(.exe)` with `resources/tapo/go2rtc-LICENSE.txt`. The person detector
+  model is committed in `public/assets/security/` and ships in `app.asar`.
+* **Known issue (software GL):** the camera worker samples frames with `createImageBitmap` +
+  `getImageData` (motion, calibration shift). Without a GPU (SwiftShader under xvfb, CI) that
+  readback is a synchronous round trip to the GPU process and, on a loaded machine, took 0.8 s
+  and in some tapo-e2e runs blocked the worker for ~16 s while the calibration dialog was open
+  (measured with temporary instrumentation; the integrator's a71cdd1 shows the same failure).
+  Main's chunk flow control keeps the backlog bounded, the worker confirms a still reference
+  picture before the camera moves, and main waits for a stalled worker's measurement (25 s). A
+  stalled worker decodes frames that left the camera before the last move, which once made
+  calibration store a mirrored pan the wrong way round; so main stamps every relayed sample with
+  its monotonic receive time, the calibration's `shift-ref` / `shift-measure` carry `after` (when
+  the last move ended) and the worker uses only frames that reached main later, naming the one it
+  used; main ignores answers without that gate, never measures without a reference picture, and
+  checks each axis on the way back (TAPO.md §10.1). A longer stall makes it ask the user, never
+  guess. A video that lags the motor before it reaches main (the camera, Wi-Fi, go2rtc on a busy
+  PC) passes that gate, so the worker also says whether the picture moved and settled, when it
+  first changed and how a new reference compares with the frame the last measurement ended on
+  (`vsLast`); the wizard uses a measurement only when the picture followed the move and settled,
+  takes the reference at the turned position only when it still shows that frame, waits out the
+  learnt lag, and otherwise asks and measures nothing more (simulated with the simulator's
+  `videoLagMs`: `tapo-e2e --video-lag`). The stall itself: one `getImageData` of the motion sample blocked the worker for 62.7 s
+  in tapo-e2e under load (5 of 6 calibration runs then had to ask). The worker now reads decoded
+  frames in a CPU format (I420, NV12, RGBA…) with `VideoFrame.copyTo()` (asynchronous, about a
+  millisecond for 640×360; `src/tapo/worker/frame-pixels.js`) and box-downscales them itself;
+  only other frames (GPU-only, the mock's ImageBitmaps) still go through the canvas, and a copy
+  that fails once switches back to it. With that, 6 of 6 loaded calibration runs measured
+  without asking.
+* **Known issue (Linux only):** child processes started by main (go2rtc, the Claude CLI) inherit
+  Electron's internal file descriptors that are not marked close-on-exec (Chromium IPC sockets,
+  `/dev/shm` regions). Closing them needs a native exec helper (`close_range(3, ~0)`), which the
+  app does not ship. Windows, the supported platform, passes only handles marked inheritable;
+  not verified there.
+
+## 10. "Hey Jade" (wake word)
+
+Jade listens for her name hands-free; user guide and measured numbers in [WAKE.md](WAKE.md). Off by
+default (`wake.enabled`); the microphone and the utility process run only while it is on (the
+utility also stops once the local voice has been unusable for a minute, and starts with it again).
+
+* **Two stages.** Stage 1 is open-vocabulary keyword spotting with **sherpa-onnx 1.13.8**: two
+  tiny models on the same audio, OR-ed — model A `kws-zipformer-zh-en-3M` (when it is on the user's
+  PC) and model B `kws-zipformer-gigaspeech-3.3M` (always), both with a `HEY_JUDE` label that soaks
+  up the song — behind Silero VAD v4 and an onset recipe (a fresh stream at each speech onset after
+  ≥ 0.6 s of quiet, 0.4 s pre-roll, a 0.7 s hangover) and a level normaliser. Stage 2 is the app's
+  own `/stt` (faster-whisper on the GPU) on the wake segment only, with a veto rule
+  (`src/wake/phrase.js`); the command is cut from the audio at the keyword's end and transcribed on
+  its own.
+* **Main** (`electron/wake/`, composed by `createWake()` in `index.js`): `host.js` forks
+  `electron/wake/utility/main.js` as `utilityProcess` "Jade wake word" (inside `app.asar` when
+  packaged; a minimal environment), sends it the model paths and keywords (`config.js`,
+  `paths.js`), pings it every 10 s and kills it after 30 s of silence (a frozen utility), restarts
+  it after 1 / 5 / 30 s (at most 5 in 10 min; `lm:wake:restart` = the drawer's **Retry**, a fresh
+  budget) and hands the renderer a new port after each restart; `zhen.js` checks and downloads model A through the voice package
+  (`python -m lawnmower_voice.download --kws-only`, once per run, never while the local voice is
+  off) and restarts the utility with it; `power.js` forwards lock / unlock / suspend / resume
+  (`lm:wake:power` `{ state, seq }`, plus a `power` snapshot in the status: the renderer releases
+  the microphone while the PC is locked or asleep, and a PC woken at the lock screen stays locked); `mic-access.js`
+  reads the Windows privacy switch; `clips.js` writes an explicit test clip (the only file the
+  feature ever writes). `ipc.js` registers the `lm:wake:*` channels for the avatar window only.
+* **Utility** (`electron/wake/utility/`): imports `lockdown.js` first (a module-resolve hook
+  refuses `net`, `http(s)`, `dgram`, `child_process`, `worker_threads`, …; `fetch` and `WebSocket`
+  are removed; an in-process check, not an OS sandbox), loads the raw N-API addon with `createRequire` (no
+  `node_modules`, no JS wrapper; `sherpa.js`), runs the recipe (`engine.js`, `../recipe.js`,
+  `../agc.js`) on the frames from the port, and posts hits (`{ t:'hit', keyword, model, startAt,
+  endAt, … }`), VAD edges and stats back. It opens no sockets and writes no files.
+* **Renderer** (`src/wake/`): `feature.js` (WakeFeature) connects the port (`port.js`), the mic tap
+  and 3 s ring (`src/audio/mic.js`), the pure `WakeMachine` (`machine.js`: off · unavailable ·
+  starting · paused · locked · blocked · muted · waiting · attention · listening · followup · look ·
+  busy · barge, mirrored in `body[data-wake]`), the self mask (`self-mask.js`: a hit during her own
+  sentence containing her name is ignored), earcons through the player's AudioContext
+  (`earcons.js`, `src/audio/player.js` `playCue`, master-gain duck), and the chip, drawer rows and
+  one-time card (`ui.js`). Without the local voice it is `unavailable` and the microphone stays
+  closed.
+* **main.js wiring:** `createWake()` runs after the voice sidecar (it needs `voiceDir` and the venv
+  dirs) and before `registerIpc()`; the tray gets *Listen for "Hey Jade"* and ` · Jade: …` in the
+  tooltip (`wake.trayState()`, `wake.trayActions`, rebuilt when that entry changes); the persona's
+  wake section (`wake.personaContext()`) is merged with the camera's into the CLI's context and its
+  spawn key, so turning the wake word on or off rewrites the persona after the running turn;
+  `onSettingsChanged` calls `wake.applySettings(next, prev)`; `lm:window:show` shows the window
+  without the focus after a verified wake; `shutdown()` waits for `wake.stop()` (≈ 2 s, then the
+  utility is killed); with `LAWNMOWER_E2E=1`, `globalThis.__lawnmowerE2E.wake` exposes `status`,
+  `utilityPid`, `metrics`, `emitPower`, `lastHits`, `stats`, `restartUtility`, `wakeDir`,
+  `addonPath`, `zhenDir`.
+* **Persona:** `electron/persona.js` (`PERSONA_VERSION` 2): she is Jade and runs on Claude
+  (Anthropic), never claims to be human, and never says a greeting or "say" right before her own
+  name (those words would wake her); the identity rules survive a custom persona.
+* **Packaging:** `npm run fetch:wake` downloads the pinned engine (SHA-256 checked) into
+  `vendor/wake/` (git-ignored); `build.win.extraResources` / `build.linux.extraResources` copy this
+  platform's addon, `models/gigaspeech-3.3m`, `models/silero_vad.onnx` and `LICENSES/` to
+  `resources/wake/` (≈ 30 MB on Windows). Model A has no stated licence: it is never packaged
+  (`--with-zhen` writes only to `vendor/wake/dev-models/`, which no rule copies); the voice setup
+  downloads it on the user's PC into `<voice models>/kws/zh-en-3m/`. Without it Jade runs on B alone.

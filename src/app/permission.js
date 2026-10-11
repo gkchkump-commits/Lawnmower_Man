@@ -8,6 +8,8 @@
  *                             text the model wrote (that goes in `explanation`)
  * @property {string} [explanation] the model's own description of the call (Bash/PowerShell);
  *                             shown as "Claude says: …", never as the title
+ * @property {string} [note]   the app's own fixed explanation (camera tools); shown as it is,
+ *                             never attributed to Claude
  * @property {string} target   the main subject (command, file path, URL, query) — may be ''
  * @property {string} [detail] a longer preview (file content, edit diff, prompt)
  * @property {'danger'|'write'|'read'|'web'|'other'} risk
@@ -35,6 +37,32 @@ export function clip(v, max) {
   }
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
+
+// ---- Home camera (the in-app MCP server "lawnmower-camera", contract §8.12) -----------------
+export const CAMERA_TOOL_PREFIX = 'mcp__lawnmower-camera__';
+
+/** "camera_snapshot" for a Home camera tool, else null. @param {string} name */
+export function cameraTool(name) {
+  return typeof name === 'string' && name.startsWith(CAMERA_TOOL_PREFIX) ? name.slice(CAMERA_TOOL_PREFIX.length) : null;
+}
+
+/** "the front door camera" ('' / 'camera' → "the camera"). @param {unknown} name */
+export function theCamera(name) {
+  const n = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!n) return 'the camera';
+  return /^(the|my|our)\s/i.test(n) ? n : `the ${n}`;
+}
+
+/** What camera_look asks for, in words: "left", "left (a bit)", "to Door", "back home". @param {Record<string, any>} inp */
+function lookTarget(inp) {
+  if (inp.home) return 'back to its home position';
+  if (typeof inp.preset === 'string' && inp.preset) return `to ${inp.preset}`;
+  const dir = { left: 'left', right: 'right', up: 'up', down: 'down' }[/** @type {string} */ (inp.direction)];
+  if (!dir) return '';
+  const amount = inp.amount === 'small' ? ' a little' : inp.amount === 'large' ? ' all the way' : '';
+  return `${dir}${amount}`;
+}
+// ---- end Home camera ------------------------------------------------------------------------
 
 /** @param {string} p */
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || String(p || '');
@@ -146,6 +174,24 @@ export function summarizeToolInput(toolName, input, o = {}) {
       s = { title: 'Start a sub-agent', explanation: inp.description ? clip(inp.description, 300) : '', target: '', detail: show(inp.prompt, MAX_DETAIL), risk: 'other', fields: rest(['description', 'prompt']) };
       break;
     default: {
+      // ---- Home camera tools: fixed wording, the input's own words only as the target
+      const cam = cameraTool(name);
+      if (cam === 'camera_snapshot') {
+        s = { title: 'Look through the home camera', note: 'Claude gets one picture from the camera (it becomes part of the conversation).', target: inp.preset ? show(`after turning to ${inp.preset}`, MAX_TARGET) : '', risk: 'other', fields: rest(['preset']) };
+        break;
+      }
+      if (cam === 'camera_look') {
+        s = { title: 'Turn the home camera', target: show(lookTarget(inp), MAX_TARGET), risk: 'other', fields: rest(['direction', 'amount', 'preset', 'home']) };
+        break;
+      }
+      if (cam === 'security_arm') {
+        s = { title: 'Arm the home camera', note: 'It starts watching after the exit delay. Claude cannot disarm it.', target: '', risk: 'other', fields: rest([]) };
+        break;
+      }
+      if (cam === 'camera_status' || cam === 'camera_events') {
+        s = { title: cam === 'camera_status' ? 'Check the home camera' : 'List what the home camera saw', target: '', risk: 'read', fields: rest([]) };
+        break;
+      }
       const mcp = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(name);
       const title = mcp ? `Use ${mcp[2].replace(/_/g, ' ')} (${mcp[1]})` : `Use ${name}`;
       s = { title, target: '', risk: 'other', fields: rest([]) };
@@ -156,9 +202,20 @@ export function summarizeToolInput(toolName, input, o = {}) {
 
 /**
  * What the avatar says when a permission card appears.
- * @param {string} toolName @param {Record<string, any>} [input]
+ * @param {string} toolName @param {Record<string, any>} [input] @param {{ cameraName?: string }} [ctx]
  */
-export function spokenPermissionPrompt(toolName, input = {}) {
+export function spokenPermissionPrompt(toolName, input = {}, ctx = {}) {
+  const cam = cameraTool(toolName);
+  if (cam) {
+    const the = theCamera(ctx.cameraName);
+    if (cam === 'camera_snapshot') return `Claude would like to look through ${the}. Allow it?`;
+    if (cam === 'camera_look') {
+      const where = lookTarget(input || {});
+      return where ? `Claude would like to turn ${the} ${where}.` : `Claude would like to turn ${the}.`;
+    }
+    if (cam === 'security_arm') return `Claude would like to arm ${the}. Allow it?`;
+    return `May I check ${the}?`;
+  }
   switch (toolName) {
     case 'Bash':
     case 'PowerShell':
@@ -188,6 +245,8 @@ function spokenFile(p) {
  * @param {string} toolName
  */
 export function toolCue(toolName) {
+  const cam = cameraTool(toolName);
+  if (cam) return cam === 'camera_look' ? 'Turning the camera.' : cam === 'camera_snapshot' ? 'Let me take a look.' : cam === 'security_arm' ? 'One moment.' : 'Let me check the camera.';
   switch (toolName) {
     case 'Read':
     case 'Glob':
@@ -208,8 +267,23 @@ export function toolCue(toolName) {
   }
 }
 
+/**
+ * The tool's name as the card header and the "Allowed / Denied" line show it: "Camera: snapshot"
+ * for a Home camera tool (not mcp__lawnmower-camera__camera_snapshot), else the tool's own name.
+ * @param {string} name @param {Record<string, any>} [input]
+ */
+export function toolDisplayName(name, input) {
+  return cameraTool(name) ? toolChipLabel(name, input || {}) : name;
+}
+
 /** One-line label for a tool chip in the transcript. @param {string} name @param {Record<string, any>} input */
 export function toolChipLabel(name, input) {
+  const cam = cameraTool(name);
+  if (cam) {
+    const where = cam === 'camera_look' ? lookTarget(input || {}) : '';
+    return { camera_status: 'Camera: status', camera_events: 'Camera: events', camera_snapshot: 'Camera: snapshot', security_arm: 'Camera: arm' }[cam]
+      || (cam === 'camera_look' ? `Camera: turn${where ? ` ${where}` : ''}` : `Camera: ${cam.replace(/_/g, ' ')}`);
+  }
   const s = summarizeToolInput(name, input);
   const t = s.target ? `: ${clip(s.target.replace(/\s+/g, ' '), 70)}` : '';
   switch (name) {

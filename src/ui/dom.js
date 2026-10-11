@@ -68,6 +68,7 @@ export const ICONS = Object.freeze({
   info: 'M12 8h.01M11 12h1v5h1M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z',
   warn: 'M12 4l9 16H3zM12 10v4M12 17h.01',
   plus: 'M12 5v14M5 12h14',
+  camera: 'M4 8h3l1.5-2h7L17 8h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z',
 });
 
 /**

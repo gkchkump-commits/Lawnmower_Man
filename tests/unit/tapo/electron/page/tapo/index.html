@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Home camera harness</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0f14; color: #d8e1ea; font: 13px/1.4 system-ui, sans-serif; }
+    main { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    header, footer { padding: 8px 12px; }
+    canvas { width: 100%; height: 100%; object-fit: contain; background: #000; image-rendering: pixelated; }
+    #wrap { min-height: 0; padding: 0 12px; }
+    code { color: #8fd3ff; }
+  </style>
+  <script type="module" src="./main.js"></script>
+</head>
+<body>
+  <main>
+    <header>Home camera harness (lane A): preload bridge, worker port, WebCodecs decode, clip playback</header>
+    <div id="wrap"><canvas id="view" width="160" height="90"></canvas></div>
+    <footer id="status">starting…</footer>
+  </main>
+</body>
+</html>

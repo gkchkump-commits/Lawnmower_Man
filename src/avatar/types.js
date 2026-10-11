@@ -12,12 +12,18 @@
  * @property {number} [seed]          deterministic particles / noise / blinks
  * @property {number} [fixedTime]     freeze the clock at this time (seconds) -> deterministic renders
  * @property {boolean} [transparent]  true: premultiplied black->alpha output (desktop overlay); false: opaque black
- * @property {number} [opacity]       0..1 how much the head occludes the desktop when transparent (default 0.88)
+ * @property {number} [opacity]       0..1 how much the head occludes the desktop when transparent (default 0.94)
  * @property {number} [idleMotion]    idle sway / saccade amount (default 1, 0 for visual diffs)
+ * @property {number} [expressiveness] 0..2 how much speech moves the head, brows and face (default 1;
+ *           settings avatar.expressiveness)
+ * @property {number} [liveliness]    0..2 how much spontaneous behaviour (look-arounds, posture shifts, small
+ *           gestures; default 1, 0 = none; settings avatar.liveliness; src/avatar/behavior.js)
+ * @property {boolean} [projector]    a projector's cone of light under the bust (default false; settings avatar.projector)
  * @property {number} [zoom]          camera zoom (default 1)
  * @property {Record<string,string>} [colors]  palette overrides: eye, line, rim, grid, wisp, mote (hex)
  * @property {boolean} [autoStart]    start the render loop (default true)
- * @property {boolean} [autoQuality]  step quality down one tier after ~3 s below 24 fps (default
+ * @property {boolean} [autoQuality]  after ~3 s below ~50 fps (src/avatar/quality.js
+ *           QualityGovernor) lower the resolution, then the tier, one step at a time (default
  *           true, false with fixedTime)
  */
 

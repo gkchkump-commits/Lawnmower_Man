@@ -1,14 +1,13 @@
 // Cursor → avatar gaze (avatar.lookAt takes -1..1, y up, in canvas space).
 //
 // Inside the avatar stage the eyes track the pointer exactly as before. Outside it (the global
-// cursor from the main process can be anywhere on the desktop) the gaze keeps pointing toward
-// the cursor but its strength falls off gently with distance, so a cursor across the screen
-// gives a relaxed sideways look instead of eyes pinned to the corners.
-
-/** Gaze strength far away from the stage (0..1). */
-export const FAR_GAZE = 0.45;
-/** Distance (in stage half-sizes beyond the stage edge) at which half of the falloff has happened. */
-export const FALLOFF_HALF = 3;
+// cursor from the main process can be anywhere on the desktop) the gaze points toward the cursor:
+// its direction, projected onto the stage edge, at full strength. The strength used to ease off
+// with distance (a relaxed sideways look for a cursor across the screen), but a strength that
+// shrinks with distance grows as the cursor comes closer, so a cursor approaching the window
+// turned the eyes away from it first (audit D15). The look is not held forever anyway: it relaxes
+// 5 s after the cursor stops (src/main.js), and the head now takes a share of a large look, so the
+// eyes are not pinned to the corners of the eye.
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -25,8 +24,7 @@ export function gazeFromPoint(x, y, rect) {
   // distance from the stage centre in "stage half-sizes" (1 = on the edge)
   const e = Math.max(Math.abs(nx), Math.abs(ny));
   if (e <= 1) return [clamp(nx, -1, 1), clamp(ny, -1, 1)];
-  // outside: project onto the stage edge (keeps the direction, continuous at the edge), then
-  // ease the strength from 1 at the edge toward FAR_GAZE far away
-  const falloff = 1 - (1 - FAR_GAZE) * (1 - 1 / (1 + (e - 1) / FALLOFF_HALF));
-  return [(nx / e) * falloff, (ny / e) * falloff];
+  // outside: project onto the stage edge (keeps the direction, continuous at the edge; each
+  // component moves the same way as the cursor)
+  return [nx / e, ny / e];
 }

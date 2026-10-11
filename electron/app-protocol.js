@@ -4,8 +4,10 @@
 // from app.asar in packaged builds.
 
 /* global Response */
+import nodeFs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 export const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -36,6 +38,7 @@ export const MIME_TYPES = Object.freeze({
   '.obj': 'text/plain; charset=utf-8',
   '.bin': 'application/octet-stream',
   '.task': 'application/octet-stream',
+  '.tflite': 'application/octet-stream',
   '.npy': 'application/octet-stream',
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg',
@@ -82,7 +85,40 @@ export function resolveSafePath(root, pathname, P = path) {
 }
 
 /**
- * @param {{ root: string, host?: string, csp?: string, indexFile?: string, fs?: typeof fsp, log?: (level: string, msg: string) => void }} o
+ * A single "Range: bytes=…" against a file of `size` bytes → [start, end] (inclusive), null when
+ * there is none, or 'unsatisfiable'.
+ * @param {string|null} header @param {number} size
+ * @returns {[number, number]|null|'unsatisfiable'}
+ */
+export function parseRange(header, size) {
+  if (!header) return null;
+  // several ranges (bytes=0-1,5-6): a server may ignore Range and send the whole file (RFC 9110)
+  if (header.includes(',')) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (m[1] === '' && m[2] === '')) return header.trim().startsWith('bytes=') ? 'unsatisfiable' : null;
+  let start;
+  let end;
+  if (m[1] === '') {
+    const n = Number(m[2]);
+    if (n === 0) return 'unsatisfiable';
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+  }
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) return 'unsatisfiable';
+  return [start, end];
+}
+
+/**
+ * Extra folders served under a path prefix (the home camera's clips at /__clips/): only names
+ * matching `pattern`, inside the folder (resolveSafePath), GET/HEAD, with Range for video seeking.
+ * @typedef {{ prefix: string, getRoot: () => string|null, pattern: RegExp, range?: boolean }} Mount
+ */
+
+/**
+ * @param {{ root: string, host?: string, csp?: string, indexFile?: string, fs?: typeof fsp, log?: (level: string, msg: string) => void, mounts?: Mount[] }} o
  * @returns {(request: Request) => Promise<Response>}
  */
 export function createAppProtocolHandler(o) {
@@ -96,6 +132,50 @@ export function createAppProtocolHandler(o) {
   const plain = (status, text) =>
     new Response(text, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' } });
 
+  /**
+   * @param {Mount} m @param {string} encodedRel still percent-encoded @param {Request} request @param {string} method
+   */
+  async function serveMount(m, encodedRel, request, method) {
+    let rel;
+    try {
+      rel = decodeURIComponent(encodedRel);
+    } catch {
+      return plain(400, 'Bad request');
+    }
+    const root = m.getRoot();
+    const file = root && m.pattern.test(rel) ? resolveSafePath(path.resolve(root), encodedRel) : null;
+    if (!file) {
+      log('warn', `[app://] blocked ${m.prefix}${encodedRel.slice(0, 200)}`);
+      return plain(403, 'Forbidden');
+    }
+    let st;
+    try {
+      st = await fs.lstat(file);
+      if (!st.isFile()) return plain(404, 'Not found');
+      // a symlinked folder on the way (lstat only sees the last part) must not lead outside
+      const [realRoot, realFile] = await Promise.all([fs.realpath(path.resolve(root)), fs.realpath(file)]);
+      if (!realFile.startsWith(realRoot + path.sep)) {
+        log('warn', `[app://] blocked ${m.prefix}${encodedRel.slice(0, 200)} (outside the folder)`);
+        return plain(403, 'Forbidden');
+      }
+    } catch {
+      return plain(404, 'Not found');
+    }
+    /** @type {Record<string, string>} */
+    const headers = { 'Content-Type': mimeTypeFor(file), 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache' };
+    if (m.range) headers['Accept-Ranges'] = 'bytes';
+    const range = m.range ? parseRange(request.headers.get('range'), st.size) : null;
+    if (range === 'unsatisfiable') return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${st.size}` } });
+    const [start, end] = range || [0, st.size - 1];
+    const length = st.size === 0 ? 0 : end - start + 1;
+    headers['Content-Length'] = String(length);
+    if (range) headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`;
+    const status = range ? 206 : 200;
+    if (method === 'HEAD' || length === 0) return new Response(null, { status, headers });
+    const body = /** @type {any} */ (Readable.toWeb(nodeFs.createReadStream(file, { start, end })));
+    return new Response(body, { status, headers });
+  }
+
   return async function handleAppRequest(request) {
     let url;
     try {
@@ -106,6 +186,10 @@ export function createAppProtocolHandler(o) {
     if (url.host !== host) return plain(404, 'Not found');
     const method = (request.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') return plain(405, 'Method not allowed');
+
+    for (const m of o.mounts || []) {
+      if (url.pathname.startsWith(m.prefix)) return serveMount(m, url.pathname.slice(m.prefix.length), request, method);
+    }
 
     let pathname = url.pathname;
     if (pathname === '' || pathname.endsWith('/')) pathname += indexFile;
@@ -134,7 +218,11 @@ export function createAppProtocolHandler(o) {
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'no-cache',
     };
-    if (o.csp && /\.html?$/i.test(file)) headers['Content-Security-Policy'] = o.csp;
+    // Pages and scripts carry the CSP. A dedicated/module worker (the face tracker) takes its
+    // policy from its own script's response, not from the page: without it the worker could
+    // fetch anything (MediaPipe's built-in usage metrics to Google, for one). Scripts loaded by
+    // the page ignore the header.
+    if (o.csp && /\.(html?|m?js)$/i.test(file)) headers['Content-Security-Policy'] = o.csp;
     try {
       if (method === 'HEAD') {
         const st = await fs.stat(file);

@@ -1,0 +1,7 @@
+{
+  "name": "lawnmower-tapo-sim",
+  "private": true,
+  "description": "Test-only Tapo C211 camera simulator (ONVIF + RTSP). `node tools/tapo-sim` runs cli.mjs.",
+  "type": "module",
+  "main": "cli.mjs"
+}

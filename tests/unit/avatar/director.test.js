@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ANIM_KEYS, BLINK_TOTAL, Director, STATES, blinkCurve, createAnimState, lipSmooth,
+  ANIM_KEYS, BLINK_CLOSE, BLINK_HOLD, BLINK_TOTAL, Director, STATES, blinkCurve, createAnimState, lipSmooth, worldGaze,
 } from '../../../src/avatar/director.js';
+import { GAZE_DEG } from '../../../src/avatar/eyes.js';
 
 /** Run a director at a fixed frame rate, calling `each(t, a)` every frame. */
 function run(d, seconds, fps = 60, each = () => {}, t0 = 0) {
@@ -38,16 +39,35 @@ describe('createAnimState', () => {
 });
 
 describe('blinkCurve', () => {
-  it('closes fast, holds, opens slower and returns to 0', () => {
+  it('closes with the speed peaking late, touches briefly, opens ~2.5x slower and returns to 0', () => {
     expect(blinkCurve(-0.01)).toBe(0);
     expect(blinkCurve(0)).toBe(0);
-    expect(blinkCurve(0.07)).toBeCloseTo(1, 5);
-    expect(blinkCurve(0.09)).toBe(1);
+    expect(blinkCurve(BLINK_CLOSE)).toBeCloseTo(1, 5);
+    expect(blinkCurve(BLINK_CLOSE + BLINK_HOLD / 2)).toBe(1);
     expect(blinkCurve(BLINK_TOTAL)).toBe(0);
-    // opening takes longer than closing
-    const closeT = 0.035, openT = 0.07 + 0.04 + 0.065;
-    expect(blinkCurve(closeT)).toBeCloseTo(0.5, 1);
-    expect(blinkCurve(openT)).toBeCloseTo(0.5, 1);
+    const at = (v, from, to, rising) => {
+      for (let t = from; t <= to; t += 0.0005) if (rising ? blinkCurve(t) >= v : blinkCurve(t) <= v) return t;
+      return NaN;
+    };
+    // closing: half closed after more than half of the close time (it accelerates)
+    expect(at(0.5, 0, BLINK_CLOSE, true)).toBeGreaterThan(0.55 * BLINK_CLOSE);
+    const close = at(0.9, 0, BLINK_CLOSE, true) - at(0.1, 0, BLINK_CLOSE, true);
+    const o0 = BLINK_CLOSE + BLINK_HOLD;
+    const open = at(0.1, o0, BLINK_TOTAL, false) - at(0.9, o0, BLINK_TOTAL, false);
+    expect(open / close).toBeGreaterThan(2);
+    expect(open / close).toBeLessThan(3.5);
+    // closed (>= 90 %) only briefly, as in people (20-50 ms): the glowing eyes barely go dark
+    let closed = 0;
+    for (let t = 0; t < BLINK_TOTAL; t += 0.0005) if (blinkCurve(t) >= 0.9) closed += 0.0005;
+    expect(closed).toBeGreaterThan(0.02);
+    expect(closed).toBeLessThan(0.05);
+    // smooth: no velocity steps (zero speed at the start, the touch and the end)
+    const v = (t) => (blinkCurve(t + 1e-4) - blinkCurve(t - 1e-4)) / 2e-4;
+    expect(Math.abs(v(1e-4))).toBeLessThan(0.5);
+    expect(Math.abs(v(BLINK_CLOSE - 2e-4))).toBeLessThan(2);
+    expect(Math.abs(v(BLINK_TOTAL - 2e-4))).toBeLessThan(0.5);
+    // custom phase lengths
+    expect(blinkCurve(0.05, { close: 0.05, hold: 0, open: 0.2 })).toBeCloseTo(1, 5);
   });
 });
 
@@ -158,16 +178,24 @@ describe('Director', () => {
     expect(a.think).toBeGreaterThan(0.95);
   });
 
-  it('follows lookAt and releases it', () => {
+  it('follows lookAt and releases it; the head takes a share and the eyes counter-rotate', () => {
     const d = new Director({ seed: 6, idleMotion: 0 });
     d.lookAt(1, -1);
     const { a } = run(d, 1);
-    expect(a.gazeX).toBeGreaterThan(0.7);
-    expect(a.gazeY).toBeLessThan(-0.6);
+    const g = worldGaze(a);
+    // the world gaze is on the target (14.6 deg right, 8 deg down), not beyond it (no eye + head
+    // overshoot)
+    expect(g.x).toBeGreaterThan(0.8);
+    expect(g.x).toBeLessThan(0.88);
+    expect(g.y * GAZE_DEG.y).toBeLessThan(-7.5);
+    expect(g.y * GAZE_DEG.y).toBeGreaterThan(-8.5);
     expect(a.headYaw).toBeGreaterThan(0.05);     // the head follows a little
+    expect(a.gazeX).toBeGreaterThan(0.5);        // the eyes do most of it
+    expect(a.gazeX).toBeLessThan(g.x);
     d.lookAt(null);
     const r = run(d, 3, 60, () => {}, 1);
-    expect(Math.abs(r.a.gazeX)).toBeLessThan(0.1);
+    expect(Math.abs(worldGaze(r.a).x)).toBeLessThan(0.05);
+    expect(Math.abs(r.a.gazeX)).toBeLessThan(0.15);
   });
 
   it('lip-sync: fast attack, slower release, decays when visemes stop', () => {

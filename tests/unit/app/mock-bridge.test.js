@@ -118,6 +118,15 @@ describe('mock bridge: claude', () => {
 });
 
 describe('mock bridge: settings, voice, window, hotkeys', () => {
+  it('window.avatarWidth: a number (clamped, even) or null; a preset clears it, as in the real store', async () => {
+    const b = createMockBridge(FAST);
+    expect((await b.settings.get()).window.avatarWidth).toBe(null);
+    expect((await b.settings.set({ window: { avatarWidth: 451 } })).window.avatarWidth).toBe(452);
+    expect((await b.settings.set({ window: { avatarWidth: 5000 } })).window.avatarWidth).toBe(1200);
+    expect((await b.settings.set({ window: { avatarWidth: '9' } })).window.avatarWidth).toBe(1200);
+    expect((await b.settings.set({ window: { sizePreset: 'small' } })).window).toMatchObject({ sizePreset: 'small', avatarWidth: null });
+  });
+
   it('settings merge, validate and notify', async () => {
     const b = createMockBridge({ ...FAST, settings: { avatar: { quality: 'low' } } });
     expect((await b.settings.get()).avatar.quality).toBe('low');

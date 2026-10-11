@@ -37,7 +37,8 @@ describe('layout', () => {
     expect(computeLayout({ width: 560, height: 1120, showChat: true, electron: true })).toEqual({ mode: 'full', chatHeight: 280 });
     // not resized yet after turning the chat on
     expect(computeLayout({ width: 400, height: 600, showChat: true, electron: true }).chatHeight).toBe(180);
-    expect(computeLayout({ width: 400, height: 600, showChat: false, electron: true })).toEqual({ mode: 'minimal', chatHeight: 0 });
+    // minimal mode keeps the strip: the panel drops down into it below the face
+    expect(computeLayout({ width: 400, height: 840, showChat: false, electron: true })).toEqual({ mode: 'minimal', chatHeight: 240 });
   });
 
   it('browser: about a third of the height, clamped', () => {
@@ -105,10 +106,22 @@ describe('AvatarHost', () => {
     await host.apply({ ...AV, quality: 'low', bloom: 0.5 });
     expect(created).toHaveLength(1);
     expect(created[0].options.at(-1)).toEqual({ quality: 'low', particles: 1, bloom: 0.5 });
-    await host.apply({ ...AV, renderer: 'procedural' });
+    // avatar.expressiveness reaches the avatar at creation and when it changes
+    await host.apply({ ...AV, quality: 'low', bloom: 0.5, expressiveness: 1.6 });
+    expect(created).toHaveLength(1);
+    expect(created[0].options.at(-1)).toMatchObject({ expressiveness: 1.6 });
+    await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5 });
     expect(created).toHaveLength(2);
+    expect(created[1].opts.expressiveness).toBe(0.5);
+    // so does avatar.liveliness (the spontaneous behaviour)
+    await host.apply({ ...AV, renderer: 'procedural', expressiveness: 0.5, liveliness: 1.7 });
+    expect(created[1].options.at(-1)).toMatchObject({ liveliness: 1.7 });
+    await host.apply({ ...AV, liveliness: 0.3, projector: true });
+    expect(created[2].opts).toMatchObject({ liveliness: 0.3, projector: true });
+    await host.apply({ ...AV, liveliness: 0.3, projector: false });
+    expect(created[2].options.at(-1)).toMatchObject({ projector: false });
     expect(created[0].disposed).toBe(true);
-    expect(host.avatar.renderer).toBe('procedural');
+    expect(host.avatar.renderer).toBe('relief');
   });
 
   it('coalesces rapid changes: only the latest renderer is built after the current one', async () => {

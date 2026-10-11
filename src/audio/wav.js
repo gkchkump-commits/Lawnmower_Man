@@ -85,6 +85,14 @@ export function decodeWav(input) {
   }
   const frames = Math.floor(dataLen / (bps * channels));
   const out = new Float32Array(frames);
+  // fast path for what the voice server sends (16-bit PCM mono): a typed view instead of a
+  // DataView read per sample, ~3× faster for a long sentence; the very same values
+  const abs = bytes.byteOffset + dataOff;
+  if (format === 1 && bits === 16 && channels === 1 && LITTLE_ENDIAN && abs % 2 === 0) {
+    const s16 = new Int16Array(bytes.buffer, abs, frames);
+    for (let f = 0; f < frames; f++) out[f] = s16[f] / 32768;
+    return { sampleRate, channels, samples: out, durationSec: frames / sampleRate };
+  }
   const read = sampleReader(v, format, bits);
   for (let f = 0; f < frames; f++) {
     let acc = 0;
@@ -94,6 +102,8 @@ export function decodeWav(input) {
   }
   return { sampleRate, channels, samples: out, durationSec: frames / sampleRate };
 }
+
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
 /** @param {DataView} v @param {number} format @param {number} bits @returns {(o: number) => number} */
 function sampleReader(v, format, bits) {
@@ -125,7 +135,16 @@ function readAscii(v, o) {
  * @returns {Uint8Array}
  */
 export function base64ToBytes(b64) {
-  const clean = String(b64 || '').replace(/[\s]/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  const s = String(b64 || '');
+  // the native decoder (Chromium 140+) is ~10× faster than atob and a loop: a sentence of speech
+  // is ~400 kB of base64, decoded on the main thread when it starts playing
+  const native = /** @type {any} */ (Uint8Array).fromBase64;
+  if (typeof native === 'function') {
+    try {
+      return native(s, { lastChunkHandling: 'loose' });
+    } catch { /* URL-safe or otherwise unusual input: the forgiving path below */ }
+  }
+  const clean = s.replace(/[\s]/g, '').replace(/-/g, '+').replace(/_/g, '/');
   const padded = clean + '='.repeat((4 - (clean.length % 4)) % 4);
   if (typeof atob === 'function') {
     const bin = atob(padded);

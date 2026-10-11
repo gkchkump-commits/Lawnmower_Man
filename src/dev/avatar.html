@@ -37,6 +37,7 @@
       button { background: #161c26; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; cursor: pointer; font: inherit; }
       button.active { border-color: var(--accent); color: var(--accent); }
       #hit { color: var(--dim); margin-top: 6px; }
+      #caption { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; color: #fff; font: 600 15px/1.2 system-ui, sans-serif; text-shadow: 0 0 4px #000, 0 0 2px #000; pointer-events: none; }
       @media (max-width: 760px) { #panel { width: 100%; } }
     </style>
   </head>
@@ -46,6 +47,7 @@
         <canvas id="avatar"></canvas>
         <div class="label" id="avatarLabel"></div>
         <div id="stats"></div>
+        <div id="caption" hidden></div>
       </div>
       <div class="view" id="refView" hidden>
         <img id="ref" alt="reference frame" />

@@ -55,6 +55,23 @@ export class Transcript {
   }
 
   /**
+   * The camera snapshot(s) sent to Claude with a user message, as thumbnails labelled
+   * "sent to Claude". Only data:image/jpeg|png|webp URLs (made by src/vision/snapshot.js).
+   * @param {number} id @param {string[]} thumbs
+   */
+  attachImages(id, thumbs) {
+    const msg = this._users.get(id);
+    const urls = (Array.isArray(thumbs) ? thumbs : []).filter((u) => typeof u === 'string' && /^data:image\/(?:jpeg|png|webp);base64,/.test(u));
+    if (!msg || !urls.length) return;
+    msg.querySelector('.msg-shots')?.remove();
+    const label = urls.length > 1 ? `${urls.length} pictures sent to Claude` : 'sent to Claude';
+    msg.appendChild(h('figure', { class: 'msg-shots' },
+      urls.map((src) => h('img', { class: 'msg-shot', src, alt: 'Camera snapshot sent to Claude', draggable: 'false' })),
+      h('figcaption', null, icon('camera', 'icon tiny'), label)));
+    this._scroll();
+  }
+
+  /**
    * failed: could not be sent / was dropped by an error; cancelled: skipped because the user
    * stopped or sent something newer before it started.
    * @param {number} id @param {'failed'|'cancelled'} status @param {string} [detail]

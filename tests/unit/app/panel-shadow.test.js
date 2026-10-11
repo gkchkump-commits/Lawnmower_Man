@@ -51,8 +51,10 @@ describe('chat panel shadows stay inside the transparent window', () => {
   it('the panel keeps its 8 px margin to the window edges', () => {
     const base = panelRules.find((r) => r.selector === '.panel');
     expect(base?.body).toMatch(/margin:\s*0 8px 8px\s*;/);
-    const minimal = panelRules.find((r) => r.selector.includes('[data-chat="minimal"]'));
-    for (const side of ['left', 'right', 'bottom']) expect(minimal?.body).toMatch(new RegExp(`${side}:\\s*${MARGIN}px\\s*;`));
+    // minimal mode keeps the base margins (the panel drops down into the strip, no own offsets)
+    const minimal = panelRules.filter((r) => r.selector.includes('[data-chat="minimal"]'));
+    expect(minimal.length).toBeGreaterThan(0);
+    for (const r of minimal) expect(r.body).not.toMatch(/\b(margin|left|right|bottom)\s*:/);
   });
 
   it('no outer shadow of the panel reaches past the left, right or bottom window edge', () => {

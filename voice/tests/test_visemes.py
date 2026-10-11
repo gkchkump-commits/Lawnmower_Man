@@ -6,6 +6,7 @@ import pytest
 
 from lawnmower_voice.visemes import (
     VISEMES,
+    kokoro_audio_lead,
     normalize_timeline,
     text_to_pseudo_phonemes,
     tokenize,
@@ -96,6 +97,21 @@ def test_timings_accept_tuples_dicts_and_diphthong_pairs():
     tl = visemes_from_timings([("A", 0.0, 0.2)], 0.2)
     assert [s["viseme"] for s in tl] == ["E", "I"]
     assert tl[0]["end"] == pytest.approx(0.12)
+
+
+def test_shift_moves_the_timeline_and_kokoro_lead_depends_on_speed():
+    seq = [("p", 0.2, 0.3), ("a", 0.3, 0.5)]
+    tl = visemes_from_timings(seq, 0.6, shift=-0.05)
+    assert [(s["viseme"], s["start"], s["end"]) for s in tl] == [("sil", 0.0, 0.15), ("PP", 0.15, 0.25), ("aa", 0.25, 0.45), ("sil", 0.45, 0.6)]
+    # a shift past the clip start is clamped (no negative times)
+    early = visemes_from_timings([("a", 0.02, 0.2)], 0.3, shift=-0.05)
+    assert early[0] == {"start": 0.0, "end": 0.15, "viseme": "aa"}
+    # measured on Kokoro: ~50 ms at speed 1, a little more when it speaks slowly
+    assert kokoro_audio_lead(1.0) == pytest.approx(0.05)
+    assert kokoro_audio_lead(None) == pytest.approx(0.05)
+    assert kokoro_audio_lead(0.8) == pytest.approx(0.05625)
+    assert kokoro_audio_lead(1.35) < kokoro_audio_lead(1.0) < kokoro_audio_lead(0.8)
+    assert kokoro_audio_lead(0.1) == kokoro_audio_lead(0.5)  # clamped like the server's speed
 
 
 def test_short_word_gap_holds_shape_long_gap_is_silence():

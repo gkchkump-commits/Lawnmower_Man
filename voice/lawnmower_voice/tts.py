@@ -29,7 +29,7 @@ from .audio import speech_bounds
 from .config import VoiceConfig
 from .device import DeviceReport, resolve_device
 from .engines import INSTALL_HINT, Engine, EngineInputError, EngineUnavailable, TTSResult, is_cuda_error
-from .visemes import visemes_from_phonemes, visemes_from_text, visemes_from_timings
+from .visemes import kokoro_audio_lead, visemes_from_phonemes, visemes_from_text, visemes_from_timings
 
 log = logging.getLogger("lawnmower_voice.tts")
 
@@ -459,7 +459,7 @@ class KokoroOnnxTTS(_TTSBase):
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         duration = len(audio) / float(sr)
         if timings:
-            visemes = visemes_from_timings(timings, duration)
+            visemes = visemes_from_timings(timings, duration, shift=-kokoro_audio_lead(speed))
             if phonemes is None:
                 phonemes = "".join(getattr(t, "phoneme", "") for t in timings)
         else:
@@ -596,7 +596,8 @@ class KokoroTorchTTS(_TTSBase):
         duration = len(audio) / SAMPLE_RATE
         phonemes = " ".join(all_ph)
         if timings:
-            vis = visemes_from_timings(timings, duration)
+            # (same model, same alignment as the ONNX export: not measured on this backend)
+            vis = visemes_from_timings(timings, duration, shift=-kokoro_audio_lead(speed))
         else:
             s, e = speech_bounds(audio, SAMPLE_RATE)
             vis = visemes_from_phonemes(phonemes, duration, s, e)

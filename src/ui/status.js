@@ -1,6 +1,7 @@
 // Status line under the composer: conversation state · Claude CLI status · voice status.
 
 import { h } from './dom.js';
+import { earIcon } from '../wake/ear.js';
 
 export const STATE_LABEL = Object.freeze({
   idle: 'Ready',
@@ -69,7 +70,11 @@ export class StatusLine {
     this.claude = h('span', { class: 'status-claude chip-ok' }, 'Claude…');
     this.voice = h('button', { type: 'button', class: 'status-voice', title: '' }, 'Voice…');
     this.hands = h('span', { class: 'status-hands', hidden: true }, 'hands-free');
-    root.append(this.dot, this.state, h('span', { class: 'status-sep' }, '·'), this.claude, h('span', { class: 'status-sep' }, '·'), this.voice, this.hands);
+    // ---- "Hey Jade": the wake word's chip (src/wake/ui.js chipModel) ----
+    this.wake = /** @type {HTMLButtonElement} */ (h('button', { type: 'button', class: 'status-wake', hidden: true }));
+    this._wakeSlashed = /** @type {boolean|null} */ (null);
+    // ---- end "Hey Jade" ----
+    root.append(this.dot, this.state, h('span', { class: 'status-sep' }, '·'), this.claude, h('span', { class: 'status-sep' }, '·'), this.voice, this.hands, this.wake);
   }
 
   /** @param {string} s */
@@ -97,4 +102,26 @@ export class StatusLine {
   setHandsFree(on) {
     this.hands.hidden = !on;
   }
+
+  // ---- "Hey Jade" ----
+  /**
+   * The wake word's chip: an ear (slashed when the mic is off, blocked or muted) and a word.
+   * @param {{ hidden: boolean, text: string, title: string, slashed: boolean, tone: string }} c
+   */
+  setWake(c) {
+    const el = this.wake;
+    el.hidden = !!c.hidden;
+    if (c.hidden) return;
+    if (this._wakeSlashed !== c.slashed) {
+      this._wakeSlashed = c.slashed;
+      el.textContent = '';
+      el.append(earIcon(c.slashed), h('span', { class: 'status-wake-text' }));
+    }
+    const t = /** @type {HTMLElement} */ (el.querySelector('.status-wake-text'));
+    if (t.textContent !== c.text) t.textContent = c.text;
+    el.title = c.title || c.text;
+    el.dataset.tone = c.tone;
+    el.setAttribute('aria-label', `${c.text}${c.title && c.title !== c.text ? `: ${c.title}` : ''}`);
+  }
+  // ---- end "Hey Jade" ----
 }

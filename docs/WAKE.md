@@ -474,22 +474,23 @@ Jodie" 13 → 0 of 13; clean "Hey Jay / Jane / Jude" 2 → 0 of 26; clean calls 
 End of "Jade" → stage-1 decision, offline: p50 352 / p90 495 ms clean (A + B), 378 / 530 ms with
 noise and reverb.
 
-In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on 4 shared vCPUs at load 2-6; the
-runs of this version, one positive call each, plus 12 calls measured by the review):
+In the real app (`scripts/wake-e2e.mjs`, Linux under xvfb on 4 shared vCPUs at load 2-6; three
+runs of this version with both models, the last one passing all 71 checks, and two passing runs
+with B alone; one positive call each, plus 12 calls measured by the review):
 
 | | both models (A + B) | B alone |
 |---|---|---|
-| end of "Jade" → stage-1 hit in the utility | 219-503 ms (review: p50 411 / p90 550) | 538 ms |
-| end of "Jade" → *attention* shown | 222-593 ms (review: p50 418 / p90 553) | 547 ms |
-| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 250-251 ms | 245 ms |
-| her voice 10 dB down after a barge-in hit (duck to −15 dB) | 44-45 ms | 25 ms |
-| PC locked → microphone track ended | 13-22 ms | 12 ms |
-| PC locked while she listens for a command → track ended | 11 ms | 12 ms |
+| end of "Jade" → stage-1 hit in the utility | 219-532 ms (review: p50 411 / p90 550) | 538-552 ms |
+| end of "Jade" → *attention* shown | 222-593 ms (review: p50 418 / p90 553) | 547-593 ms |
+| *attention* → *listening* (stage 2 on the fake voice server, 200 ms per call) | 250-273 ms | 245-270 ms |
+| her voice 10 dB down after a barge-in hit (duck to −15 dB) | 44-51 ms | 25-55 ms |
+| PC locked → microphone track ended | 10-22 ms | 12-22 ms |
+| PC locked while she listens for a command → track ended | 11-15 ms | 12-14 ms |
 | follow-up window | 6.00 s | 6.00 s |
-| strict thresholds built ahead, once, after 1.5 s of quiet | 4.4 s of CPU | 2.1 s |
-| utility CPU in silence (20 s, after that) | 2.05 % of one core | 1.9 % |
-| utility CPU while people talk without her name | 9.1 % of one core (99-101 ms per second of speech) | 5.5 % (60 ms) |
-| engine start | 4.1-4.5 s | 2.5 s |
+| strict thresholds built ahead, once, after 1.5 s of quiet | 3.2-4.4 s of CPU | 1.7-2.1 s |
+| utility CPU in silence (20 s, after that) | 2.05-2.3 % of one core | 1.9-2.35 % |
+| utility CPU while people talk without her name | 9.1-9.9 % of one core (99-107 ms per second of speech) | 5.5-6.3 % (60-67 ms) |
+| engine start | 3.2-4.5 s | 1.6-2.5 s |
 
 The latency target (attention ≤ 500 ms p50 after the end of "Jade") is met only in some runs
 here, and Windows' echo cancellation of all apps adds about 170 ms of capture delay (§10.4), so

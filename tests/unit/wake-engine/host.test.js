@@ -101,6 +101,45 @@ describe('WakeHost (utility supervision, contract §7.2)', () => {
     expect(logs.join('\n')).toMatch(/exited \(code 3221225477, 0xc0000005; in stage 'ready'\)/);
   });
 
+  it('Windows: a utility started below normal priority is raised to normal (at the spawn, the stages, the pings)', () => {
+    const prio = new Map();
+    const sets = [];
+    const priority = { get: (pid) => prio.get(pid) ?? 0, set: (pid, p) => { sets.push([pid, p]); prio.set(pid, p); } };
+    const { host, up, logs } = make({ platform: 'win32', priority });
+    host.start(init);
+    const c = up.forks[0].child;
+    prio.set(c.pid, 10); // below normal, as Chromium may start it
+    c.emit('spawn');
+    expect(sets).toEqual([[c.pid, 0]]);
+    expect(logs.join('\n')).toMatch(/priority raised from below normal to normal/);
+    prio.set(c.pid, 19); // lowered again later (idle)
+    c.emit('message', { t: 'stage', s: 'models' });
+    expect(sets).toEqual([[c.pid, 0], [c.pid, 0]]);
+    expect(logs.join('\n')).toMatch(/raised from idle to normal/);
+    c.ready(['giga'], 1000);
+    expect(logs.filter((l) => /priority/.test(l))).toHaveLength(2); // nothing logged while it stays normal
+  });
+
+  it('Windows: a normal-priority utility is left alone (logged once); a failing check warns once; elsewhere nothing is asked', () => {
+    const calls = [];
+    const ok = make({ platform: 'win32', priority: { get: (pid) => { calls.push(pid); return 0; }, set: () => { throw new Error('no'); } } });
+    ok.host.start(init);
+    ok.up.forks[0].child.emit('spawn');
+    ok.up.forks[0].child.emit('message', { t: 'stage', s: 'addon' });
+    expect(calls).toHaveLength(2);
+    expect(ok.logs.filter((l) => /priority: normal/.test(l))).toHaveLength(1);
+    const bad = make({ platform: 'win32', priority: { get: () => { throw new Error('access denied'); }, set: () => {} } });
+    bad.host.start(init);
+    bad.up.forks[0].child.emit('spawn');
+    bad.up.forks[0].child.emit('message', { t: 'stage', s: 'addon' });
+    expect(bad.logs.filter((l) => /could not check the wake-word process's priority: access denied/.test(l))).toHaveLength(1);
+    expect(bad.host.state).toBe('starting');
+    const linux = make({ platform: 'linux', priority: { get: () => { throw new Error('asked'); }, set: () => { throw new Error('asked'); } } });
+    linux.host.start(init);
+    linux.up.forks[0].child.emit('spawn');
+    expect(linux.logs.join('\n')).not.toMatch(/priority/);
+  });
+
   it('restarts after 1 s, 5 s, then 30 s; at most 5 in 10 minutes', async () => {
     const { host, up, clock } = make();
     host.start(init);
@@ -282,6 +321,23 @@ describe('WakeHost (utility supervision, contract §7.2)', () => {
     expect(up.forks).toHaveLength(1); // a stop is not a crash
   });
 
+  it('stop() of a utility stuck in a stage that does not even exit when killed: stage off, no restart', async () => {
+    const { host, up, clock } = make();
+    host.start(init);
+    const child = up.last;
+    child.kill = () => true; // hung: no exit event (yet)
+    child.emit('message', { t: 'stage', s: 'models' });
+    const p = host.stop();
+    clock.advance(2000);
+    await p;
+    expect(host.state).toBe('off');
+    expect(host.stage).toBe('off');
+    child.emit('exit', 1); // much later
+    expect(host.stage).toBe('off');
+    clock.advance(60000);
+    expect(up.forks).toHaveLength(1);
+  });
+
   it('stop() returns as soon as the utility exits', async () => {
     const { host, up } = make();
     host.start(init);
@@ -329,7 +385,7 @@ describe('minimalEnv', () => {
       .toEqual({ Path: 'C:\\x', SYSTEMROOT: 'C:\\Windows', TMP: 't', LAWNMOWER_WAKE_DIR: 'w' });
   });
 
-  it('on Windows also the system variables (folders, CPU facts), still nothing about the user and no secrets', () => {
+  it('on Windows also the system-wide variables (folders, CPU facts), not the user\'s profile folders or names, and no secrets', () => {
     const env = {
       Path: 'C:\\x', SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', SystemDrive: 'C:', ProgramData: 'C:\\ProgramData', 'ProgramFiles(x86)': 'C:\\P86',
       NUMBER_OF_PROCESSORS: '4', PROCESSOR_ARCHITECTURE: 'AMD64', DriverData: 'C:\\Windows\\System32\\Drivers\\DriverData', ComSpec: 'C:\\Windows\\system32\\cmd.exe',

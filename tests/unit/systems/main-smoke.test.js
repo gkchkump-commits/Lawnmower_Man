@@ -10,6 +10,7 @@ import { defaultHotkeys } from '../../../electron/settings.js';
 import { windowLayout } from '../../../electron/window-manager.js';
 import { ADDON_FILES, LAYOUT, MODEL_FILES } from '../../../electron/wake/config.js';
 import { platformKey } from '../../../electron/wake/paths.js';
+import { WINDOWS_SYSTEM_VARS } from '../../../electron/wake/host.js';
 
 const m = vi.hoisted(() => {
   const handlers = new Map();
@@ -974,7 +975,11 @@ describe('electron/main.js wiring', () => {
       expect(entry).toBe(path.resolve('electron/wake/utility/main.js'));
       expect(opts).toMatchObject({ serviceName: 'Jade wake word', stdio: 'pipe' });
       expect(opts.env.LAWNMOWER_CLAUDE_CLI).toBe(process.env.LAWNMOWER_CLAUDE_CLI); // LAWNMOWER_* only
-      expect(Object.keys(opts.env).every((k) => /^(PATH|Path|SystemRoot|SYSTEMROOT|TEMP|TMP|TMPDIR|LAWNMOWER_\w+)$/.test(k))).toBe(true);
+      // (on Windows also its system-wide variables; never the user's profile or names, never secrets)
+      const allowed = (/** @type {string} */ k) => /^(PATH|Path|SystemRoot|SYSTEMROOT|TEMP|TMP|TMPDIR|LAWNMOWER_\w+)$/.test(k)
+        || (process.platform === 'win32' && WINDOWS_SYSTEM_VARS.has(k.toUpperCase()));
+      expect(Object.keys(opts.env).filter((k) => !allowed(k))).toEqual([]);
+      expect(Object.keys(opts.env).filter((k) => /^(USERPROFILE|APPDATA|LOCALAPPDATA|USERNAME|USERDOMAIN|COMPUTERNAME|HOMEPATH)$/i.test(k) || /TOKEN|SECRET|PASSWORD|_KEY$/i.test(k))).toEqual([]);
       const init = child.postMessage.mock.calls[0][0];
       expect(init).toMatchObject({ t: 'init', params: { sensitivity: 'normal', phrase: 'hey-jade' } });
       expect(init.addon.startsWith(process.env.LAWNMOWER_WAKE_DIR)).toBe(true);

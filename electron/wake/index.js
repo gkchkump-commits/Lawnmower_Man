@@ -431,7 +431,7 @@ export function createWake(o) {
     e2e: env.LAWNMOWER_E2E === '1' ? {
       status,
       utilityPid: () => host.pid,
-      host: () => ({ state: host.state, stage: host.stage, restarts: host.restarts, lastExit: host.lastExit }),
+      host: () => ({ state: host.state, stage: host.stage, restarts: host.restarts, lastExit: host.lastExit, noRestart: host._noRestart }),
       metrics: () => {
         const rows = safe(() => app.getAppMetrics(), []);
         return rows.filter((/** @type {any} */ r) => (host.pid && r.pid === host.pid) || r.serviceName === SERVICE_NAME || r.name === SERVICE_NAME)

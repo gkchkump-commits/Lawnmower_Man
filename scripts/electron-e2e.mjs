@@ -30,7 +30,7 @@
 //
 // Needs the Electron binary (npm install downloads it) and a display (on headless Linux run it
 // under `xvfb-run -a`). Uses a throwaway userData folder; never touches your real settings.
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { windowLayout } from '../electron/window-manager.js';
 import { ADDON_FILES, LAYOUT, MODEL_FILES } from '../electron/wake/config.js';
+import { READY_CAP_MS } from '../electron/wake/host.js';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -499,18 +500,35 @@ async function wakeChecks(electronApp, page) {
   /** @type {any[]} */
   const trace = [];
   out.trace = trace;
+  // (the whole machine's CPU use between samples: a starved utility on a saturated runner)
+  let cpuPrev = cpuTimes();
   const sample = () => {
     const r = w?.rows.find((x) => x.pid === w.pid);
-    trace.push({ ms: Date.now() - t0, pid: w?.pid ?? null, stage: w?.host?.stage, cpuSec: r?.cumulativeCpuSec ?? null, memKB: r?.memoryKB ?? null, engine: w?.status.engine });
+    const now = cpuTimes();
+    const busy = now.total > cpuPrev.total ? Math.round((100 * (now.busy - cpuPrev.busy)) / (now.total - cpuPrev.total)) : null;
+    cpuPrev = now;
+    trace.push({ ms: Date.now() - t0, pid: w?.pid ?? null, stage: w?.host?.stage, cpuSec: r?.cumulativeCpuSec ?? null, memKB: r?.memoryKB ?? null, prio: priorityOf(w?.pid), machineBusyPct: busy, engine: w?.status.engine });
   };
   sample();
-  // (an engine in 'error' gets one restart after 1 s: wait for that one too)
-  for (let i = 0; i < 150 && w && w.status.engine !== 'ready' && w.status.engine !== 'missing' && !(w.status.engine === 'error' && (w.host?.restarts ?? 0) > 0); i++) {
+  /** @type {Promise<any>|null} */
+  let probe = null;
+  // An engine in 'error' after a timeout gets one restart after 1 s: wait for that one too (each
+  // attempt may take up to READY_CAP_MS). A fatal start error is never retried: stop at once.
+  const until = t0 + 2 * READY_CAP_MS + 15000;
+  const settled = () => w.status.engine === 'ready' || w.status.engine === 'missing'
+    || (w.status.engine === 'error' && ((w.host?.restarts ?? 0) > 0 || w.host?.noRestart));
+  for (let i = 0; w && !settled() && Date.now() < until; i++) {
     await sleep(500);
     w = await e2e();
     if (i % 2 === 1) sample();
-    if (i === 19 && w?.status.engine !== 'ready' && w?.pid && process.platform === 'win32') out.probe = probeWindowsProcess(w.pid);
+    if (i === 3) {
+      // every process of the app with its priority (os.getPriority: 0 normal, 10 below normal, 19 idle)
+      const procs = await electronApp.evaluate(({ app }) => app.getAppMetrics().map((m) => ({ pid: m.pid, type: m.type, name: m.name || m.serviceName || '' })));
+      out.priorities = procs.map((x) => ({ ...x, prio: priorityOf(x.pid) }));
+    }
+    if (i === 15 && w?.status.engine !== 'ready' && w?.pid && process.platform === 'win32') probe = probeWindowsProcess(w.pid);
   }
+  if (probe) out.probe = await probe;
   out.readyMs = Date.now() - t0;
   out.status = w?.status;
   out.host = w?.host;
@@ -550,31 +568,65 @@ async function wakeChecks(electronApp, page) {
   }
   check('turned off: the "Jade wake word" process is gone', gone, st);
 }
+/** The machine's CPU time so far (ms, all cores): busy and total. */
+function cpuTimes() {
+  let busy = 0;
+  let total = 0;
+  for (const c of os.cpus()) {
+    const t = c.times;
+    busy += t.user + t.nice + t.sys + t.irq;
+    total += t.user + t.nice + t.sys + t.irq + t.idle;
+  }
+  return { busy, total };
+}
+
+/** os.getPriority() of a process, or null. @param {number|null|undefined} pid */
+function priorityOf(pid) {
+  if (!pid) return null;
+  try {
+    return os.getPriority(pid);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Windows: what a utility that is still starting is doing (priority, threads, CPU, the engine's
- * DLLs it has loaded, and whether Windows Error Reporting holds it after a crash).
+ * Windows: what a utility that is still starting is doing (priority class, threads and their wait
+ * reasons, CPU, the engine's DLLs it has loaded). Runs alongside the trace; at most 90 s.
  * @param {number} pid
+ * @returns {Promise<any>}
  */
 function probeWindowsProcess(pid) {
   const ps = `$ErrorActionPreference='SilentlyContinue'
 $p = Get-Process -Id ${Number(pid)}
-$a = [pscustomobject]@{ cpu = $p.CPU; threads = $p.Threads.Count; priority = "$($p.PriorityClass)"; ws = $p.WorkingSet64 }
+$a = [pscustomobject]@{ cpu = $p.CPU; threads = $p.Threads.Count; priority = "$($p.PriorityClass)"; basePriority = $p.BasePriority; ws = $p.WorkingSet64 }
 Start-Sleep -Seconds 2
 $p.Refresh()
-$waits = $p.Threads | Group-Object { "$($_.ThreadState)/$($_.WaitReason)" } | ForEach-Object { "$($_.Name)=$($_.Count)" }
+$waits = $p.Threads | Group-Object { "$($_.ThreadState)/$($_.WaitReason)/$($_.CurrentPriority)" } | ForEach-Object { "$($_.Name)=$($_.Count)" }
 [pscustomobject]@{
   first = $a
   cpuAfter2s = $p.CPU
   waits = @($waits)
-  modules = @($p.Modules | Where-Object { $_.ModuleName -match 'onnx|sherpa|dxcore|dxgi|d3d|setupapi|cfgmgr|wer' } | ForEach-Object { $_.FileName })
-  werFault = @(Get-CimInstance Win32_Process -Filter "Name='WerFault.exe'" | ForEach-Object { $_.CommandLine })
+  modules = @($p.Modules | Where-Object { $_.ModuleName -match 'onnx|sherpa|dxcore|dxgi|d3d|setupapi|cfgmgr' } | ForEach-Object { $_.FileName })
 } | ConvertTo-Json -Depth 4 -Compress`;
-  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 30000 });
-  try {
-    return JSON.parse(String(r.stdout || '').trim());
-  } catch {
-    return { error: String(r.stderr || r.error || r.stdout || '').slice(0, 500) };
-  }
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let stdout = '';
+    let stderr = '';
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true });
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, 90000);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ error: err.message }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      try {
+        resolve({ tookMs: Date.now() - t0, ...JSON.parse(stdout.trim()) });
+      } catch {
+        resolve({ tookMs: Date.now() - t0, code, error: (stderr || stdout).slice(0, 500) });
+      }
+    });
+  });
 }
 // ---- end "Hey Jade" ----
 

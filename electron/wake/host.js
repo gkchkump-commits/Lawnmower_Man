@@ -18,8 +18,12 @@
 //   like a crash: it is killed (SIGKILL after 2 s if it does not go) and restarted with the
 //   backoff, so she never shows "listening" while deaf.
 // * retry() (the user's "Retry", turning the wake word on) starts over with a fresh restart budget.
+// * Windows: the utility runs at normal priority. A process started below it (Chromium may start
+//   its helpers so) gets a tenth of a core on a busy PC and needs half a minute to load the models;
+//   main raises it, at the spawn and again at every stage and liveness ping (logged when it does).
 
 import { EventEmitter } from 'node:events';
+import os from 'node:os';
 
 export const SERVICE_NAME = 'Jade wake word';
 export const READY_TIMEOUT_MS = 15000;
@@ -38,18 +42,18 @@ const LOG_LINES_PER_WINDOW = 40;
 const LOG_WINDOW_MS = 10000;
 
 /**
- * Windows' own system variables (system folders and CPU facts, nothing about the user): system
- * DLLs, the C runtime and ONNX Runtime's device discovery (SetupAPI, DXGI, DXCore) expect them in
- * every process.
+ * Windows' own system variables (system-wide folders and CPU facts, none of the user's folders):
+ * system DLLs, the C runtime and ONNX Runtime's device discovery (SetupAPI, DXGI, DXCore) expect
+ * them in every process.
  */
-const WINDOWS_SYSTEM_VARS = new Set(['WINDIR', 'SYSTEMDRIVE', 'PROGRAMDATA', 'ALLUSERSPROFILE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+export const WINDOWS_SYSTEM_VARS = new Set(['WINDIR', 'SYSTEMDRIVE', 'PROGRAMDATA', 'ALLUSERSPROFILE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
   'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)', 'COMMONPROGRAMW6432', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
   'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'OS', 'PATHEXT', 'COMSPEC', 'DRIVERDATA']);
 
 /**
- * The utility's environment: PATH, SystemRoot, TEMP/TMP, on Windows its system variables, and
+ * The utility's environment: PATH, SystemRoot, TEMP/TMP, on Windows its system-wide variables, and
  * LAWNMOWER_* (no secrets: nothing named like a token, key, secret or password), so no Claude or
- * camera credentials reach it.
+ * camera credentials reach it. (PATH and TEMP can name the user's own folders, as for any process.)
  * @param {Record<string, string|undefined>} env
  * @param {string} [platform] process.platform
  * @returns {Record<string, string>}
@@ -81,7 +85,8 @@ export class WakeHost extends EventEmitter {
    * @param {{ utilityProcess: any, MessageChannelMain: any, entry: string, env?: Record<string, string|undefined>,
    *   log?: (level: string, msg: string) => void, now?: () => number, setTimeout?: typeof setTimeout, clearTimeout?: typeof clearTimeout,
    *   readyTimeoutMs?: number, stopTimeoutMs?: number, backoffMs?: readonly number[], maxRestarts?: number, restartWindowMs?: number,
-   *   pingEveryMs?: number, livenessMs?: number, killPid?: (pid: number) => void, stageTimeoutMs?: number, readyCapMs?: number, platform?: string }} o
+   *   pingEveryMs?: number, livenessMs?: number, killPid?: (pid: number) => void, stageTimeoutMs?: number, readyCapMs?: number, platform?: string,
+   *   priority?: { get: (pid: number) => number, set: (pid: number, priority: number) => void } }} o
    */
   constructor(o) {
     super();
@@ -223,6 +228,7 @@ export class WakeHost extends EventEmitter {
         this._kill(child);
         return;
       }
+      this._normalPriority(child);
       try { child.postMessage({ t: 'ping', n: ++this._pingN }); } catch { /* exiting */ }
       this._liveTimer = this._set(check, every);
     };
@@ -242,6 +248,7 @@ export class WakeHost extends EventEmitter {
       child = this._o.utilityProcess.fork(this._o.entry, [], { serviceName: SERVICE_NAME, stdio: 'pipe', env: minimalEnv(this._o.env || {}, this._o.platform) });
     } catch (err) {
       this._log('error', `[wake] could not start the wake-word process: ${/** @type {Error} */ (err).message}`);
+      this.stage = 'off';
       this._noRestart = true;
       this._setState('error', 'The wake-word engine could not start; see the log.');
       return;
@@ -250,7 +257,10 @@ export class WakeHost extends EventEmitter {
     this.models = [];
     this.stage = 'forked';
     this._forkAt = this._now();
-    child.once?.('spawn', () => this._log('info', `[wake] wake-word process spawned (pid ${child.pid})`));
+    child.once?.('spawn', () => {
+      this._log('info', `[wake] wake-word process spawned (pid ${child.pid})`);
+      this._normalPriority(child);
+    });
     child.stdout?.on?.('data', (/** @type {Buffer} */ d) => this._childLog('info', d));
     child.stderr?.on?.('data', (/** @type {Buffer} */ d) => this._childLog('warn', d));
     child.on('message', (/** @type {any} */ m) => this._onMessage(child, m));
@@ -259,6 +269,31 @@ export class WakeHost extends EventEmitter {
     this._armReady(child, this._o.readyTimeoutMs ?? READY_TIMEOUT_MS);
     // the renderer that asked before gets a port to the new process (it queues until loaded)
     if (this._wc && !this._wc.isDestroyed?.()) this.connect(this._wc);
+  }
+
+  /**
+   * Windows: put a utility running below normal priority back to normal (see the header).
+   * os.getPriority() counts the other way round: 0 is normal, 10 below normal, 19 idle.
+   * @param {any} child
+   */
+  _normalPriority(child) {
+    if ((this._o.platform ?? process.platform) !== 'win32' || !child?.pid || child !== this.child) return;
+    const pr = this._o.priority || { get: (/** @type {number} */ pid) => os.getPriority(pid), set: (/** @type {number} */ pid, /** @type {number} */ p) => os.setPriority(pid, p) };
+    try {
+      const was = pr.get(child.pid);
+      if (child.__priorityLogged !== was) {
+        child.__priorityLogged = was;
+        if (was <= os.constants.priority.PRIORITY_NORMAL) this._log('info', `[wake] wake-word process priority: ${priorityName(was)}`);
+      }
+      if (was > os.constants.priority.PRIORITY_NORMAL) {
+        pr.set(child.pid, os.constants.priority.PRIORITY_NORMAL);
+        child.__priorityLogged = os.constants.priority.PRIORITY_NORMAL;
+        this._log('info', `[wake] wake-word process priority raised from ${priorityName(was)} to normal`);
+      }
+    } catch (err) {
+      if (!child.__priorityFailed) this._log('warn', `[wake] could not check the wake-word process's priority: ${/** @type {Error} */ (err).message}`);
+      child.__priorityFailed = true;
+    }
   }
 
   /**
@@ -286,6 +321,7 @@ export class WakeHost extends EventEmitter {
       if (this.state === 'ready' || typeof m.s !== 'string' || !/^[a-z]{1,20}$/.test(m.s)) return;
       this.stage = m.s;
       this._log('info', `[wake] wake-word process: ${m.s} (+${this._now() - this._forkAt} ms)`);
+      this._normalPriority(child);
       this._armReady(child, this._o.stageTimeoutMs ?? STAGE_TIMEOUT_MS);
     } else if (m.t === 'ready') {
       this.stage = 'ready';
@@ -430,6 +466,8 @@ export class WakeHost extends EventEmitter {
       try { child.postMessage({ t: 'stop' }); } catch { finish(); }
     });
     if (this.child === child) this.child = null;
+    // (a child killed after the timeout may exit later, past _onExit's check: reset here)
+    if (!this.child) this.stage = 'off';
     this._setState('off');
   }
 
@@ -437,4 +475,14 @@ export class WakeHost extends EventEmitter {
     if (this._timer) this._clear(this._timer);
     this._timer = null;
   }
+}
+
+/** @param {number} p an os.getPriority() value */
+function priorityName(p) {
+  const c = os.constants.priority;
+  if (p >= c.PRIORITY_LOW) return 'idle';
+  if (p >= c.PRIORITY_BELOW_NORMAL) return 'below normal';
+  if (p >= c.PRIORITY_NORMAL) return 'normal';
+  if (p >= c.PRIORITY_ABOVE_NORMAL) return 'above normal';
+  return 'high';
 }

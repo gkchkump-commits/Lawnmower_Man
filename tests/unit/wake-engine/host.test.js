@@ -93,6 +93,82 @@ describe('WakeHost (utility supervision, contract §7.2)', () => {
     expect(up.forks).toHaveLength(7);
   });
 
+  it('a frozen (not crashed) utility: no answer for 30 s → killed and restarted like a crash (never "ready" while deaf)', async () => {
+    const { host, up, clock, logs } = make();
+    host.start(init);
+    up.last.ready();
+    const child = up.last;
+    // it answers main's pings for a while
+    child.postMessage = function (m, ports) {
+      this.posted.push({ m, ports });
+      if (m?.t === 'ping' && !this.frozen) queueMicrotask(() => this.emit('message', { t: 'pong', n: m.n }));
+    };
+    for (let i = 0; i < 6; i++) {
+      clock.advance(10000);
+      await tick();
+    }
+    expect(host.state).toBe('ready');
+    expect(child.posted.filter((p) => p.m.t === 'ping').length).toBeGreaterThanOrEqual(5);
+    child.frozen = true; // SIGSTOP, a deadlock in the addon…
+    for (let i = 0; i < 4; i++) {
+      clock.advance(10000);
+      await tick();
+    }
+    expect(child.killed).toBe(true);
+    expect(host.hung).toBe(1);
+    expect(logs.some((l) => /has not answered for/.test(l))).toBe(true);
+    await tick();
+    expect(host.state).toBe('starting');
+    clock.advance(1000);
+    expect(up.forks).toHaveLength(2); // the normal backoff restart
+  });
+
+  it('a process that ignores the kill (stopped) is killed hard after 2 s', async () => {
+    const killed = [];
+    const { host, up, clock } = make({ killPid: (pid) => killed.push(pid), livenessMs: 15000 });
+    host.start(init);
+    up.last.ready();
+    const child = up.last;
+    child.kill = () => { child.killed = true; return true; }; // SIGTERM is pending: no exit
+    clock.advance(20000);
+    expect(child.killed).toBe(true);
+    clock.advance(2000);
+    expect(killed).toEqual([child.pid]);
+  });
+
+  it('retry() after "keeps stopping" starts a new process with a fresh restart budget; so does start()', async () => {
+    const { host, up, clock } = make({ maxRestarts: 1 });
+    host.start(init);
+    up.last.ready();
+    up.last.kill();
+    await tick();
+    clock.advance(1000);
+    up.last.ready();
+    up.last.kill();
+    await tick();
+    expect(host.state).toBe('error');
+    expect(host.detail).toMatch(/keeps stopping/);
+    host.retry();
+    expect(up.forks).toHaveLength(3);
+    up.last.ready();
+    expect(host.state).toBe('ready');
+    // the next crash is restarted again (a fresh budget), not "keeps stopping" at once
+    up.last.kill();
+    await tick();
+    expect(host.state).toBe('starting');
+    clock.advance(1000);
+    expect(up.forks).toHaveLength(4);
+    up.last.ready();
+    up.last.kill();
+    await tick();
+    expect(host.state).toBe('error');
+    host.start(init); // turning the wake word on again: fresh budget too
+    up.last.ready();
+    up.last.kill();
+    await tick();
+    expect(host.state).toBe('starting');
+  });
+
   it('a fatal init error is not retried', async () => {
     const { host, up, clock } = make();
     host.start(init);

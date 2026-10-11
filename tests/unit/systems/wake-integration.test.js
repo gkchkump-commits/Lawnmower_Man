@@ -161,7 +161,7 @@ describe('"Hey Jade" across the lanes', () => {
     const mock = createMockWake({ getSettings: () => RENDERER_DEFAULTS, win: null });
     expect(Object.keys(mock.api).sort()).toEqual(preloadKeys);
     mock.dispose();
-    expect(preloadKeys).toEqual(['download', 'micAccess', 'onPower', 'onStatus', 'openMicSettings', 'report', 'requestPort', 'saveClip', 'status']);
+    expect(preloadKeys).toEqual(['download', 'micAccess', 'onPower', 'onStatus', 'openMicSettings', 'report', 'requestPort', 'restart', 'saveClip', 'status'] /* (restart added on purpose) */);
     // every channel the preload names is one electron/wake/ipc.js serves (or main sends)
     const used = new Set([...block.matchAll(/'(lm:wake:[a-z-]+)'/g)].map((m) => m[1]));
     const served = new Set([...WAKE_CHANNELS.invoke, ...WAKE_CHANNELS.send, ...WAKE_CHANNELS.toAvatar]);

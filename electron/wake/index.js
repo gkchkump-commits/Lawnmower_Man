@@ -285,6 +285,15 @@ export function createWake(o) {
         emitStatus();
         return r;
       },
+      // "Retry" (the drawer) after "keeps stopping" or "could not start": a fresh restart budget
+      restart: () => {
+        if (stopped || !wake().enabled) return { ok: false };
+        log('info', '[wake] the user asked to start the wake-word engine again');
+        if (host.child) host.retry(initFor(runningZhen));
+        else startEngine().catch((err) => log('error', `[wake] start failed: ${err && err.stack ? err.stack : err}`));
+        emitStatus();
+        return { ok: true };
+      },
     },
   });
 

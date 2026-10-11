@@ -27,6 +27,8 @@ export function createMockWake(o) {
   const win = o.win ?? globalThis.window;
   const record = o.record || (() => {});
   const scenario = String(o.scenario || '');
+  /** "Retry" fixed the ?wake=error engine */
+  let scenarioCleared = false;
   /** @type {Record<string, Set<Function>>} */
   const listeners = { status: new Set(), power: new Set() };
   const deliver = (/** @type {'status'|'power'} */ kind, /** @type {any} */ payload) => {
@@ -53,7 +55,7 @@ export function createMockWake(o) {
   let startTimer = 0;
   const status = () => {
     const enabled = !!o.getSettings()?.wake?.enabled;
-    const e = !enabled ? 'off' : scenario === 'missing' ? 'missing' : scenario === 'error' ? 'error' : engine === 'off' ? 'starting' : engine;
+    const e = !enabled ? 'off' : scenario === 'missing' ? 'missing' : scenario === 'error' && !scenarioCleared ? 'error' : engine === 'off' ? 'starting' : engine;
     const detail = e === 'missing' ? 'The wake-word engine is not installed; reinstall Lawnmower Man'
       : e === 'error' ? 'The wake-word engine keeps stopping; see the log'
         : e === 'starting' ? 'The wake-word engine is starting' : e === 'ready' ? 'Listening for “Hey Jade” (mock engine)' : 'Off';
@@ -281,6 +283,16 @@ export function createMockWake(o) {
     async download() {
       record(['wake.download']);
       return { ok: true, started: scenario === 'basic' };
+    },
+    /** "Retry" after the engine kept stopping (?wake=error clears: the engine comes back) */
+    async restart() {
+      record(['wake.restart']);
+      if (!o.getSettings()?.wake?.enabled) return { ok: false };
+      if (scenario === 'error') scenarioCleared = true;
+      engine = 'ready';
+      restarts++;
+      emitStatus();
+      return { ok: true };
     },
   };
   // (a getter: Object.assign would copy today's value once)

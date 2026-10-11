@@ -122,6 +122,7 @@ const api = {
     // { wav: ArrayBuffer (PCM16 mono 16 kHz, ≤ 60 s), hits: [{ atSec, keyword, outcome }] }
     saveClip: (o) => invoke('lm:wake:save-clip', o),
     download: () => invoke('lm:wake:download'),
+    restart: () => invoke('lm:wake:restart'), // wake: "Retry" after the engine kept stopping
   },
   // ---- end "Hey Jade" ----
 };

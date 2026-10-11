@@ -140,7 +140,7 @@ describe('createWake (contract §3.2, §7.1)', () => {
   it('registers the lm:wake:* channels (avatar only) and hands out ports', async () => {
     const { wake, up, ipc, trusted } = make({ zhen: true });
     await until(() => up.forks.length === 1);
-    expect([...ipc.handlers.keys()].sort()).toEqual(['lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:save-clip', 'lm:wake:status']);
+    expect([...ipc.handlers.keys()].sort()).toEqual(['lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:restart', 'lm:wake:save-clip', 'lm:wake:status'] /* (restart added on purpose) */);
     const wc = fakeWebContents();
     const r = await ipc.handlers.get('lm:wake:request-port')({ sender: wc });
     expect(r).toEqual({ ok: true, gen: 1 });
@@ -169,6 +169,17 @@ describe('createWake (contract §3.2, §7.1)', () => {
     wake.trayActions.setWakeWord(false);
     expect(settings.get().wake.enabled).toBe(false);
     expect(wake.trayState()).toEqual({ enabled: false, state: 'off', reason: '' });
+    await wake.stop();
+  });
+
+  it('lm:wake:restart ("Retry"): a new utility with a fresh restart budget; nothing while the wake word is off', async () => {
+    const { wake, up, ipc, settings } = make({ zhen: true });
+    await until(() => up.forks.length === 1);
+    up.last.ready();
+    expect(await ipc.handlers.get('lm:wake:restart')({ sender: {} })).toEqual({ ok: true });
+    expect(up.forks).toHaveLength(2);
+    settings.update({ wake: { enabled: false } });
+    expect(await ipc.handlers.get('lm:wake:restart')({ sender: {} })).toEqual({ ok: false });
     await wake.stop();
   });
 

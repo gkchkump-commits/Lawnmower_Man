@@ -11,6 +11,11 @@
 //   (lm:wake:port { gen }), port2 to the utility ({ t:'port', gen }); `gen` grows with every
 //   port. After a restart the renderer that asked before gets a new port by itself.
 // * stop() is bounded: { t:'stop' }, then kill after 2 s.
+// * Liveness: once ready, main pings the utility every 10 s ({ t:'ping', n } → { t:'pong', n });
+//   any message counts. Nothing heard for 30 s (a frozen process, not a crashed one) is handled
+//   like a crash: it is killed (SIGKILL after 2 s if it does not go) and restarted with the
+//   backoff, so she never shows "listening" while deaf.
+// * retry() (the user's "Retry", turning the wake word on) starts over with a fresh restart budget.
 
 import { EventEmitter } from 'node:events';
 
@@ -20,6 +25,9 @@ export const STOP_TIMEOUT_MS = 2000;
 export const RESTART_BACKOFF_MS = Object.freeze([1000, 5000, 30000]);
 export const MAX_RESTARTS = 5;
 export const RESTART_WINDOW_MS = 10 * 60 * 1000;
+export const PING_EVERY_MS = 10000;
+export const LIVENESS_MS = 30000;
+export const KILL_GRACE_MS = 2000;
 const LOG_LINES_PER_WINDOW = 40;
 const LOG_WINDOW_MS = 10000;
 
@@ -54,7 +62,8 @@ export class WakeHost extends EventEmitter {
   /**
    * @param {{ utilityProcess: any, MessageChannelMain: any, entry: string, env?: Record<string, string|undefined>,
    *   log?: (level: string, msg: string) => void, now?: () => number, setTimeout?: typeof setTimeout, clearTimeout?: typeof clearTimeout,
-   *   readyTimeoutMs?: number, stopTimeoutMs?: number, backoffMs?: readonly number[], maxRestarts?: number, restartWindowMs?: number }} o
+   *   readyTimeoutMs?: number, stopTimeoutMs?: number, backoffMs?: readonly number[], maxRestarts?: number, restartWindowMs?: number,
+   *   pingEveryMs?: number, livenessMs?: number, killPid?: (pid: number) => void }} o
    */
   constructor(o) {
     super();
@@ -88,6 +97,13 @@ export class WakeHost extends EventEmitter {
     this._stopping = false;
     this._noRestart = false;
     this._logWindow = { start: 0, lines: 0, dropped: 0 };
+    /** when the running utility was last heard from (any message) */
+    this._heardAt = 0;
+    /** @type {any} */
+    this._liveTimer = null;
+    this._pingN = 0;
+    /** frozen processes killed by the liveness watchdog */
+    this.hung = 0;
   }
 
   get pid() {
@@ -107,6 +123,8 @@ export class WakeHost extends EventEmitter {
     this._init = init;
     this._stopping = false;
     this._noRestart = false;
+    // a start the user asked for (the wake word turned on) gets a fresh restart budget
+    this._restartTimes = [];
     this._clearTimer();
     if (this.child) {
       this._replace();
@@ -126,6 +144,15 @@ export class WakeHost extends EventEmitter {
     else this._fork();
   }
 
+  /**
+   * The user's "Retry" after "keeps stopping" or "could not start": a fresh restart budget and a
+   * new process. @param {InitMessage} [init]
+   */
+  retry(init) {
+    this._restartTimes = [];
+    this.restart(init);
+  }
+
   /** Kill the process as if it crashed (tests, the e2e hook): supervision restarts it. */
   crash() {
     try {
@@ -141,8 +168,47 @@ export class WakeHost extends EventEmitter {
     const old = this.child;
     this.child = null;
     old.__replaced = true;
-    try { old.kill(); } catch { /* gone */ }
+    this._stopLiveness();
+    this._kill(old);
     this._fork();
+  }
+
+  /** kill(), then SIGKILL after KILL_GRACE_MS (a stopped or frozen process ignores SIGTERM). @param {any} child */
+  _kill(child) {
+    try { child.kill(); } catch { /* gone */ }
+    let exited = false;
+    child.once?.('exit', () => { exited = true; });
+    this._set(() => {
+      if (exited || !child.pid) return;
+      try { (this._o.killPid || ((pid) => process.kill(pid, 'SIGKILL')))(child.pid); } catch { /* gone */ }
+    }, KILL_GRACE_MS);
+  }
+
+  _startLiveness(child) {
+    this._stopLiveness();
+    this._heardAt = this._now();
+    const every = this._o.pingEveryMs ?? PING_EVERY_MS;
+    const limit = this._o.livenessMs ?? LIVENESS_MS;
+    const check = () => {
+      this._liveTimer = null;
+      if (this.child !== child || this.state !== 'ready') return;
+      if (this._now() - this._heardAt > limit) {
+        // frozen, not crashed: handle it like a crash (killed → exit → the backoff restart)
+        this.hung++;
+        this._log('warn', `[wake] the wake-word process has not answered for ${Math.round((this._now() - this._heardAt) / 1000)} s; restarting it`);
+        this._setState('starting', 'The wake-word engine stopped answering; restarting it.');
+        this._kill(child);
+        return;
+      }
+      try { child.postMessage({ t: 'ping', n: ++this._pingN }); } catch { /* exiting */ }
+      this._liveTimer = this._set(check, every);
+    };
+    this._liveTimer = this._set(check, every);
+  }
+
+  _stopLiveness() {
+    if (this._liveTimer) this._clear(this._liveTimer);
+    this._liveTimer = null;
   }
 
   _fork() {
@@ -178,8 +244,10 @@ export class WakeHost extends EventEmitter {
   /** @param {any} child @param {any} m */
   _onMessage(child, m) {
     if (child !== this.child || !m || typeof m !== 'object') return;
+    this._heardAt = this._now();
     if (m.t === 'ready') {
       this._clearTimer();
+      this._startLiveness(child);
       this.loadMs = Number(m.loadMs) || undefined;
       this.models = Array.isArray(m.models) ? m.models.map(String) : [];
       this._log('info', `[wake] wake-word engine ready (${this.models.join(' + ')}, ${this.loadMs} ms; pid ${child.pid})`);
@@ -204,6 +272,7 @@ export class WakeHost extends EventEmitter {
     if (child !== this.child) return;
     this.child = null;
     this._clearTimer();
+    this._stopLiveness();
     if (this._stopping) {
       this._setState('off');
       return;
@@ -290,6 +359,7 @@ export class WakeHost extends EventEmitter {
   async stop() {
     this._stopping = true;
     this._clearTimer();
+    this._stopLiveness();
     const child = this.child;
     if (!child) {
       this._setState('off');

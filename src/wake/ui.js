@@ -35,6 +35,7 @@ export const WAKE_TEXT = Object.freeze({
  * @property {string} [echoResult]          the last "Test my echo" result
  * @property {boolean} [echoTesting]
  * @property {boolean} [canSpeak]   her replies are spoken (Test my echo needs her voice)
+ * @property {string} [engine]      main's engine state ('error': it kept stopping or could not start)
  * @property {number} [nowPerf]  performance.now() of this model (to show log times)
  * @property {number} [nowWall]  Date.now() of this model
  */
@@ -145,6 +146,12 @@ export function infoModel(m) {
         action = { id: 'setupVoice', label: 'Set up local voice…' };
       } else {
         line = m.reason || c.text;
+        // the engine kept stopping or could not start: start it again (a fresh restart budget);
+        // the details are in the app's log (tray › Open logs)
+        if (m.code === 'engine' && m.engine === 'error') {
+          action = { id: 'wakeRestart', label: 'Retry' };
+          notes.push('Details: tray › Open logs');
+        }
       }
       break;
     case 'blocked':
@@ -168,7 +175,9 @@ export function infoModel(m) {
     if (m.strict) notes.push('Stricter for a few minutes: there were several mistakes in a row');
   }
   const zhen = m.models?.zhen;
-  if (m.state !== 'off' && zhen && zhen !== 'ok') {
+  // which model runs only matters while the engine runs (not when it cannot start at all)
+  const engineRuns = m.state !== 'off' && !(m.state === 'unavailable' && m.code === 'engine');
+  if (engineRuns && zhen && zhen !== 'ok') {
     if (zhen === 'downloading') notes.push('Using the basic wake-word model; the extra one is downloading');
     else if (zhen === 'failed' || zhen === 'missing') {
       notes.push(zhen === 'failed' ? 'Using the basic wake-word model; the extra one could not be downloaded' : 'Using the basic wake-word model');

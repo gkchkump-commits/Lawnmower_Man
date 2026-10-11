@@ -147,16 +147,19 @@ function setup(o = {}) {
   };
   const reports = [];
   const saved = [];
+  let portGen = 0;
   const settings = { wake: { enabled: true, explained: true, sounds: 'start', ...(o.wake || {}) }, camera: {}, voice: { speakReplies: true, ...(o.voice || {}) } };
   const bridge = {
     wake: {
       status: async () => ({ engine: 'ready', detail: '', models: { giga: 'ok', zhen: 'ok', vad: 'ok' } }),
       onStatus: () => () => {},
       onPower: () => () => {},
+      // like main: a new port (a newer gen) per request
       requestPort: async () => {
-        for (const fn of win.handlers) fn({ source: win, data: { type: 'lm:wake:port', gen: 1 }, ports: [fakePort] });
-        fakePort.onmessage?.({ data: { t: 'ready', models: ['giga'], gen: 1 } });
-        return { ok: true, gen: 1 };
+        const gen = ++portGen;
+        for (const fn of win.handlers) fn({ source: win, data: { type: 'lm:wake:port', gen }, ports: [fakePort] });
+        fakePort.onmessage?.({ data: { t: 'ready', models: ['giga'], gen } });
+        return { ok: true, gen };
       },
       report: (st) => reports.push(st.state),
       micAccess: async () => 'granted',
@@ -484,6 +487,33 @@ describe('WakeFeature: the controller hears when wake mode stops running', () =>
     expect(s.controller.wakeWordChanged).toHaveBeenCalled();
     expect(s.controller.adapter.active()).toBe(false);
     expect(s.controller.adapter.fallback()).toBe(false);
+  });
+});
+
+describe('WakeFeature: the engine stops answering', () => {
+  it('the port is lost (a frozen utility): "starting", not "listening"; a new port: listening again, strict re-sent', async () => {
+    const s = await started();
+    expect(s.f.state).toBe('waiting');
+    s.f.machine.strictUntil = s.now() + 60_000; // strict mode is on
+    const answer = s.bridge.wake.requestPort;
+    s.bridge.wake.requestPort = async () => ({ ok: true, gen: 0 }); // the frozen utility never answers on a new port
+    // three pings without a pong
+    s.f.port._pings = 3;
+    s.f.port._ping();
+    await s.flush();
+    s.bridge.wake.requestPort = answer;
+    expect(s.f.state).toBe('starting');
+    expect(s.f.machine.reason).toMatch(/not answering/);
+    // main's status still says ready (its watchdog has not fired yet): still not listening
+    s.f._onEngine({ engine: 'ready', detail: '' });
+    expect(s.f.state).toBe('starting');
+    // main restarted the utility: a new port answers
+    s.posted.length = 0;
+    await s.bridge.wake.requestPort();
+    await s.flush();
+    await s.advance(10);
+    expect(s.f.state).toBe('waiting');
+    expect(s.posted.some((m) => m.t === 'strict' && m.on === true)).toBe(true);
   });
 });
 

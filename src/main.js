@@ -338,6 +338,10 @@ async function boot() {
       }, () => {});
     } else if (a === 'wakeRetry') {
       wake?.retryMic();
+    } else if (a === 'wakeRestart') {
+      Promise.resolve(bridge.wake?.restart?.()).then((r) => {
+        view.toast(r?.ok ? 'Starting the wake-word engine again…' : 'The wake-word engine could not be restarted; see the log.', r?.ok ? 'info' : 'warn');
+      }, (err) => view.toast(`Could not restart the wake-word engine: ${err?.message || err}`, 'warn'));
     } else if (a === 'wakeDownload') {
       Promise.resolve(bridge.wake?.download?.()).then((r) => {
         view.toast(r?.started ? 'Downloading the extra wake-word model…' : 'The extra wake-word model is not downloading (it may already be there).', 'info');

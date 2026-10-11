@@ -141,7 +141,7 @@ try {
     && JSON.stringify(shape.voice) === JSON.stringify(['info', 'onStatus', 'openSetupLog', 'restart', 'setup'])
     && JSON.stringify(shape.tapo) === JSON.stringify(['arm', 'events', 'onAlert', 'onLook', 'onStatus', 'openClips', 'openWindow', 'presets', 'ptz', 'status'])
     // "Hey Jade" (contract-wake §6.2): the wake namespace and window.show
-    && JSON.stringify(shape.wake) === JSON.stringify(['download', 'micAccess', 'onPower', 'onStatus', 'openMicSettings', 'report', 'requestPort', 'saveClip', 'status'])
+    && JSON.stringify(shape.wake) === JSON.stringify(['download', 'micAccess', 'onPower', 'onStatus', 'openMicSettings', 'report', 'requestPort', 'restart', 'saveClip', 'status'])
     && shape.window.includes('show'), shape);
   check('no Node/ipcRenderer in the page', !shape.nodeLeak && !shape.ipcLeak, shape);
 

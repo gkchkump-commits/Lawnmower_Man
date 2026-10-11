@@ -136,7 +136,14 @@ export class WakeFeature extends Emitter {
     const b = this.bridge;
     this.port.start();
     this._offs.push(this.port.on('hit', (h) => this._onHit(h)));
-    this._offs.push(this.port.on('ready', () => this._render()));
+    // the port is the engine as far as this window is concerned: ready only once the utility
+    // answered on it, "starting" again when it stops answering (main restarts a frozen one); a
+    // new port (a restarted utility, a reloaded window) is told the strict mode it should be in
+    this._offs.push(this.port.on('ready', () => {
+      this.port.strict(this.machine.strict);
+      this._onEngine({});
+    }));
+    this._offs.push(this.port.on('lost', () => this._onEngine({})));
     this._offs.push(this.port.on('stats', () => this._renderSoon()));
     this._offs.push(this.port.on('error', (e) => this._warn(`[wake] engine: ${e.message}`)));
     this._offs.push(this.speech.on('playing', (item) => this.mask.clipStart({ key: item?.clip, text: item?.text, kind: item?.clip?.kind })));
@@ -260,10 +267,12 @@ export class WakeFeature extends Emitter {
     // main's lock/sleep state: a window (re)loaded while the PC is locked starts locked (§2.3)
     if (st.power && typeof st.power === 'object') this._step({ type: 'power', snapshot: st.power });
     const e = this.engine.engine;
+    // main says ready, but nothing answers on the port (yet, or any more): still starting
+    const deaf = e === 'ready' && !this.port.ready;
     this._step({
       type: 'availability',
-      engine: e === 'ready' || e === 'starting' || e === 'missing' || e === 'error' ? e : 'off',
-      engineDetail: String(this.engine.detail || ''),
+      engine: deaf ? 'starting' : e === 'ready' || e === 'starting' || e === 'missing' || e === 'error' ? e : 'off',
+      engineDetail: deaf ? (this.port.gen > 0 ? 'The wake-word engine is not answering; reconnecting.' : 'Connecting to the wake-word engine.') : String(this.engine.detail || ''),
     });
     // the utility runs only while the wake word is on; main pushes a new port after a restart
     if (e === 'ready' && this._settings?.wake?.enabled && !this.port.port) this.port.request();
@@ -822,6 +831,7 @@ export class WakeFeature extends Emitter {
       echoResult: this.echoResult,
       echoTesting: !!this._echoTest,
       canSpeak: this._canSpeak(),
+      engine: String(this.engine.engine || ''),
       nowPerf: this._now(),
       nowWall: Date.now(),
     });

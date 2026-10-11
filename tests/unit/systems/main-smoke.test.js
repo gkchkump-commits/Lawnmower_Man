@@ -262,7 +262,8 @@ describe('electron/main.js wiring', () => {
     expect([...used].sort()).toEqual([...registered].sort());
     // "Hey Jade": its invoke channels (electron/wake/ipc.js), the tray state, and main's window show
     expect([...m.handlers.keys()].filter((ch) => ch.startsWith('lm:wake:')).sort()).toEqual([
-      'lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:save-clip', 'lm:wake:status',
+      // (lm:wake:restart added on purpose: "Retry" after the engine kept stopping)
+      'lm:wake:download', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:request-port', 'lm:wake:restart', 'lm:wake:save-clip', 'lm:wake:status',
     ]);
     expect([...m.listeners.keys()].filter((ch) => ch.startsWith('lm:wake:') || ch === 'lm:window:show').sort()).toEqual(['lm:wake:state', 'lm:window:show']);
     expect([...m.handlers.keys()].filter((ch) => !ch.startsWith('lm:tapo:') && !ch.startsWith('lm:wake:')).sort()).toEqual([

@@ -9,13 +9,14 @@
 //   lm:wake:open-mic-settings invoke ()              → { ok }
 //   lm:wake:save-clip     invoke  ({ wav, hits })    → { ok, path?, error? }
 //   lm:wake:download      invoke  ()                 → { ok, started }
+//   lm:wake:restart       invoke  ()                 → { ok }  ("Retry" after the engine kept stopping)
 //   main → avatar: lm:wake:status (on change, ≤ 4/s), lm:wake:port, lm:wake:power
 // lm:window:show (show the avatar without focus) belongs to main.js (the orchestrator's wiring).
 
 import { validateNoArgs, validateUiState } from './validate.js';
 
 export const WAKE_CHANNELS = Object.freeze({
-  invoke: Object.freeze(['lm:wake:status', 'lm:wake:request-port', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:save-clip', 'lm:wake:download']),
+  invoke: Object.freeze(['lm:wake:status', 'lm:wake:request-port', 'lm:wake:mic-access', 'lm:wake:open-mic-settings', 'lm:wake:save-clip', 'lm:wake:download', 'lm:wake:restart']),
   send: Object.freeze(['lm:wake:state']),
   toAvatar: Object.freeze(['lm:wake:status', 'lm:wake:port', 'lm:wake:power']),
 });
@@ -25,7 +26,8 @@ const AVATAR = /** @type {Array<'avatar'|'camera'>} */ (['avatar']);
 /**
  * @param {{ ipcMain: any, isTrustedSender: (event: any, kinds: Array<'avatar'|'camera'>) => void,
  *   service: { status: () => any, requestPort: (sender: any) => any, reportState: (st: { state: string, reason: string }) => void,
- *     micAccess: () => string, openMicSettings: () => Promise<{ ok: boolean }>, saveClip: (payload: unknown) => Promise<any>, download: () => any },
+ *     micAccess: () => string, openMicSettings: () => Promise<{ ok: boolean }>, saveClip: (payload: unknown) => Promise<any>, download: () => any,
+ *     restart?: () => any },
  *   log?: (level: string, msg: string) => void }} o
  * @returns {() => void} unregister
  */
@@ -62,6 +64,10 @@ export function registerWakeIpc(o) {
   handle('lm:wake:download', (_e, ...a) => {
     validateNoArgs(a);
     return service.download();
+  });
+  handle('lm:wake:restart', (_e, ...a) => {
+    validateNoArgs(a);
+    return service.restart ? service.restart() : { ok: false };
   });
   /** @param {any} event @param {any} payload */
   const onState = (event, payload) => {

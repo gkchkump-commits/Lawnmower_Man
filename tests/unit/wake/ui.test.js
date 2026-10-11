@@ -61,6 +61,17 @@ describe('infoModel: the drawer line, its action, the notes', () => {
     expect(i.action).toBeNull();
   });
 
+  it('an engine that keeps stopping: Retry (main starts it again), where the log is, and no "basic model" note', () => {
+    const i = infoModel({ state: 'unavailable', code: 'engine', engine: 'error', reason: 'The wake-word engine keeps stopping; see the log.', models: { zhen: 'missing', giga: 'ok' } });
+    expect(i.action).toEqual({ id: 'wakeRestart', label: 'Retry' });
+    expect(i.notes).toContain('Details: tray › Open logs');
+    expect(i.notes.join(' ')).not.toMatch(/basic wake-word model/);
+    // running on B alone: the note and the download are shown
+    const b = infoModel({ state: 'waiting', models: { zhen: 'missing', giga: 'ok' } });
+    expect(b.notes).toContain('Using the basic wake-word model');
+    expect(b.action).toEqual({ id: 'wakeDownload', label: 'Download the extra wake-word model' });
+  });
+
   it('blocked: Windows settings for a privacy block or a denial, Retry otherwise', () => {
     expect(infoModel({ state: 'blocked', code: 'os-blocked', reason: 'Windows is blocking the microphone for desktop apps' })).toMatchObject({
       line: 'Windows is blocking the microphone for desktop apps', tone: 'err', action: { id: 'wakeMicSettings', label: 'Open Windows microphone settings' },

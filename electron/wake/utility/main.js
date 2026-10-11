@@ -5,8 +5,8 @@
 //
 // parentPort (main ↔ utility):
 //   main → u  { t:'init', addon, models: { zhen?, giga, vad }, params: { sensitivity, phrase }, config }
-//             { t:'port', gen } + port      { t:'settings', params }      { t:'stop' }
-//   u → main  { t:'ready', models, loadMs }   { t:'error', fatal, message }   { t:'stats', …, hits }
+//             { t:'port', gen } + port      { t:'settings', params }      { t:'ping', n }      { t:'stop' }
+//   u → main  { t:'ready', models, loadMs }   { t:'error', fatal, message }   { t:'stats', …, hits }   { t:'pong', n }
 // The renderer port: utility/protocol.js.
 
 import { loadAddon } from './sherpa.js';
@@ -127,6 +127,7 @@ parent.on('message', (/** @type {any} */ e) => {
   if (m.t === 'init') init(m);
   else if (m.t === 'port') attach(e.ports?.[0], Number(m.gen) || 0);
   else if (m.t === 'settings') engine?.setParams(m.params || {});
+  else if (m.t === 'ping') send({ t: 'pong', n: Number(m.n) || 0 }); // main's liveness check
   else if (m.t === 'stop') stop();
 });
 

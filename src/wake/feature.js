@@ -90,8 +90,10 @@ export class WakeFeature extends Emitter {
     /** @type {null | { hits: number, timer: any }} */
     this._echoTest = null;
     this.echoResult = '';
-    /** @type {null | { chunks: Float32Array[], n: number, max: number, startAt: number, hits: any[], timer: any, done: boolean }} */
+    /** @type {null | { chunks: Float32Array[], n: number, max: number, startAt: number, next: number, hits: any[], timer: any, done: boolean }} */
     this._rec = null;
+    /** running|fallback as the controller last heard it (hands-free follows it) */
+    this._runKey = '';
     this._presenceKey = '';
     this._renderNow = false;
     this._lastWarn = 0;
@@ -147,7 +149,7 @@ export class WakeFeature extends Emitter {
       this._offs.push(() => md.removeEventListener('devicechange', onChange));
     }
     if (typeof b.wake?.onStatus === 'function') this._offs.push(b.wake.onStatus((st) => this._onEngine(st)));
-    if (typeof b.wake?.onPower === 'function') this._offs.push(b.wake.onPower((p) => this._step({ type: 'power', state: p?.state })));
+    if (typeof b.wake?.onPower === 'function') this._offs.push(b.wake.onPower((p) => this._step({ type: 'power', state: p?.state, seq: p?.seq })));
     this.ctl.setWakeWord(this.adapter);
     this.applySettings(this.d.getSettings());
     this.voiceChanged();
@@ -164,6 +166,7 @@ export class WakeFeature extends Emitter {
     clearTimeout(this._reportTimer);
     clearTimeout(this._renderTimer);
     this.ctl.setWakeWord(null);
+    this._recAbort('');
     for (const j of this._verifies.values()) j.abort.abort();
     this._verifies.clear();
     for (const r of this._decisions.values()) r({ action: 'drop', reason: 'disposed' });
@@ -235,6 +238,8 @@ export class WakeFeature extends Emitter {
   _onEngine(st) {
     if (!st || typeof st !== 'object') return;
     this.engine = { ...this.engine, ...st };
+    // main's lock/sleep state: a window (re)loaded while the PC is locked starts locked (§2.3)
+    if (st.power && typeof st.power === 'object') this._step({ type: 'power', snapshot: st.power });
     const e = this.engine.engine;
     this._step({
       type: 'availability',
@@ -288,7 +293,7 @@ export class WakeFeature extends Emitter {
       this._zeroRun = 0;
     }
     for (const j of this._verifies.values()) if (!j.started) this._tryVerify(j);
-    if (this._rec && !this._rec.done) this._recPush(x);
+    if (this._rec && !this._rec.done) this._recPush(x, info.at);
   }
 
   // ------------------------------------------------------------------------------------------
@@ -369,6 +374,7 @@ export class WakeFeature extends Emitter {
   }
 
   _afterStep() {
+    this._syncRunning();
     // a verification that no longer matters (rejected, timed out, the wake ended) is aborted
     const a = this.machine.active;
     for (const [id, j] of this._verifies) {
@@ -378,6 +384,22 @@ export class WakeFeature extends Emitter {
       }
     }
     this._renderSoon();
+  }
+
+  /**
+   * Wake mode started or stopped running (locked, paused, the engine went away…): the controller's
+   * hands-free follows at once, so the transcript check never goes on as plain hands-free while
+   * the PC is locked, and a microphone nobody uses any more is released now (§2.3, §2.4).
+   */
+  _syncRunning() {
+    const m = this.machine;
+    const key = `${m.running ? 1 : 0}${m.fallback ? 1 : 0}`;
+    if (key === this._runKey) return;
+    this._runKey = key;
+    if (!this._started) return;
+    try { this.ctl.wakeWordChanged(); } catch (err) { console.warn('[wake] the controller hook failed', err); }
+    const st = m.state;
+    if (this._settings?.wake?.enabled && !m.running && st !== 'off' && !this.mic.mode && !this.mic.tapped && this.mic.isOpen) this.mic.close();
   }
 
   _schedule() {
@@ -441,7 +463,13 @@ export class WakeFeature extends Emitter {
 
   _releaseMic() {
     ++this._micGen;
+    // a wake capture that still runs ends first: otherwise the Mic sees no tap when it finishes
+    // and keeps the device for its 20 s idle time (PRIV-5, PRIV-6: within 1 s)
+    if (this.ctl.listen?.wake) this.ctl.wakeWordCancel();
+    // a test clip never goes on across a release (it would splice two sessions together)
+    this._recAbort('The test clip was cancelled: the microphone was turned off.');
     this.mic.setTap(null);
+    // closed now unless push-to-talk (or another capture of the controller) is using it
     if (!this.mic.mode) this.mic.close();
     this.clock.clear();
     this._zeroRun = 0;
@@ -646,14 +674,39 @@ export class WakeFeature extends Emitter {
       return false;
     }
     const max = Math.round(Math.min(60, Math.max(1, sec)) * RATE);
-    this._rec = { chunks: [], n: 0, max, startAt: this.mic.samplesSeen, hits: [], timer: setInterval(() => this._renderSoon(), 1000), done: false };
+    this._rec = { chunks: [], n: 0, max, startAt: this.mic.samplesSeen, next: this.mic.samplesSeen, hits: [], timer: setInterval(() => this._renderSoon(), 1000), done: false };
     this._renderSoon();
     return true;
   }
 
-  /** @param {Float32Array} x */
-  _recPush(x) {
+  /** "Cancel recording" (the drawer): nothing is saved. @returns {boolean} */
+  cancelRecording() {
+    if (!this._rec) return false;
+    this._recAbort('The test clip was cancelled; nothing was saved.');
+    return true;
+  }
+
+  /** Drop the test clip being recorded: nothing is saved. @param {string} why the toast ('' = none) */
+  _recAbort(why) {
+    const r = this._rec;
+    if (!r || r.done) return;
+    r.done = true;
+    clearInterval(r.timer);
+    r.chunks = [];
+    this._rec = null;
+    if (why) this.view.toast?.(why, 'info');
+    this._renderSoon();
+  }
+
+  /** @param {Float32Array} x @param {number} [at] the sample index of x[0] */
+  _recPush(x, at) {
     const r = /** @type {NonNullable<WakeFeature['_rec']>} */ (this._rec);
+    // a gap (the mic reopened, a paused tap): the clip must be one piece of audio
+    if (Number.isFinite(at) && at !== r.next) {
+      this._recAbort('The test clip was cancelled: the microphone was interrupted.');
+      return;
+    }
+    r.next += x.length;
     const take = Math.min(x.length, r.max - r.n);
     if (take > 0) {
       r.chunks.push(x.slice(0, take));

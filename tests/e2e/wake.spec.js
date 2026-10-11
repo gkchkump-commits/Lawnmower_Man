@@ -274,6 +274,39 @@ test.describe('Hey Jade (scripted microphone)', () => {
     expect(blocked).toEqual([]);
   });
 
+  test('12b · locked while she listens for a command, or turned off in the follow-up window: the track ends within 1 s; asleep and woken at the lock screen stays locked (PRIV-5, PRIV-6)', async ({ page }) => {
+    const blocked = await bootWake(page);
+    await wakeIs(page, 'waiting');
+    const track = () => page.evaluate(() => { window.__track = window.__app.mic._stream.getAudioTracks()[0]; return window.__track.readyState; });
+    // the hotkey: listening for a command, then Win+L
+    await page.evaluate(() => window.__app.controller.toggleListening());
+    await wakeIs(page, 'listening', 3000);
+    expect(await track()).toBe('live');
+    let t0 = Date.now();
+    await page.evaluate(() => window.__wakeMock.power('locked'));
+    await page.waitForFunction(() => window.__track.readyState === 'ended', null, { timeout: 1000 });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await wakeIs(page, 'locked');
+    // then the PC sleeps and wakes at the lock screen: still locked, nothing opened
+    const calls = await page.evaluate(() => window.__mic.calls);
+    await page.evaluate(() => { window.__wakeMock.power('suspended'); window.__wakeMock.power('resumed'); });
+    await page.waitForTimeout(800);
+    expect(await page.evaluate(() => [document.body.dataset.wake, window.__app.mic.isOpen, window.__mic.calls])).toEqual(['locked', false, calls]);
+    await page.evaluate(() => window.__wakeMock.power('unlocked'));
+    await wakeIs(page, 'waiting');
+    // a follow-up window (as after a reply to a voice turn), then "Hey Jade" off in the tray
+    await page.evaluate(() => window.__app.wake.adapter.idle({ turnId: 'turn-12b', voiceTurn: true, spoke: true, permissionPending: false }));
+    await wakeIs(page, 'followup', 3000);
+    expect(await track()).toBe('live');
+    t0 = Date.now();
+    await page.evaluate(() => window.__app.bridge.settings.set({ wake: { enabled: false } }));
+    await page.waitForFunction(() => window.__track.readyState === 'ended', null, { timeout: 1000 });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await wakeIs(page, 'off');
+    expect(await userTexts(page)).toEqual([]);
+    expect(blocked).toEqual([]);
+  });
+
   test('13 · without the local voice: unavailable with the setup hint, and the mic is never opened', async ({ page }) => {
     const blocked = await bootWake(page, { params: { voice: 'off' } });
     await wakeIs(page, 'unavailable');

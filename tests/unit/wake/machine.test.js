@@ -625,6 +625,54 @@ describe('T15-T17 the PC, the window, the microphone', () => {
     expect(h.m.state).not.toBe('locked');
   });
 
+  it('T15: locked, then asleep, then woken at the lock screen → still locked, the mic stays closed', () => {
+    const h = harness();
+    h.ready();
+    h.step({ type: 'power', state: 'locked', seq: 1 });
+    h.step({ type: 'power', state: 'suspended', seq: 2 });
+    const a = h.step({ type: 'power', state: 'resumed', seq: 3 });
+    expect(h.m.state).toBe('locked');
+    expect(types(a)).not.toContain('openMic');
+    const b = h.step({ type: 'power', state: 'unlocked', seq: 4 });
+    expect(types(b)).toContain('openMic');
+    // asleep without a lock: waking up is enough
+    h.step({ type: 'micOk', echo: 'all' });
+    h.step({ type: 'power', state: 'suspended', seq: 5 });
+    expect(h.m.state).toBe('locked');
+    expect(types(h.step({ type: 'power', state: 'resumed', seq: 6 }))).toContain('openMic');
+  });
+
+  it('T15: main\'s snapshot (a window reloaded while the PC is locked) starts locked; an older one is ignored', () => {
+    const h = harness();
+    const a = h.step({ type: 'power', snapshot: { locked: true, suspended: false, seq: 7 } });
+    h.ready();
+    expect(h.m.state).toBe('locked');
+    expect(types(h.all)).not.toContain('openMic');
+    void a;
+    h.step({ type: 'power', state: 'unlocked', seq: 8 });
+    expect(types(h.all)).toContain('openMic');
+    // a status computed before the unlock, delivered after it
+    h.step({ type: 'power', snapshot: { locked: true, suspended: false, seq: 7 } });
+    expect(h.m.locked).toBe(false);
+  });
+
+  it('PRIV-5, PRIV-6: locked or turned off during a capture → the capture is cancelled before the mic is released', () => {
+    for (const kind of ['listening', 'followup']) {
+      for (const how of ['lock', 'off']) {
+        const h = harness();
+        h.ready();
+        if (kind === 'listening') h.step({ type: 'manual', from: 'hotkey' });
+        else h.step({ type: 'turnDone', turnId: 't1', voiceTurn: true });
+        expect(h.m.state).toBe(kind);
+        const a = how === 'lock' ? h.step({ type: 'power', state: 'locked' }) : h.step({ type: 'settings', wake: { enabled: false } });
+        const t = types(a);
+        expect(t).toContain('cancelCapture');
+        expect(t).toContain('releaseMic');
+        expect(t.indexOf('cancelCapture')).toBeLessThan(t.indexOf('releaseMic'));
+      }
+    }
+  });
+
   it('T16: hidden with "Listen while hidden" off → paused (released); on → still waiting', () => {
     const h = harness({ whileHidden: false });
     h.ready();

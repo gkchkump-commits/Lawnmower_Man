@@ -5,7 +5,7 @@ import path from 'node:path';
 import { CLIP_MAX_HITS, WAKE_UI_STATES, checkWav, validateNoArgs, validateSaveClip, validateUiState } from '../../../electron/wake/validate.js';
 import { clipStamp, saveTestClip, testClipsDir } from '../../../electron/wake/clips.js';
 import { micAccessStatus, openMicSettings } from '../../../electron/wake/mic-access.js';
-import { POWER_EVENTS, watchPower } from '../../../electron/wake/power.js';
+import { POWER_EVENTS, RESUME_SETTLE_MS, watchPower } from '../../../electron/wake/power.js';
 import { EventEmitter } from 'node:events';
 
 /** A RIFF/WAVE PCM16 file. */
@@ -124,12 +124,17 @@ describe('mic access and power', () => {
     expect(await openMicSettings(shell, 'linux')).toEqual({ ok: false });
   });
 
+  // (changed on purpose: 'resumed' now comes RESUME_SETTLE_MS after the PC woke, with a sequence number)
+  const now = { setTimeout: (/** @type {() => void} */ fn) => { fn(); return 1; }, clearTimeout: () => {} };
+
   it('forwards lock/unlock/suspend/resume; stop() unsubscribes; emit() fakes one', () => {
     const pm = new EventEmitter();
     const sent = [];
-    const w = watchPower(pm, (s) => sent.push(s));
+    const seqs = [];
+    const w = watchPower(pm, (s, n) => { sent.push(s); seqs.push(n); }, now);
     for (const ev of Object.keys(POWER_EVENTS)) pm.emit(ev);
     expect(sent).toEqual(['locked', 'unlocked', 'suspended', 'resumed']);
+    expect(seqs).toEqual([1, 2, 3, 4]);
     w.emit('locked');
     expect(sent.at(-1)).toBe('locked');
     expect(() => w.emit('exploded')).toThrow();
@@ -137,5 +142,53 @@ describe('mic access and power', () => {
     pm.emit('lock-screen');
     expect(sent).toHaveLength(5);
     expect(pm.listenerCount('lock-screen')).toBe(0);
+  });
+
+  it('locked, then asleep, then woken at the lock screen: still locked (the screen lock and sleep apart)', () => {
+    const pm = new EventEmitter();
+    const w = watchPower(pm, () => {}, now);
+    pm.emit('lock-screen');
+    pm.emit('suspend');
+    expect(w.snapshot()).toEqual({ locked: true, suspended: true, seq: 2 });
+    pm.emit('resume');
+    expect(w.snapshot()).toEqual({ locked: true, suspended: false, seq: 3 });
+    pm.emit('unlock-screen');
+    expect(w.snapshot()).toMatchObject({ locked: false, suspended: false });
+  });
+
+  it('asks the OS whether the screen is locked at a refresh; its "active" never unlocks anything', () => {
+    let idle = 'locked';
+    const pm = Object.assign(new EventEmitter(), { getSystemIdleState: vi.fn(() => idle) });
+    const sent = [];
+    const w = watchPower(pm, (s) => sent.push(s), now);
+    expect(w.refresh()).toBe('locked');
+    expect(pm.getSystemIdleState).toHaveBeenCalledWith(0);
+    expect(sent).toEqual(['locked']);
+    w.refresh(); // known already: nothing more
+    expect(sent).toEqual(['locked']);
+    // where the OS cannot tell (Linux), its answer must not unlock: only 'unlock-screen' does
+    idle = 'active';
+    w.refresh();
+    expect(w.snapshot().locked).toBe(true);
+    // without the API at all
+    expect(watchPower(new EventEmitter(), () => {}, now).refresh()).toBe('unknown');
+    w.stop();
+  });
+
+  it('a wake-up waits RESUME_SETTLE_MS and looks at the lock state again before it says "resumed"', () => {
+    let idle = 'active';
+    const pm = Object.assign(new EventEmitter(), { getSystemIdleState: () => idle });
+    const sent = [];
+    /** @type {Array<() => void>} */
+    const timers = [];
+    const w = watchPower(pm, (s) => sent.push(s), { setTimeout: (fn, ms) => { timers.push(fn); expect(ms).toBe(RESUME_SETTLE_MS); return 1; }, clearTimeout: () => {} });
+    pm.emit('suspend');
+    pm.emit('resume');
+    expect(sent).toEqual(['suspended']); // not yet
+    idle = 'locked'; // Windows reports the lock screen a moment after waking
+    timers.shift()();
+    expect(sent).toEqual(['suspended', 'locked', 'resumed']);
+    expect(w.snapshot()).toMatchObject({ locked: true, suspended: false });
+    w.stop();
   });
 });

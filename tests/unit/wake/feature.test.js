@@ -5,6 +5,7 @@
 // saved with its hits; turning it off releases the mic.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Emitter } from '../../../src/app/emitter.js';
+import { Mic } from '../../../src/audio/mic.js';
 import { ECHO_TEST_LINE, WakeFeature } from '../../../src/wake/feature.js';
 import { WAKE } from '../../../src/wake/machine.js';
 
@@ -64,11 +65,48 @@ class FakePlayer extends Emitter {
   }
 }
 
+/**
+ * The real Mic over a fake getUserMedia/AudioContext (the ScriptProcessor path): its track, its
+ * modes and its 20 s idle close are what is under test. feed(ms, clock) like FakeMic's.
+ * @param {() => number} now
+ */
+function realMic(now) {
+  const env = { processor: null, stopped: 0, tracks: [] };
+  const node = () => ({ connect() {}, disconnect() {} });
+  const gum = async () => {
+    const t = { readyState: 'live', muted: false, label: 'Microphone Array (Realtek(R) Audio)', addEventListener() {}, getSettings: () => ({ echoCancellation: 'all' }), stop() { env.stopped++; this.readyState = 'ended'; } };
+    env.tracks.push(t);
+    return { getAudioTracks: () => [t], getTracks: () => [t] };
+  };
+  const ctx = () => ({
+    sampleRate: 16000, state: 'running', destination: {}, resume: async () => {}, close() {},
+    createMediaStreamSource: () => node(),
+    createGain: () => ({ ...node(), gain: { value: 1 } }),
+    createScriptProcessor: () => {
+      const sp = { ...node(), onaudioprocess: null };
+      env.processor = sp;
+      return sp;
+    },
+  });
+  const mic = new Mic({ getUserMedia: gum, createContext: ctx, now });
+  /** @type {any} */ (mic).env = env;
+  /** @type {any} */ (mic).track = () => env.tracks.at(-1);
+  /** @type {any} */ (mic).feed = (ms, clock) => {
+    const n = Math.round((ms / 1000) * RATE);
+    for (let done = 0; done < n; done += 683) {
+      const x = new Float32Array(Math.min(683, n - done)).fill(0.01);
+      clock.tick((x.length / RATE) * 1000);
+      env.processor?.onaudioprocess?.({ inputBuffer: { getChannelData: () => x } });
+    }
+  };
+  return mic;
+}
+
 function setup(o = {}) {
   vi.useFakeTimers();
   let t = 10_000;
   const now = () => t;
-  const mic = new FakeMic();
+  const mic = o.realMic ? realMic(now) : new FakeMic();
   const player = new FakePlayer();
   const speech = Object.assign(new Emitter(), { busy: false });
   const said = [];
@@ -77,10 +115,21 @@ function setup(o = {}) {
     state: 'idle', activeTurnId: null, pendingSends: 0, claudeStatus: null, sleeping: false, listen: null, speech,
     adapter: null,
     setWakeWord(a) { this.adapter = a; },
-    wakeWordChanged() {},
-    wakeWordCapture: vi.fn(async (c) => { captures.push(c); return true; }),
+    wakeWordChanged: vi.fn(),
+    wakeWordCapture: vi.fn(async (c) => {
+      captures.push(c);
+      if (!o.realMic) return true;
+      // like the controller: the capture is the Mic's 'utterance' mode
+      controller.listen = { mode: 'utterance', wake: c.meta };
+      await mic.start('utterance', { fromSample: c.fromSample, noSpeechMs: c.noSpeechMs });
+      return true;
+    }),
     wakeWordShow: vi.fn(),
-    wakeWordCancel: vi.fn(),
+    wakeWordCancel: vi.fn(() => {
+      if (!o.realMic || !controller.listen?.wake) return;
+      controller.listen = null;
+      mic.cancel();
+    }),
     wakeWordQuiet: vi.fn(),
     stopSpeaking: vi.fn(),
     noteActivity: vi.fn(),
@@ -273,6 +322,100 @@ describe('WakeFeature: Test my echo, Record a test clip', () => {
     expect(c.wav.byteLength).toBe(44 + RATE * 2);
     expect(c.hits).toEqual([{ atSec: expect.closeTo(0.49, 1), keyword: 'HEY_JUDE', outcome: 'heard' }]);
     expect(s.toasts.at(-1)).toEqual(['Saved the test clip: x.wav', 'success']);
+  });
+});
+
+describe('WakeFeature: a test clip never outlives the microphone (PRIV: only when you press it)', () => {
+  it('turning "Hey Jade" off while recording cancels the clip: nothing is saved, even after it is turned on again', async () => {
+    const s = await started();
+    expect(s.f.recordClip(30)).toBe(true);
+    s.mic.feed(5000, s.clock);
+    s.settings.wake = { ...s.settings.wake, enabled: false };
+    s.f.applySettings(s.settings);
+    await s.flush();
+    expect(s.f.state).toBe('off');
+    expect(s.f._rec).toBeNull();
+    expect(s.toasts.some(([m]) => /test clip was cancelled/.test(m))).toBe(true);
+    await s.advance(600_000);
+    s.settings.wake = { ...s.settings.wake, enabled: true };
+    s.f.applySettings(s.settings);
+    await s.advance(50);
+    s.mic.feed(26_000, s.clock);
+    await s.flush();
+    expect(s.bridge.wake.saveClip).not.toHaveBeenCalled();
+    expect(s.f.recordClip(1)).toBe(true); // a new one can be started again
+  });
+
+  it('a PC lock while recording cancels it (no clip spliced from before and after the lock)', async () => {
+    const s = await started();
+    s.f.recordClip(30);
+    s.mic.feed(5000, s.clock);
+    s.f._step({ type: 'power', state: 'locked' });
+    await s.advance(3_600_000);
+    s.f._step({ type: 'power', state: 'unlocked' });
+    await s.advance(50);
+    s.mic.feed(30_000, s.clock);
+    await s.flush();
+    expect(s.bridge.wake.saveClip).not.toHaveBeenCalled();
+  });
+
+  it('a gap in the samples cancels it; so does "Cancel recording"; the chip never says "Recording" without the mic', async () => {
+    const s = await started();
+    s.f.recordClip(2);
+    s.mic.feed(500, s.clock);
+    s.mic.samplesSeen += 16000; // the device reopened: a second later
+    s.mic.feed(2000, s.clock);
+    await s.flush();
+    expect(s.bridge.wake.saveClip).not.toHaveBeenCalled();
+    expect(s.toasts.at(-1)[0]).toMatch(/interrupted/);
+    s.f.recordClip(2);
+    expect(s.f.cancelRecording()).toBe(true);
+    s.mic.feed(3000, s.clock);
+    await s.flush();
+    expect(s.bridge.wake.saveClip).not.toHaveBeenCalled();
+    expect(s.f.cancelRecording()).toBe(false);
+  });
+});
+
+describe('WakeFeature: the microphone is released within 1 s, also during a capture (PRIV-5, PRIV-6)', () => {
+  for (const [from, how] of [['listening', 'lock'], ['listening', 'off'], ['followup', 'lock'], ['followup', 'off']]) {
+    it(`${from} → ${how === 'lock' ? 'PC locked' : '"Hey Jade" off'}: the track ends at once, not after the Mic's 20 s idle time`, async () => {
+      const s = await started({ realMic: true });
+      s.mic.feed(1000, s.clock);
+      if (from === 'listening') s.f.adapter.manual({ from: 'hotkey' });
+      else s.f.adapter.idle({ turnId: 't1', voiceTurn: true, spoke: true, permissionPending: false });
+      await s.flush();
+      expect(s.f.state).toBe(from);
+      expect(s.mic.mode).toBe('utterance');
+      const track = s.mic.track();
+      expect(track.readyState).toBe('live');
+      if (how === 'lock') s.f._step({ type: 'power', state: 'locked' });
+      else {
+        s.settings.wake = { ...s.settings.wake, enabled: false };
+        s.f.applySettings(s.settings);
+      }
+      await s.advance(300);
+      expect(track.readyState).toBe('ended');
+      expect(s.mic.isOpen).toBe(false);
+      expect(s.controller.listen).toBeNull();
+    });
+  }
+});
+
+describe('WakeFeature: the controller hears when wake mode stops running', () => {
+  it('the transcript check: a PC lock stops the controller\'s hands-free at once (never plain hands-free while locked)', async () => {
+    const s = await started({ wake: { transcriptFallback: true } });
+    s.f._onEngine({ engine: 'error', detail: 'keeps stopping' });
+    await s.flush();
+    expect(s.f.machine.fallback).toBe(true);
+    expect(s.controller.adapter.fallback()).toBe(true);
+    s.controller.wakeWordChanged.mockClear();
+    s.f._step({ type: 'power', state: 'locked' });
+    expect(s.f.state).toBe('locked');
+    // the controller re-reads active()/fallback() now (its hands-free stops: no name, no lock → nothing)
+    expect(s.controller.wakeWordChanged).toHaveBeenCalled();
+    expect(s.controller.adapter.active()).toBe(false);
+    expect(s.controller.adapter.fallback()).toBe(false);
   });
 });
 

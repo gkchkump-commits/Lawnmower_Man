@@ -46,6 +46,8 @@ export function createMockWake(o) {
 
   // ---------------------------------------------------------------- the engine's status
   let engine = 'off';
+  /** like main's (electron/wake/power.js): the screen lock and sleep apart, with a sequence number */
+  const pw = { locked: false, suspended: false, seq: 0 };
   let restarts = 0;
   let gen = 0;
   let startTimer = 0;
@@ -63,6 +65,7 @@ export function createMockWake(o) {
       platform: 'browser',
       restarts,
       portGen: gen,
+      power: { ...pw },
       ...(e === 'ready' ? { loadMs: 120, cpuMsPerSecSpeech: 0 } : {}),
     };
   };
@@ -118,7 +121,12 @@ export function createMockWake(o) {
     /** @param {string} state */
     power(state) {
       record(['wake.power', state]);
-      deliver('power', { state });
+      if (state === 'locked') pw.locked = true;
+      else if (state === 'suspended') pw.suspended = true;
+      else if (state === 'resumed') pw.suspended = false;
+      else if (state === 'unlocked') Object.assign(pw, { locked: false, suspended: false });
+      pw.seq++;
+      deliver('power', { state, seq: pw.seq });
     },
     /** a pretend utility restart: a new port (like main after a crash) */
     restart() {

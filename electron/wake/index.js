@@ -38,6 +38,7 @@ const ZHEN_CHECK_WAIT_MS = 5000;
  * @property {number} [cpuMsPerSecSpeech]
  * @property {number} restarts
  * @property {number} portGen
+ * @property {{ locked: boolean, suspended: boolean, seq: number }} power  the PC's lock and sleep (a reloaded window starts from it)
  */
 
 /**
@@ -92,6 +93,10 @@ export function createWake(o) {
   /** @type {{ state: string, reason: string }|null} */
   let uiState = null;
   let stopped = false;
+
+  // --- the PC itself ---------------------------------------------------------------------------
+  // (first: the engine status carries its snapshot)
+  const power = watchPower(powerMonitor, (state, seq) => o.sendToAvatar('lm:wake:power', { state, seq }));
 
   const wake = () => settings.get().wake;
   const params = () => ({ sensitivity: wake().sensitivity, phrase: wake().phrase });
@@ -207,6 +212,7 @@ export function createWake(o) {
       platform: key,
       restarts: host.restarts,
       portGen: host.gen,
+      power: power.snapshot(),
     };
     if (host.loadMs !== undefined) st.loadMs = host.loadMs;
     if (typeof host.stats?.cpuMsPerSecSpeech === 'number' && host.stats.activeSec > 0) st.cpuMsPerSecSpeech = host.stats.cpuMsPerSecSpeech;
@@ -248,16 +254,17 @@ export function createWake(o) {
     }, wait);
   }
 
-  // --- the PC itself ---------------------------------------------------------------------------
-  const power = watchPower(powerMonitor, (state) => o.sendToAvatar('lm:wake:power', { state }));
-
   // --- IPC -------------------------------------------------------------------------------------
   const unregisterIpc = registerWakeIpc({
     ipcMain,
     isTrustedSender: o.isTrustedSender,
     log,
     service: {
-      status,
+      // a (re)loaded window asks first: the lock state is read from the OS then (§2.3)
+      status: () => {
+        power.refresh();
+        return status();
+      },
       requestPort: (/** @type {any} */ sender) => {
         // remembered even while the engine is off or loading: a later start hands it a port itself
         const r = host.connect(sender);

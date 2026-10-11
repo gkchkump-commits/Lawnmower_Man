@@ -330,6 +330,8 @@ async function boot() {
       wake?.echoTest();
     } else if (a === 'wakeRecord') {
       if (wake?.recordClip(30)) view.toast('Recording 30 s: say “Hey Jade” about 5 times, near and across the room.', 'info');
+    } else if (a === 'wakeRecordCancel') {
+      wake?.cancelRecording();
     } else if (a === 'wakeMicSettings') {
       Promise.resolve(bridge.wake?.openMicSettings?.()).then((r) => {
         if (r && r.ok === false) view.toast('Open Windows Settings › Privacy & security › Microphone and turn on “Let desktop apps access your microphone”.', 'info');

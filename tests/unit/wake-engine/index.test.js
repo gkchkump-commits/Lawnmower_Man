@@ -173,14 +173,36 @@ describe('createWake (contract §3.2, §7.1)', () => {
   });
 
   it('forwards lock/unlock/suspend/resume to the avatar; e2e.emitPower fakes them', async () => {
+    // (changed on purpose: 'resumed' comes about 1 s after the PC woke; each event has a seq)
     const { wake, pm, sent } = make({ zhen: true });
     pm.emit('lock-screen');
     pm.emit('resume');
+    const power = () => sent.filter((s) => s.ch === 'lm:wake:power').map((s) => s.p.state);
+    expect(power()).toEqual(['locked']);
+    await until(() => power().length === 2);
     wake.e2e.emitPower('unlocked');
-    expect(sent.filter((s) => s.ch === 'lm:wake:power').map((s) => s.p.state)).toEqual(['locked', 'resumed', 'unlocked']);
+    expect(power()).toEqual(['locked', 'resumed', 'unlocked']);
+    expect(sent.filter((s) => s.ch === 'lm:wake:power').map((s) => s.p.seq)).toEqual([1, 2, 3]);
     await wake.stop();
     pm.emit('lock-screen');
     expect(sent.filter((s) => s.ch === 'lm:wake:power')).toHaveLength(3);
+  });
+
+  it('the status carries the lock state, read from the OS when the window asks (a reload while locked starts locked)', async () => {
+    const { wake, pm, ipc } = make({ zhen: true });
+    pm.emit('lock-screen');
+    pm.emit('suspend');
+    pm.emit('resume'); // woke at the lock screen: still locked
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(wake.status().power).toEqual({ locked: true, suspended: false, seq: 3 });
+    await wake.stop();
+    // a fresh main (the app restarted at the lock screen): the OS says so at the first request
+    const b = make({ zhen: true });
+    b.pm.getSystemIdleState = () => 'locked';
+    const st = await b.ipc.handlers.get('lm:wake:status')({ sender: {} });
+    expect(st.power).toMatchObject({ locked: true, suspended: false });
+    await b.wake.stop();
+    void ipc;
   });
 
   it('sends status changes to the avatar (≤ 4/s, deduplicated)', async () => {

@@ -20,7 +20,8 @@
 //    7. barge-in: "Hey Jade, …" while she reads a long reply → her voice ducks (≥ 10 dB) → stops
 //       after the check; "stop" interrupts locally (nothing sent to Claude)
 //    8. hidden: the window hidden in the tray → "Hey Jade." → the window is shown again
-//    9. PC locked: the microphone track ends within 1 s; unlocked → waiting again
+//    9. PC locked: the microphone track ends within 1 s (also while she listens for a command);
+//       locked → asleep → woken at the lock screen stays locked; unlocked → waiting again
 //   10. the utility crashes → it restarts, the renderer takes the new port, a wake works again
 //   11. speech without her name, looped: the utility's CPU is reported (≤ 15 % of one core)
 //   12. no request left the PC, the utility has no TCP/UDP socket (Linux), no audio file was
@@ -699,9 +700,28 @@ try {
     measure('PC locked → microphone track ended (ms)', ms);
     check('9 · PC locked: the microphone is released within 1 s', !!ended && ms <= 1000, { ms, state: await wakeState() });
     check('9 · …and the state says locked', (await until(async () => (await wakeState()) === 'locked', 2000)) !== null, await wakeState());
+    // locked, then asleep, then woken at the lock screen: still locked, the mic stays closed
+    await e2e('emitPower', 'suspended');
+    await e2e('emitPower', 'resumed');
+    await sleep(1500);
+    const still = await page.evaluate(() => ({ wake: document.body.dataset.wake, open: !!window.__app.mic.isOpen, track: window.__app.mic._stream?.getAudioTracks?.()[0]?.readyState || 'none' }));
+    check('9 · locked → asleep → woken at the lock screen: still locked, the microphone stays closed', still.wake === 'locked' && !still.open, still);
     await e2e('emitPower', 'unlocked');
     const back = await until(async () => (await wakeState()) === 'waiting' && (await page.evaluate(() => window.__app.mic.isOpen)), 5000);
     check('9 · unlocked: listening for her name again', !!back, await wakeState());
+    // locked while she listens for a command (the hotkey): released within 1 s too, not 20 s later
+    await page.evaluate(() => window.__app.controller.toggleListening());
+    const listening = await until(async () => (await wakeState()) === 'listening', 3000, 20);
+    await page.evaluate(() => { window.__lockTrack = window.__app.mic._stream?.getAudioTracks?.()[0] || null; });
+    const tc = Date.now();
+    await e2e('emitPower', 'locked');
+    const ended2 = await until(() => page.evaluate(() => !window.__lockTrack || window.__lockTrack.readyState === 'ended'), 3000, 20);
+    const ms2 = Date.now() - tc;
+    measure('PC locked while listening for a command → microphone track ended (ms)', ms2);
+    check('9 · PC locked while she listens for a command: the microphone is released within 1 s', !!listening && !!ended2 && ms2 <= 1000, { listening: !!listening, ms: ms2, state: await wakeState() });
+    await e2e('emitPower', 'unlocked');
+    const back2 = await until(async () => (await wakeState()) === 'waiting' && (await page.evaluate(() => window.__app.mic.isOpen)), 5000);
+    check('9 · …and after unlocking she listens for her name again', !!back2, await wakeState());
   });
 
   await step('crash', async () => {

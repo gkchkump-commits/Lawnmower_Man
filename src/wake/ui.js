@@ -39,6 +39,8 @@ export const WAKE_TEXT = Object.freeze({
  */
 
 const ACTIVE = new Set(['attention', 'listening', 'followup', 'look', 'barge']);
+/** the states in which the mic is tapped for her name (a test clip can only record then) */
+const TAPPED = new Set(['waiting', 'busy', ...ACTIVE]);
 
 /**
  * The chip in the status bar. hidden while the wake word is off.
@@ -48,7 +50,7 @@ const ACTIVE = new Set(['attention', 'listening', 'followup', 'look', 'barge']);
 export function chipModel(m) {
   const s = m.state;
   const r = m.reason || '';
-  if (m.recordingSec != null) return { hidden: false, text: `Recording test clip ${clock(m.recordingSec)}`, title: 'Recording 30 s for a test clip (only on request, saved on this PC)', slashed: false, tone: 'on' };
+  if (m.recordingSec != null && TAPPED.has(s)) return { hidden: false, text: `Recording test clip ${clock(m.recordingSec)}`, title: 'Recording 30 s for a test clip (only on request, saved on this PC)', slashed: false, tone: 'on' };
   switch (s) {
     case 'off': return { hidden: true, text: '', title: '', slashed: false, tone: 'dim' };
     case 'unavailable':
@@ -152,6 +154,8 @@ export function infoModel(m) {
       if (!action) action = { id: 'wakeDownload', label: 'Download the extra wake-word model' };
     }
   }
+  // a test clip being recorded can be stopped without saving anything
+  if (m.recordingSec != null) action = { id: 'wakeRecordCancel', label: 'Cancel recording' };
   if (m.echoTesting) notes.push('Testing the echo: listen…');
   else if (m.echoResult) notes.push(m.echoResult);
   const nowPerf = m.nowPerf ?? 0;

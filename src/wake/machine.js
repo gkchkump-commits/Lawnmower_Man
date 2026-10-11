@@ -130,7 +130,12 @@ export class WakeMachine {
     this.s = { ...DEFAULT_SETTINGS, ...(o.settings || {}) };
     /** @type {Availability} */
     this.avail = { stt: 'off', sttReason: '', engine: 'off', engineDetail: '', device: null };
-    this.locked = false;
+    // the screen lock and sleep are separate: a PC that was locked, then slept, then woke is still
+    // locked until it is unlocked (a 'resumed' at the lock screen must not open the mic)
+    this.screenLocked = false;
+    this.suspended = false;
+    /** the newest power event (main's sequence number): an older status snapshot is ignored */
+    this._powerSeq = -1;
     this.hidden = false;
     /** 'closed' | 'opening' | 'open' | 'blocked' */
     this.mic = 'closed';
@@ -206,6 +211,11 @@ export class WakeMachine {
     return this._now() < this.strictUntil;
   }
 
+  /** The PC is locked or asleep: the mic stays released (§2.3, T15). */
+  get locked() {
+    return this.screenLocked || this.suspended;
+  }
+
   /** The earliest time step({ type: 'tick' }) has something to do (ms on the clock), or Infinity. */
   nextDeadline() {
     let t = Infinity;
@@ -236,10 +246,7 @@ export class WakeMachine {
     switch (input?.type) {
       case 'settings': this._settings(input, out, now); break;
       case 'availability': this.avail = { ...this.avail, ...pick(input, ['stt', 'sttReason', 'engine', 'engineDetail', 'device']) }; break;
-      case 'power':
-        if (input.state === 'locked' || input.state === 'suspended') this.locked = true;
-        else if (input.state === 'unlocked' || input.state === 'resumed') this.locked = false;
-        break;
+      case 'power': this._power(input); break;
       case 'visibility': this.hidden = input.visible === false; break;
       case 'micOk': this._micOk(input, out); break;
       case 'micError': this._micError(input, out, now); break;
@@ -289,6 +296,36 @@ export class WakeMachine {
     if (prevOn && !this.s.enabled && wasRunning) {
       if (this.s.sounds !== 'off') out.push({ type: 'earcon', name: 'micOff' });
       out.push({ type: 'announce', text: 'Microphone off' });
+    }
+  }
+
+  /**
+   * A power event ({ state, seq? }) or main's snapshot ({ snapshot: { locked, suspended, seq } },
+   * which a reloaded window starts from). 'resumed' ends only the sleep: a PC locked before it
+   * slept stays locked until 'unlocked' (T15, PRIV-6).
+   */
+  _power(input) {
+    const snap = input.snapshot;
+    if (snap && typeof snap === 'object') {
+      const seq = Number(snap.seq);
+      if (Number.isFinite(seq) && seq < this._powerSeq) return; // an event newer than it was applied
+      if (Number.isFinite(seq)) this._powerSeq = seq;
+      this.screenLocked = !!snap.locked;
+      this.suspended = !!snap.suspended;
+      return;
+    }
+    const seq = Number(input.seq);
+    if (Number.isFinite(seq)) {
+      if (seq < this._powerSeq) return;
+      this._powerSeq = seq;
+    }
+    switch (input.state) {
+      case 'locked': this.screenLocked = true; break;
+      case 'suspended': this.suspended = true; break;
+      case 'resumed': this.suspended = false; break;
+      // unlocked: someone signed in, so the PC is awake too (a lost 'resumed' must not keep it locked)
+      case 'unlocked': this.screenLocked = false; this.suspended = false; break;
+      default: break;
     }
   }
 
@@ -676,6 +713,9 @@ export class WakeMachine {
   _reconcile(out, now) {
     const prevState = this.state;
     const pre = this._computeBase(false);
+    // an episode ends before the mic is released: its capture is cancelled first, so the device
+    // can close at once instead of 20 s later (PRIV-5, PRIV-6: locked or off during a capture)
+    if (pre.state !== 'waiting' && this.active) this._endEpisode(out, pre.state);
     // the microphone: open for her name, released otherwise (§2.4)
     const wantMic = pre.state === 'waiting' && !pre.fallback;
     if (!wantMic) {

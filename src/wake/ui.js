@@ -16,7 +16,7 @@ export const WAKE_TEXT = Object.freeze({
   turnOn: 'Turn on',
   notNow: 'Not now',
   echoGood: 'Echo cancellation: good. I did not hear myself.',
-  echoBad: (/** @type {number} */ n) => `I heard my own voice ${n} time${n === 1 ? '' : 's'}. Saying my name while I talk may stop me by mistake; turn off Interrupt with her name, or use headphones.`,
+  echoBad: (/** @type {number} */ n) => `I heard my own voice ${n} time${n === 1 ? '' : 's'}. Saying my name while I talk may stop me by mistake: use headphones, or turn off “Interrupt with her name”.`,
 });
 
 /** @typedef {import('./machine.js').WakeUiState} WakeUiState */
@@ -30,7 +30,7 @@ export const WAKE_TEXT = Object.freeze({
  * @property {boolean} [fallback]
  * @property {'all'|'app'|'off'} [echo]
  * @property {{ zhen?: string, giga?: string, vad?: string }} [models]
- * @property {Array<{ at: number, outcome: string, reason: string, text: string, latencyMs?: number }>} [log]
+ * @property {Array<{ at: number, outcome: string, reason: string, text: string, latencyMs?: number, heardMs?: number }>} [log]
  * @property {number|null} [recordingSec]  seconds recorded of the test clip (null: not recording)
  * @property {string} [echoResult]          the last "Test my echo" result
  * @property {boolean} [echoTesting]
@@ -108,15 +108,19 @@ function clock(sec) {
 }
 
 /**
- * One line of the wake log: "09:41 woke · 280 ms", "09:43 ignored · sounded like “Hey Jude”".
- * @param {{ at: number, text: string, latencyMs?: number }} e  at: performance.now() ms
+ * One line of the wake log: "09:41 woke · 280 ms", "09:41 woke · 520 ms (noticed after 230 ms)",
+ * "09:43 ignored · sounded like “Hey Jude”". latencyMs: end of her name → listening (with the
+ * check); heardMs: end of her name → her eyes brighten (the laptop checklist's timing).
+ * @param {{ at: number, text: string, latencyMs?: number, heardMs?: number }} e  at: performance.now() ms
  * @param {number} nowPerf @param {number} nowWall
  */
 export function logLine(e, nowPerf, nowWall) {
   const d = new Date(nowWall - (nowPerf - e.at));
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm} ${e.text}${Number.isFinite(e.latencyMs) ? ` · ${e.latencyMs} ms` : ''}`;
+  const lat = Number.isFinite(e.latencyMs) ? ` · ${e.latencyMs} ms` : '';
+  const heard = Number.isFinite(e.heardMs) ? ` (noticed after ${e.heardMs} ms)` : '';
+  return `${hh}:${mm} ${e.text}${lat}${heard}`;
 }
 
 /**
@@ -148,10 +152,10 @@ export function infoModel(m) {
       } else {
         line = m.reason || c.text;
         // the engine kept stopping or could not start: start it again (a fresh restart budget);
-        // the details are in the app's log (tray › Open logs)
+        // the details are in the app's log (tray › Open logs folder)
         if (m.code === 'engine' && m.engine === 'error') {
           action = { id: 'wakeRestart', label: 'Retry' };
-          notes.push('Details: tray › Open logs');
+          notes.push('Details: tray › Open logs folder');
         }
       }
       break;

@@ -230,13 +230,17 @@ describe('WakeFeature: the mic, the port, the ring', () => {
     const cut = endAt + Math.round((WAKE.cutAfterKeywordMs / 1000) * RATE);
     expect(s.captures[0]).toMatchObject({ kind: 'command', fromSample: cut, noSpeechMs: WAKE.commandWindowMs });
     expect(s.posted.some((m) => m.t === 'reset')).toBe(true);
-    // the segment: ≤ 2.5 s before the keyword's end, to 150 ms after it
+    // the segment: ≤ 1.2 s before the keyword's end, to 150 ms after it (no emitAt here)
     expect(s.mic.ringCalls[0]).toEqual([endAt - Math.round((WAKE.segMaxBeforeEndMs / 1000) * RATE), cut]);
     await s.flush();
     expect(s.stt.transcribe).toHaveBeenCalledTimes(1);
     expect(s.f.state).toBe('listening');
     expect(s.player.cues).toHaveLength(1);
     expect(s.f.log.at(-1).text).toBe('woke');
+    // the log keeps both times: end of her name → noticed (the attention cue) and → listening
+    const e = s.f.log.at(-1);
+    expect(Number.isFinite(e.heardMs) && Number.isFinite(e.latencyMs)).toBe(true);
+    expect(e.heardMs).toBeLessThanOrEqual(e.latencyMs);
   });
 
   it('the segment is not in the ring yet: the check waits for the tap', async () => {

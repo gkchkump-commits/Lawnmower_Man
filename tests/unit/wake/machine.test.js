@@ -171,11 +171,11 @@ describe('T2-T5 a wake: attention, then listening or back to waiting', () => {
     h.ready();
     h.hit();
     h.advance(300);
-    const a = h.step({ type: 'verified', id: 'w1', ok: true, latencyMs: 280 });
+    const a = h.step({ type: 'verified', id: 'w1', ok: true, latencyMs: 280, heardMs: 230 });
     expect(h.m.state).toBe('listening');
     expect(of(a, 'earcon')).toEqual([{ type: 'earcon', name: 'wake' }]);
     expect(types(a)).toEqual(expect.arrayContaining(['noteActivity', 'showWindow', 'announce']));
-    expect(h.m.log.at(-1)).toMatchObject({ outcome: 'woke', latencyMs: 280 });
+    expect(h.m.log.at(-1)).toMatchObject({ outcome: 'woke', latencyMs: 280, heardMs: 230 });
   });
 
   it('a capture whose end never arrives is ended by the watchdog (never stuck "listening")', () => {

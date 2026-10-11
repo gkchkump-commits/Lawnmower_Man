@@ -193,7 +193,7 @@ export class WakeMachine {
     this.saidBlocked = false;
     this.dimAt = Infinity;
     this.dimOn = false;
-    /** @type {Array<{ at: number, outcome: string, reason: string, text: string, latencyMs?: number }>} */
+    /** @type {Array<{ at: number, outcome: string, reason: string, text: string, latencyMs?: number, heardMs?: number }>} */
     this.log = [];
     this._ids = 0;
     this._reported = '';
@@ -497,7 +497,7 @@ export class WakeMachine {
     a.kind = 'listening';
     a.windowEnd = Math.max(a.windowEnd, now + 1000);
     this.lastVoiceAt = now;
-    this._log(now, 'woke', 'woke', input.latencyMs);
+    this._log(now, 'woke', 'woke', input.latencyMs, input.heardMs);
     if (wasBarge) out.push({ type: 'stopSpeaking' }, { type: 'unduck', afterMs: WAKE.stopFadeMs, rampMs: 30 });
     else if (this.conv.turnRunning || this.conv.state === 'thinking') {
       // a reply that starts now is ducked while the command is captured (not muted: with no
@@ -869,10 +869,15 @@ export class WakeMachine {
     out.push({ type: 'hint', id, text: /** @type {any} */ (HINTS)[id] });
   }
 
-  /** @param {number} at @param {string} outcome @param {string} reason @param {number} [latencyMs] */
-  _log(at, outcome, reason, latencyMs) {
+  /**
+   * @param {number} at @param {string} outcome @param {string} reason
+   * @param {number} [latencyMs] end of her name → listening (stage 2 included)
+   * @param {number} [heardMs]   end of her name → noticed (the attention cue, LAT-1)
+   */
+  _log(at, outcome, reason, latencyMs, heardMs) {
     const entry = { at, outcome, reason, text: /** @type {any} */ (LOG_TEXT)[reason] || reason };
     if (Number.isFinite(latencyMs)) /** @type {any} */ (entry).latencyMs = Math.round(/** @type {number} */ (latencyMs));
+    if (Number.isFinite(heardMs)) /** @type {any} */ (entry).heardMs = Math.round(/** @type {number} */ (heardMs));
     this.log.push(entry);
     if (this.log.length > WAKE.logSize) this.log.splice(0, this.log.length - WAKE.logSize);
   }

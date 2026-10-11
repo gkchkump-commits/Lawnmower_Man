@@ -64,7 +64,7 @@ describe('infoModel: the drawer line, its action, the notes', () => {
   it('an engine that keeps stopping: Retry (main starts it again), where the log is, and no "basic model" note', () => {
     const i = infoModel({ state: 'unavailable', code: 'engine', engine: 'error', reason: 'The wake-word engine keeps stopping; see the log.', models: { zhen: 'missing', giga: 'ok' } });
     expect(i.action).toEqual({ id: 'wakeRestart', label: 'Retry' });
-    expect(i.notes).toContain('Details: tray › Open logs');
+    expect(i.notes).toContain('Details: tray › Open logs folder'); // the tray item's exact label
     expect(i.notes.join(' ')).not.toMatch(/basic wake-word model/);
     // running on B alone: the note and the download are shown
     const b = infoModel({ state: 'waiting', models: { zhen: 'missing', giga: 'ok' } });
@@ -111,6 +111,8 @@ describe('infoModel: the drawer line, its action, the notes', () => {
     ];
     expect(infoModel({ state: 'waiting', log, nowPerf, nowWall }).log).toEqual(['09:43 ignored · sounded like “Hey Jude”', '09:41 woke · 280 ms']);
     expect(logLine({ at: nowPerf, text: 'no command after 8 s' }, nowPerf, nowWall)).toBe('09:45 no command after 8 s');
+    // when she noticed her name (the attention cue) is shown apart from the check (LAT-1)
+    expect(logLine({ at: nowPerf, text: 'woke', latencyMs: 520, heardMs: 230 }, nowPerf, nowWall)).toBe('09:45 woke · 520 ms (noticed after 230 ms)');
   });
 });
 
@@ -120,6 +122,8 @@ describe('the texts', () => {
     expect(WAKE_TEXT.offer).toMatch(/nothing is recorded or sent anywhere until you say my name/);
     expect(WAKE_TEXT.echoBad(1)).toMatch(/^I heard my own voice 1 time\./);
     expect(WAKE_TEXT.echoBad(3)).toMatch(/3 times/);
+    // the setting is named as the drawer shows it, in quotes
+    expect(WAKE_TEXT.echoBad(1)).toContain('turn off “Interrupt with her name”.');
   });
 });
 

@@ -85,6 +85,8 @@ export class WakeFeature extends Emitter {
     this._fb = 0;
     /** @type {Map<string, number>} when each hit's keyword ended (performance.now) */
     this._hitEnd = new Map();
+    /** hit id → ms from the end of the keyword to its arrival here (the attention cue: LAT-1) */
+    this._hitHeard = new Map();
     this._sleepingAtHit = false;
     /** the hit that woke her from a doze (asleep again if it is rejected) */
     this._dozedAtHit = /** @type {any} */ (null);
@@ -297,6 +299,8 @@ export class WakeFeature extends Emitter {
     const m = this.mask.masked(startPerf, endPerf);
     if (endPerf != null) this._hitEnd.set(h.id, endPerf);
     if (this._hitEnd.size > 50) this._hitEnd.delete(this._hitEnd.keys().next().value);
+    if (endPerf != null) this._hitHeard.set(h.id, Math.max(0, this._now() - endPerf));
+    if (this._hitHeard.size > 50) this._hitHeard.delete(this._hitHeard.keys().next().value);
     this._sleepingAtHit = !!this.ctl.sleeping;
     // a stage-1 hit that the check then rejects must not keep her awake (the TV's "Hey Jake")
     if (!m && this._sleepingAtHit && !this.machine.active) this._dozedAtHit = h.id;
@@ -555,8 +559,9 @@ export class WakeFeature extends Emitter {
         if (v.ok && this.mask.echo(text)) v = { ok: false, reason: /** @type {any} */ ('echo') };
         const end = this._hitEnd.get(job.id);
         const latencyMs = end != null ? this._now() - end : undefined;
+        const heardMs = this._hitHeard.get(job.id);
         this._recOutcome(job.id, v.ok ? 'woke' : `ignored: ${/** @type {any} */ (v).reason}`);
-        this._step({ type: 'verified', id: job.id, ok: v.ok, reason: v.ok ? undefined : /** @type {any} */ (v).reason, latencyMs });
+        this._step({ type: 'verified', id: job.id, ok: v.ok, reason: v.ok ? undefined : /** @type {any} */ (v).reason, latencyMs, heardMs });
       }, (err) => {
         if (job.abort.signal.aborted || err?.name === 'AbortError') return;
         this._warn(`[wake] the check failed: ${err?.message || err}`);

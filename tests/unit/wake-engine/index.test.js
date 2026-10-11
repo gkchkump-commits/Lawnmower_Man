@@ -1,29 +1,16 @@
-import { afterAll, describe, it, expect, vi } from 'vitest';
-
-// every temporary folder made here is removed at the end (each holds tens of MB of stand-in files)
-const madeDirs = [];
-afterAll(() => {
-  for (const d of madeDirs) {
-    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* gone */ }
-  }
-});
-const mkdtemp = (/** @type {string} */ prefix) => {
-  const d = fs.mkdtempSync(prefix);
-  madeDirs.push(d);
-  return d;
-};
+import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createWake } from '../../../electron/wake/index.js';
 import { SettingsStore } from '../../../electron/settings.js';
 import { ADDON_FILES, MODEL_FILES } from '../../../electron/wake/config.js';
 import { fakeChannel, fakeUtilityProcess, fakeWebContents } from './fakes.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** A complete fake wake folder (pinned sizes) for linux-x64, optionally with the dev zh-en model. */
 function wakeDir({ zhen = false, broken = false } = {}) {
-  const dir = mkdtemp(path.join(os.tmpdir(), 'lm-wakeidx-'));
+  const dir = tmpDir('lm-wakeidx-');
   const put = (rel, size) => {
     const f = path.join(dir, ...rel.split('/'));
     fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -53,7 +40,7 @@ class FakeZhen extends EventEmitter {
 }
 
 function make({ enabled = true, zhen = false, broken = false, zhenMgr, env = {}, voice = {} } = {}) {
-  const userData = mkdtemp(path.join(os.tmpdir(), 'lm-wakeud-'));
+  const userData = tmpDir('lm-wakeud-');
   const settings = new SettingsStore({ dir: userData, platform: 'linux' });
   settings.load();
   if (enabled) settings.update({ wake: { enabled: true } });
@@ -132,7 +119,7 @@ describe('createWake (contract §3.2, §7.1)', () => {
     expect(wake.status().models.zhen).toBe('downloading');
     expect(wake.status().detail).toMatch(/basic wake-word model; the extra one is downloading/);
     // the download finished: a model A folder with the pinned sizes
-    const d = mkdtemp(path.join(os.tmpdir(), 'lm-zhen-'));
+    const d = tmpDir('lm-zhen-');
     for (const f of MODEL_FILES.zhen) fs.writeFileSync(path.join(d, f.name), Buffer.alloc(f.size));
     z.state = 'ok';
     z.emit('ready', d);

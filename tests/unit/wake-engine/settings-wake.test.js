@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_VERSION, SettingsStore, applyPatch, defaultSettings } from '../../../electron/settings.js';
 import { DEFAULT_SETTINGS as RENDERER_DEFAULTS } from '../../../src/app/settings-defaults.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const base = defaultSettings('win32');
 const patch = (p) => applyPatch(base, p);
@@ -45,7 +45,7 @@ describe('settings: the "Hey Jade" group (contract §4.1)', () => {
   });
 
   it('a settings file without the group loads with its defaults', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-set-wake-'));
+    const dir = tmpDir('lm-set-wake-');
     fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ version: 3, voice: { handsFree: true } }));
     const s = new SettingsStore({ dir, platform: 'linux' }).load();
     expect(s.wake).toEqual(DEFAULT_SETTINGS.wake);

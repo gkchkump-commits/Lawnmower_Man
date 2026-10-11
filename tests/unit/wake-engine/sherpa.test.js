@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createSpotter, createVad, loadAddon } from '../../../electron/wake/utility/sherpa.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** A fake raw addon: spotters that report one queued result, a VAD driven by the block's energy. */
 function fakeAddon() {
@@ -75,7 +75,7 @@ describe('the raw addon wrapper (utility/sherpa.js)', () => {
   });
 
   it('loadAddon() refuses a module without the functions it needs', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-addon-'));
+    const dir = tmpDir('lm-addon-');
     const f = path.join(dir, 'fake.cjs');
     fs.writeFileSync(f, 'module.exports = { createKeywordSpotter() {} };');
     expect(() => loadAddon(f)).toThrow(/lacks createKeywordStream/);

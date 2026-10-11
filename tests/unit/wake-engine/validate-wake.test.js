@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { CLIP_MAX_HITS, WAKE_UI_STATES, checkWav, validateNoArgs, validateSaveClip, validateUiState } from '../../../electron/wake/validate.js';
 import { clipStamp, saveTestClip, testClipsDir } from '../../../electron/wake/clips.js';
 import { micAccessStatus, openMicSettings } from '../../../electron/wake/mic-access.js';
 import { POWER_EVENTS, RESUME_SETTLE_MS, watchPower } from '../../../electron/wake/power.js';
 import { EventEmitter } from 'node:events';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** A RIFF/WAVE PCM16 file. */
 function wav({ seconds = 1, rate = 16000, channels = 1, bits = 16, format = 1, extraChunk = false } = {}) {
@@ -84,7 +84,7 @@ describe('wake IPC validation (contract §6.1)', () => {
 
 describe('test clips (contract §7.9)', () => {
   it('writes <Documents>/Lawnmower Man/Hey Jade tests/<stamp>.wav + .json and opens the folder', async () => {
-    const docs = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-docs-'));
+    const docs = tmpDir('lm-docs-');
     const openPath = vi.fn(async () => '');
     const now = () => new Date(2026, 9, 10, 9, 41, 12);
     const r = await saveTestClip({ wav: wav({ seconds: 3 }), hits: [{ atSec: 1, keyword: 'HEY_JADE', outcome: 'woke' }] }, { documentsDir: docs, now, openPath, appVersion: '0.5.0' });
@@ -101,7 +101,7 @@ describe('test clips (contract §7.9)', () => {
   });
 
   it('refuses a bad clip without writing anything', async () => {
-    const docs = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-docs-'));
+    const docs = tmpDir('lm-docs-');
     const r = await saveTestClip({ wav: wav({ rate: 44100 }) }, { documentsDir: docs });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/16 kHz/);

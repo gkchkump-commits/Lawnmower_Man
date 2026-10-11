@@ -3,10 +3,10 @@
 // you" section only while the wake word is on. Also the persona file ClaudeSession writes.
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { buildPersona, IDENTITY_RULES, PERSONA_VERSION, SPEECH_RULES, wakeSection } from '../../../electron/persona.js';
 import { ClaudeSession } from '../../../electron/claude-session.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 const MODES = /** @type {const} */ (['chat', 'assistant', 'agent']);
 const NOW = new Date(2026, 9, 10, 12);
@@ -150,7 +150,7 @@ describe('the persona file ClaudeSession writes (fake CLI)', () => {
 
   /** @param {'chat'|'assistant'|'agent'} mode @param {object} context */
   async function personaFileFor(mode, context) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lm-jade-'));
+    const dir = tmpDir('lm-jade-');
     const logFile = path.join(dir, 'argv.jsonl');
     const settings = { cliPath: '', model: '', effort: '', mode, workdir: path.join(dir, 'work'), persona: '', resumeLastSession: false, lastSessionId: '' };
     const live = { context };

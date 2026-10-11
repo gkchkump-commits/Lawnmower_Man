@@ -1,24 +1,11 @@
-import { afterAll, describe, it, expect } from 'vitest';
-
-// every temporary folder made here is removed at the end (each holds tens of MB of stand-in files)
-const madeDirs = [];
-afterAll(() => {
-  for (const d of madeDirs) {
-    try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* gone */ }
-  }
-});
-const mkdtemp = (/** @type {string} */ prefix) => {
-  const d = fs.mkdtempSync(prefix);
-  madeDirs.push(d);
-  return d;
-};
+import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ASSETS, FILES, GIGA_MODEL_CARD, extractTarBz2, fetchWake, parseArgs, readTar, selectAssets, sha256, tarBinary } from '../../../scripts/fetch-wake.mjs';
 import { ADDON_FILES, LAYOUT, MODEL_FILES } from '../../../electron/wake/config.js';
+import { tmpDir } from '../helpers/tmp.js';
 
 /** A minimal ustar writer (enough for the reader under test). */
 function makeTar(files, { prefixSplit = false } = {}) {
@@ -51,7 +38,7 @@ function makeTar(files, { prefixSplit = false } = {}) {
   return Buffer.concat(blocks);
 }
 
-const tmp = () => mkdtemp(path.join(os.tmpdir(), 'lm-wakefetch-'));
+const tmp = () => tmpDir('lm-wakefetch-');
 
 describe('fetch-wake: pins', () => {
   it('pins the contract §5.4 downloads', () => {

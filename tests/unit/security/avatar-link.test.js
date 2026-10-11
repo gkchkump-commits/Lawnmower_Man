@@ -115,7 +115,8 @@ describe('alerts', () => {
 
   it('describe: after the line, a hidden turn with the snapshot', () => {
     const { bridge, controller } = setup();
-    bridge.emit('alert', alert({ describe: true, snapshot: SNAP }));
+    const a = alert({ describe: true, snapshot: SNAP });
+    bridge.emit('alert', a);
     // the line is being said (busy), then the avatar is free again
     controller.setIdle(false);
     vi.advanceTimersByTime(2000);
@@ -124,7 +125,7 @@ describe('alerts', () => {
     vi.advanceTimersByTime(10);
     expect(controller.sent).toHaveLength(1);
     const [text, o] = controller.sent[0];
-    expect(text).toBe(describePrompt('front door camera', alert().at));
+    expect(text).toBe(describePrompt('front door camera', a.at)); // (the alert's own time: the clock moved on 2 s)
     expect(text).toMatch(/^\(Automatic note from the Lawnmower Man app, not typed by the user: the home security camera "front door camera" detected a person at \d\d:\d\d\. .*Do not guess who it is\.\)$/);
     expect(o).toEqual({ hidden: true, source: 'camera', note: DESCRIBE_NOTE, images: [SNAP] });
   });
